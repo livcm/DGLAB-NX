@@ -337,6 +337,31 @@ NRO 启动时会读取该文件并显示在界面上（`target: ...`）。存在
 注意：这里要的是设备的**真实 MAC 地址**。Android 版 LightBlue 能直接看到；
 iOS 显示的是系统为该 App 生成的随机标识（形如 UUID），那个不能用于连接。
 
+## 第七次实机结果（btm 的过滤器与直接连接）
+
+```
+stored scan param 0xFFFF rc=0 company=0x0553 pattern=000100000
+stored scan param 0x0001 rc=0 company=0x0553 pattern=ADDE00EFB
+stored smart device UUID rc=0 size=0x0 bytes=8F71DD81
+direct connect to EA:A8:AC:22:2C:18, scan skipped
+btdevConnectToGattServer rc=0x0005568F   (每次都是同一个错误)
+```
+
+三个结论：
+
+1. **btm 的 general 过滤器是 Nintendo 自己的 company ID `0x0553`**，所以这条扫描路径只能
+   匹配任天堂自家设备，永远匹配不到 DG-LAB。
+2. **btm 保存的 smart device UUID 是空的（`size=0`）**，也就是说系统没有为"智能设备
+   扫描"配置过滤器；传入我们自己的 UUID 也不会改变它实际使用的过滤器。
+3. **按地址直接连接被服务拒绝**：`btdevConnectToGattServer` 返回 `0x0005568F`
+   （module `0x8F`、description `0x2AB`），三次重试都是同一个错误，说明是服务直接拒绝
+   而不是超时。另外这个地址 `EA:A8:AC:22:2C:18` 的最高两位是 `11`，属于 BLE 的
+   **随机静态地址**，而 `btmu` 的连接接口只接受地址、不接受地址类型，也没有"设备未被
+   发现过"的处理路径。
+
+合起来看：**btm／bt 的扫描与连接接口是围绕任天堂自家设备生态设计的，不是通用 BLE
+外设接口。** 这解释了为什么"扫描开始成功、连接被拒、结果永远为空"。
+
 ## 这次要确认的开放问题
 
 以下都是实现时无法从 libnx 头文件确定、只能靠实机日志回答的问题：

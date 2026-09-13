@@ -84,6 +84,7 @@ typedef struct {
     u32 next_b0_ms;
     u32 notify_logged;
     u32 scan_polls;
+    u32 scan_events;
     u32 gatt_polls;
 } PocWorker;
 
@@ -513,7 +514,16 @@ static bool pocPollScanResults(PocWorker* w, const char* label, BtdrvAddress* ou
         if (pocStopRequested() || w->restart_scan)
             return false;
 
-        eventWait(&w->scan_event, 500ull * 1000000ull);
+        Result wait_rc = eventWait(&w->scan_event, 500ull * 1000000ull);
+
+        if (R_SUCCEEDED(wait_rc)) {
+            // The scan event firing at all is a separate signal from getting
+            // results: it says btm is running the scan.
+            w->scan_events++;
+
+            if (w->scan_events <= 5 || w->scan_events % 20 == 0)
+                pocLog("%s scan event #%u", label, w->scan_events);
+        }
 
         memset(results, 0, sizeof(results));
         rc = btdevGetBleScanResult(results, 10, &total);
@@ -542,6 +552,7 @@ static bool pocPollScanResults(PocWorker* w, const char* label, BtdrvAddress* ou
     }
 
     pocLog("%s scan timed out", label);
+    pocLog("%s scan summary: events=%u polls=%u devices=0", label, w->scan_events, w->scan_polls);
     return false;
 }
 
