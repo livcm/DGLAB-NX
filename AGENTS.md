@@ -439,25 +439,30 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
 1. 建立可编译的 Switch 项目骨架；
 2. 建立 Sysmodule；
 3. 建立 IPC；
-4. （在电脑上）实现 DG-LAB Protocol 并测试；
-5. Switch BLE Transport PoC：
-   1. BLE scan
-   2. GATT connect
-   3. service discovery
-   4. characteristic read/write/notify
-6. 蓝牙兼容性测试，确认 BLE 连接是否影响：
-   1. Joy-Con (L+R)
-   2. Pro Controller
-   3. “更改握法/顺序”界面搜索手柄
-   4. 蓝牙音频
-   5. 睡眠/唤醒
-7. 实现 DG-LAB Protocol 和 BLE Transport；
-8. 实现最小 NRO Client；
-9.  实现 Joy-Con / 六轴输入；
-10. 实现基础 UI；
-11. 实现 Overlay；
-12. 实现 Game Mod 示例；
-13. 完善文档、测试和错误处理。
+4. 实现可离线测试的 DG-LAB V3 协议层（编解码、强度状态机、会话层）并在电脑上测试；
+5. 实现 Wi-Fi + WebSocket 传输：Switch 作为 WebSocket 服务端，手机 DG-LAB App 通过
+   局域网接入（BLE 由手机负责，Switch 不直接持有蓝牙连接）：
+   1. WebSocket 握手与帧（平台无关 + 主机测试）；
+   2. DG-LAB Socket 协议消息（绑定、强度、波形、清空、心跳）；
+   3. Sysmodule 网络模块与 IPC 命令；
+   4. NRO 界面（连接信息、地址/二维码、测试按钮）；
+6. 把 V3 波形/强度数据接到 Socket 协议（复用协议层已有的波形编码）；
+7. 实现最小 NRO Client 的完整交互；
+8. 实现 Joy-Con / 六轴输入；
+9. 实现基础 UI；
+10. 实现 Overlay；
+11. 实现 Game Mod 示例；
+12. 完善文档、测试和错误处理。
+
+### 已搁置：主机侧 BLE 直连
+
+在 HOS 22.5.0 + AMS 1.11.2 上，Switch 后台 Sysmodule 直连 BLE 外设不可用
+（btm/bt 只面向任天堂自家设备；btdrv 的 BLE 事件载荷为空、GATT 客户端注册失败）。
+完整实测记录见 `docs/ble-poc.md`。
+
+这条线只有在需要时才会重启，且必须先做**只读逆向**：从固件提取 `bluetooth` 进程，
+确认失败点属于"结构/调用顺序变化"（改绑定即可，不需要补丁）还是"缺少通用 GATT
+central"（需要 exefs patch 或直接放弃）。不要在没有逆向结论前尝试补丁方案。
 
 除非任务明确要求，否则不要在核心功能尚未稳定前过早实现复杂 UI
 或大量 Game Mod。
