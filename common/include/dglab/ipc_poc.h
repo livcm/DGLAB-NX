@@ -57,13 +57,15 @@ enum {
     DglabPocAction_WriteIdleB0      = 2, ///< One harmless B0 write (no strength change).
     DglabPocAction_WriteZeroB0      = 3, ///< B0 that sets both channels to strength 0, so the device answers with B1.
     DglabPocAction_ReadBattery      = 4, ///< Read the battery characteristic.
-    DglabPocAction_ReconnectAruid0  = 5, ///< Retry the connection with AppletResourceUserId 0.
+    DglabPocAction_RestartSession   = 5, ///< Tear the session down and start over.
     DglabPocAction_ToggleAutoWrite  = 6, ///< Toggle the 100ms B0 keepalive while connected.
-    // Diagnostics for the case where the scan reports no usable result:
-    DglabPocAction_RescanNoFilter   = 7, ///< Clear the scan filters, disable filtering and scan again.
-    DglabPocAction_ConnectLastScan  = 8, ///< Connect to the last scanned address even if the advertisement did not match.
-    DglabPocAction_ProbeBtdev       = 9, ///< Run the scan through libnx's btdev (bt/btm:u) wrapper instead of btdrv.
-    DglabPocAction_ProbeGeneralScan = 10, ///< btdev general scan (manufacturer filter) as a control experiment.
+    // Scan variants. The BLE advertisement of the Coyote 3.0 carries the HID
+    // service UUID 0x1812, not the DG-LAB service 0x180C, so the scan filter
+    // decides whether the device can be found at all.
+    DglabPocAction_Rescan              = 7,  ///< Scan again with the default filter order.
+    DglabPocAction_ScanWithProtocolUuid = 8, ///< Scan filtered by 0x180C only.
+    DglabPocAction_ScanWithAdvertisedUuid = 9, ///< Scan filtered by 0x1812 only.
+    DglabPocAction_ScanWithGeneralFilter = 10, ///< Scan using btm's general (manufacturer data) filter.
 };
 
 typedef struct {
@@ -99,6 +101,7 @@ typedef struct {
     u32 mtu;
     u32 event_count;     ///< BLE events received from btdrv, any type.
     u32 last_event_type; ///< BtdrvBleEventType of the last event.
+    u32 filter_used;     ///< Service UUID the device was found with, 0 when not found.
 
     u8 address[6];
     u8 address_valid;

@@ -1,3 +1,22 @@
+// BLE transport proof of concept.
+//
+// This is the only place in the project that talks to the Switch Bluetooth
+// stack, and it runs in the sysmodule: the NRO never touches BLE itself.
+//
+// Transport choice:
+//   btdrv's own BLE event queue was the first attempt, but on HOS 22.5.0 it
+//   only ever produced empty payloads (documented in docs/ble-poc.md). libnx's
+//   btdev wrapper (bt + btm:u) works from this background process and hides the
+//   event/type plumbing, so the PoC uses btdev for everything.
+//
+// Scan filter:
+//   The Coyote 3.0 advertises the HID service UUID 0x1812. The DG-LAB service
+//   0x180C only exists after connecting, so a scan filtered by 0x180C finds
+//   nothing. The scan therefore tries 0x1812 first and falls back to 0x180C.
+//
+// Packet construction uses dglab/protocol/coyote_v3.h; this file only moves
+// bytes and reports what happened through the log ring the NRO reads.
+
 #include <dglab/transport/ble_poc.h>
 
 #include <dglab/protocol/coyote_v3.h>
@@ -16,85 +35,56 @@
 #define POC_LOG_CAPACITY 4096u
 #define POC_LOG_LINE_MAX 160u
 
-#define POC_EVENT_WAIT_MS 20u
-#define POC_STEP_TIMEOUT_MS 8000u
-#define POC_SCAN_TIMEOUT_MS 20000u
-#define POC_CONNECT_TIMEOUT_MS 15000u
+#define POC_SCAN_TIMEOUT_MS 12000u
+#define POC_CONNECT_TIMEOUT_MS 12000u
+#define POC_DISCOVER_TIMEOUT_MS 8000u
+#define POC_SCAN_ATTEMPTS 3u
 #define POC_B0_INTERVAL_MS 100u
-#define POC_SCAN_MAX_ATTEMPTS 3u
-#define POC_NOTIFY_LOG_LIMIT 6u
-#define POC_SCAN_LOG_LIMIT 6u
-#define POC_HEARTBEAT_MS 2000u
-#define POC_POLL_INTERVAL_MS 100u
-#define POC_POLL_LOG_EVERY 20u
-#define POC_BTDEV_PROBE_MS 15000u
+#define POC_NOTIFY_LOG_LIMIT 8u
+#define POC_SCAN_POLL_LOG_EVERY 10u
 
-// Advertisement data types from the Bluetooth SIG "Supplement to the Bluetooth
-// Core Specification". libnx documentation references a BtdrvAdType that is not
-// actually defined in the installed headers, so the two values used here are
-// written out instead of guessed from a libnx constant.
-#define POC_AD_TYPE_UUID16_COMPLETE 0x03u // Complete list of 16-bit Service Class UUIDs
-#define POC_AD_TYPE_NAME_SHORT 0x08u      // Shortened Local Name
-#define POC_AD_TYPE_NAME_COMPLETE 0x09u   // Complete Local Name
+// Service UUID the Coyote 3.0 puts into its advertisement. Reported by scanning
+// the device with a phone BLE scanner; see docs/ble-poc.md.
+#define POC_UUID16_ADVERTISED_SERVICE 0x1812u
 
 // ---------------------------------------------------------------------------
-// Worker state
+// State
 // ---------------------------------------------------------------------------
 
-enum {
-    PocStep_Init = 0,
-    PocStep_Scan,
-    PocStep_RegisterClient,
-    PocStep_Connect,
-    PocStep_DiscoverServices,
-    PocStep_DiscoverCharacteristics,
-    PocStep_Subscribe,
-    PocStep_BtdevProbe,
-    PocStep_BtdevGeneralProbe,
-    PocStep_Connected,
-    PocStep_Finished,
-};
-
-// Everything in here is owned by the worker thread and is reset at the start of
-// every run, so the thread handle deliberately does not live here. Shared state
-// lives in PocShared and is only touched under its mutex.
 typedef struct {
-    Event ble_event;
-    bool ble_event_active;
-    bool btdrv_ready;
-    bool hid_event_path;    // true once the LE HID event queue is used instead
-    bool tried_hid_path;
-    bool wait_error_logged;
+    bool ble_ready;
 
-    u32 step;
-    u32 step_start_ms;
-    u32 scan_attempts;
-    u32 next_b0_ms;
-    u32 last_heartbeat_ms;
-    u32 last_poll_ms;
-    u32 poll_count;
-    Result last_poll_rc[2];
+    Event scan_event;
+    Event conn_event;
+    Event discovery_event;
+    Event gatt_event;
+    bool scan_event_active;
+    bool conn_event_active;
+    bool discovery_event_active;
+    bool gatt_event_active;
 
     bool scanning;
     bool connected;
-    bool self_disconnect; // set when the PoC itself asks for the disconnect
-    bool client_registered;
-    bool have_service;
-    bool have_battery_service;
-    u8 client_if;
-    u32 conn_id;
+    u32 connection_handle;
     BtdrvAddress address;
-    u8 ble_addr_type;
-    BtdrvGattId service_id;
-    BtdrvGattId battery_service_id;
-    BtdrvGattId char_write_id;
-    BtdrvGattId char_notify_id;
-    BtdrvGattId char_battery_id;
+    u16 filter_used;
+    u16 forced_filter; // 0 = default order, otherwise scan only with this UUID
+    bool restart_scan;
+    u32 scan_attempts;
+
+    BtdevGattService service;             // 0x180C
+    BtdevGattCharacteristic char_write;   // 0x150A
+    BtdevGattCharacteristic char_notify;  // 0x150B
+    BtdevGattService battery_service;     // 0x180A
+    BtdevGattCharacteristic char_battery; // 0x1500
+    bool have_write;
+    bool have_notify;
+    bool have_battery;
+
+    u32 next_b0_ms;
     u32 notify_logged;
-    u32 scan_logged;
-    BtdrvAddress last_scan_address;
-    u8 last_scan_addr_type;
-    bool have_last_scan;
+    u32 scan_polls;
+    u32 gatt_polls;
 } PocWorker;
 
 typedef struct {
@@ -103,7 +93,7 @@ typedef struct {
     // Guarded by mutex.
     DglabPocStatus status;
     u32 log_write_offset;
-    u32 log_valid_from; // first offset that still holds current-run text
+    u32 log_valid_from;
     char log[POC_LOG_CAPACITY];
     Thread worker_thread;
     bool running;
@@ -131,16 +121,20 @@ static u32 pocNowMs(void)
     return (u32)(armTicksToNs(armGetSystemTick()) / 1000000ull);
 }
 
-static bool pocElapsed(u32 start_ms, u32 timeout_ms)
+static bool pocStopRequested(void)
 {
-    return (u32)(pocNowMs() - start_ms) >= timeout_ms;
+    bool stop;
+
+    mutexLock(&g_poc.mutex);
+    stop = g_poc.stop_requested;
+    mutexUnlock(&g_poc.mutex);
+
+    return stop;
 }
 
 // Builds the 128-bit form of a 16-bit Bluetooth UUID using the base UUID from
-// the official DG-LAB documentation. The full 16-byte form is used everywhere
-// because libnx does not document whether a 2-byte UUID in
-// BtdrvGattAttributeUuid is stored little or big endian, while the 16-byte form
-// is unambiguous.
+// the DG-LAB documentation. The full form avoids any question about the byte
+// order of the 2-byte form.
 static BtdrvGattAttributeUuid pocUuid16(u16 value)
 {
     static const u8 base[16] = {
@@ -156,28 +150,6 @@ static BtdrvGattAttributeUuid pocUuid16(u16 value)
     uuid.uuid[3] = (u8)(value & 0xFF);
 
     return uuid;
-}
-
-// Matches an attribute UUID against a 16-bit UUID. Both byte orders are
-// accepted for the 2-byte form, because the stack may report either encoding and
-// the PoC log records what was actually seen.
-static bool pocUuidIs16(const BtdrvGattAttributeUuid* uuid, u16 value)
-{
-    if (uuid->size == 0x2) {
-        u8 hi = (u8)(value >> 8);
-        u8 lo = (u8)(value & 0xFF);
-
-        return (uuid->uuid[0] == hi && uuid->uuid[1] == lo) ||
-               (uuid->uuid[0] == lo && uuid->uuid[1] == hi);
-    }
-
-    if (uuid->size == 0x10) {
-        BtdrvGattAttributeUuid want = pocUuid16(value);
-
-        return memcmp(uuid->uuid, want.uuid, 0x10) == 0;
-    }
-
-    return false;
 }
 
 static void pocHex(char* out, size_t out_size, const u8* data, size_t size)
@@ -268,9 +240,12 @@ static void pocFail(Result rc, const char* what)
     mutexUnlock(&g_poc.mutex);
 }
 
-// ---------------------------------------------------------------------------
-// Status counters
-// ---------------------------------------------------------------------------
+static void pocSetCharProperty(u8* field, u8 value)
+{
+    mutexLock(&g_poc.mutex);
+    *field = value;
+    mutexUnlock(&g_poc.mutex);
+}
 
 static void pocRecordScanResult(void)
 {
@@ -279,23 +254,13 @@ static void pocRecordScanResult(void)
     mutexUnlock(&g_poc.mutex);
 }
 
-// Counts every event the stack hands us, whatever its type. Without this a scan
-// that produces nothing looks the same as an event path that never fires.
-static void pocRecordEvent(BtdrvBleEventType type)
-{
-    mutexLock(&g_poc.mutex);
-    g_poc.status.event_count++;
-    g_poc.status.last_event_type = (u32)type;
-    mutexUnlock(&g_poc.mutex);
-}
-
-static void pocRecordMatch(const BtdrvAddress* addr, u8 ble_addr_type)
+static void pocRecordMatch(const BtdrvAddress* addr, u16 filter)
 {
     mutexLock(&g_poc.mutex);
     g_poc.status.scan_matched++;
     memcpy(g_poc.status.address, addr->address, sizeof(g_poc.status.address));
     g_poc.status.address_valid = 1;
-    g_poc.status.ble_addr_type = ble_addr_type;
+    g_poc.status.filter_used = filter;
     mutexUnlock(&g_poc.mutex);
 }
 
@@ -312,42 +277,47 @@ static void pocRecordB0Write(Result rc)
 }
 
 // ---------------------------------------------------------------------------
-// Worker: helpers
+// Event helper
 // ---------------------------------------------------------------------------
 
-static bool pocAdvertisementMatches(const BtdrvBleAdvertisement* ad)
+static bool pocAcquireEvent(Event* event, bool* active, const char* name,
+    Result (*acquire)(Event*))
 {
-    const char* name = DGLAB_COYOTE_V3_DEVICE_NAME;
-    const size_t name_len = 9; // "47L121000"
+    Result rc;
 
-    if (ad->size > sizeof(ad->data))
+    if (*active)
+        return true;
+
+    memset(event, 0, sizeof(*event));
+    rc = acquire(event);
+    pocLog("%s rc=0x%08X", name, (u32)rc);
+
+    if (R_FAILED(rc))
         return false;
 
-    if (ad->type == POC_AD_TYPE_NAME_COMPLETE && ad->size >= name_len &&
-        memcmp(ad->data, name, name_len) == 0)
-        return true;
+    *active = true;
+    return true;
+}
 
-    if (ad->type == POC_AD_TYPE_NAME_SHORT && ad->size >= 4 && memcmp(ad->data, name, 4) == 0)
-        return true;
+// ---------------------------------------------------------------------------
+// Outgoing B0 traffic
+// ---------------------------------------------------------------------------
 
-    if (ad->type == POC_AD_TYPE_UUID16_COMPLETE) {
-        for (u32 i = 0; i + 1 < ad->size; i += 2) {
-            u16 value = (u16)(ad->data[i] | (ad->data[i + 1] << 8));
-            u16 swapped = (u16)((value >> 8) | (value << 8));
+static Result pocWriteCharacteristic(BtdevGattCharacteristic* characteristic, const u8* data,
+    size_t size)
+{
+    Result rc;
 
-            if (value == DGLAB_COYOTE_V3_UUID16_SERVICE ||
-                swapped == DGLAB_COYOTE_V3_UUID16_SERVICE)
-                return true;
-        }
-    }
+    btdevGattCharacteristicSetValue(characteristic, data, size);
+    rc = btdevWriteGattCharacteristic(characteristic);
 
-    return false;
+    return rc;
 }
 
 // A B0 packet that changes nothing: no strength change, both channels idle. The
 // device discards invalid channel data, so this exercises the write path without
 // producing output.
-static void pocWriteIdleB0(void)
+static void pocWriteIdleB0(PocWorker* w)
 {
     DglabCoyoteV3B0 b0;
     u8 packet[DGLAB_COYOTE_V3_B0_SIZE];
@@ -357,9 +327,7 @@ static void pocWriteIdleB0(void)
     memset(&b0, 0, sizeof(b0));
     dglabCoyoteV3EncodeB0(&b0, packet);
 
-    rc = btdrvWriteGattCharacteristic(g_poc.worker.conn_id, true, &g_poc.worker.service_id,
-        &g_poc.worker.char_write_id, packet, sizeof(packet), BtdrvGattAuthReqType_None, false);
-
+    rc = pocWriteCharacteristic(&w->char_write, packet, sizeof(packet));
     pocRecordB0Write(rc);
 
     mutexLock(&g_poc.mutex);
@@ -374,7 +342,7 @@ static void pocWriteIdleB0(void)
 
 // Sets both channels to strength 0 with a non-zero sequence number, so the
 // device must answer with B1 carrying the same sequence number.
-static void pocWriteZeroB0(void)
+static void pocWriteZeroB0(PocWorker* w)
 {
     DglabCoyoteV3B0 b0;
     u8 packet[DGLAB_COYOTE_V3_B0_SIZE];
@@ -389,909 +357,544 @@ static void pocWriteZeroB0(void)
     dglabCoyoteV3EncodeB0(&b0, packet);
 
     pocLog("b0 zero write, sequence 1, expecting B1");
-    rc = btdrvWriteGattCharacteristic(g_poc.worker.conn_id, true, &g_poc.worker.service_id,
-        &g_poc.worker.char_write_id, packet, sizeof(packet), BtdrvGattAuthReqType_None, true);
+    rc = pocWriteCharacteristic(&w->char_write, packet, sizeof(packet));
     pocRecordB0Write(rc);
     pocLog("b0 zero write rc=0x%08X", (u32)rc);
 }
 
-static void pocReadBattery(void)
+static void pocReadBattery(PocWorker* w)
 {
-    PocWorker* w = &g_poc.worker;
     Result rc;
 
-    if (!w->have_battery_service || w->char_battery_id.uuid.size == 0) {
+    if (!w->have_battery) {
         pocLog("battery read skipped: characteristic not resolved");
         return;
     }
 
-    rc = btdrvReadGattCharacteristic(w->conn_id, true, &w->battery_service_id,
-        &w->char_battery_id, BtdrvGattAuthReqType_None);
+    rc = btdevReadGattCharacteristic(&w->char_battery);
     pocLog("battery read rc=0x%08X", (u32)rc);
 }
 
 // ---------------------------------------------------------------------------
-// Worker: step machine
+// GATT operation results (notifications, read responses)
 // ---------------------------------------------------------------------------
 
-static bool pocEnterStep(PocWorker* w, u32 step);
-static void pocHandleEvent(PocWorker* w, BtdrvBleEventType type, const BtdrvBleEventInfo* info);
-
-// Acquires the BLE event handle. btdrv exposes two independent event queues
-// that carry the same BtdrvBleEventInfo payloads, so the second one is used as
-// a fallback when the first one never delivers anything.
-static Result pocAcquireBleEvent(PocWorker* w, bool hid_path)
+static void pocHandleGattOperation(PocWorker* w, const BtdrvBleClientGattOperationInfo* op)
 {
-    Result rc;
-
-    if (w->ble_event_active) {
-        eventClose(&w->ble_event);
-        w->ble_event_active = false;
-    }
-
-    w->hid_event_path = hid_path;
-    w->wait_error_logged = false;
-
-    if (hid_path)
-        rc = btdrvRegisterBleHidEvent(&w->ble_event);
-    else
-        rc = btdrvInitializeBle(&w->ble_event);
-
-    if (R_SUCCEEDED(rc))
-        w->ble_event_active = true;
-
-    return rc;
-}
-
-// Waits for one BLE event. Returns false on timeout, which is the normal case
-// while a step is making no progress.
-static bool pocWaitEvent(BtdrvBleEventType* out_type, BtdrvBleEventInfo* out_info, u32 timeout_ms)
-{
-    PocWorker* w = &g_poc.worker;
-    Result rc;
-
-    if (!w->ble_event_active)
-        return false;
-
-    rc = eventWait(&w->ble_event, (u64)timeout_ms * 1000000ull);
-    if (R_FAILED(rc)) {
-        // Log the first failure so a broken handle is distinguishable from the
-        // ordinary timeout that a quiet event queue produces.
-        if (!w->wait_error_logged) {
-            w->wait_error_logged = true;
-            pocLog("eventWait first failure rc=0x%08X (timeout is normal)", (u32)rc);
-        }
-        return false;
-    }
-
-    memset(out_info, 0, sizeof(*out_info));
-
-    if (w->hid_event_path)
-        rc = btdrvGetLeHidEventInfo(out_info, sizeof(*out_info), out_type);
-    else
-        rc = btdrvGetBleManagedEventInfo(out_info, sizeof(*out_info), out_type);
-
-    if (R_FAILED(rc)) {
-        pocLog("ble event fetch rc=0x%08X", (u32)rc);
-        return false;
-    }
-
-    return true;
-}
-
-// Asks both event queues for data without waiting on the event handle, purely
-// for the log.
-//
-// This must never feed the state machine: on HOS 22.5.0 an empty queue answers
-// with success and type 0, which the state machine would read as a real
-// registration event. An earlier revision did exactly that and drove a bogus
-// connect to 00:00:00:00:00:00, so the results here are log-only.
-static void pocPollEventQueues(PocWorker* w)
-{
-    static const bool kHidQueue[2] = { false, true };
-
-    for (u32 i = 0; i < 2; i++) {
-        BtdrvBleEventInfo info;
-        BtdrvBleEventType type = 0;
-        Result rc;
-
-        memset(&info, 0, sizeof(info));
-
-        if (kHidQueue[i])
-            rc = btdrvGetLeHidEventInfo(&info, sizeof(info), &type);
-        else
-            rc = btdrvGetBleManagedEventInfo(&info, sizeof(info), &type);
-
-        bool log_now = R_SUCCEEDED(rc) || (w->poll_count % POC_POLL_LOG_EVERY) == 0 ||
-                       rc != w->last_poll_rc[i];
-
-        w->last_poll_rc[i] = rc;
-
-        if (log_now) {
-            pocLog("poll %s rc=0x%08X type=%u", kHidQueue[i] ? "lehid" : "managed", (u32)rc,
-                (u32)type);
-        }
-
-    }
-
-    w->poll_count++;
-}
-
-static void pocHandleCacheSave(PocWorker* w, const BtdrvBleEventInfo* info)
-{
-    u32 count = info->client_cache_save.count;
-
-    if (count > 10)
-        count = 10;
-
-    pocLog("event cache save result=0x%08X conn=%u count=%u", info->client_cache_save.result,
-        info->client_cache_save.conn_id, count);
-
-    for (u32 i = 0; i < count; i++) {
-        const BtdrvGattAttribute* attr = &info->client_cache_save.attr_list[i];
-        u16 value = (u16)(attr->id.uuid.uuid[0] | (attr->id.uuid.uuid[1] << 8));
-
-        if (attr->id.uuid.size != 0x2)
-            value = 0;
-
-        pocLog("  attr %u type=%u uuid_size=0x%X uuid16=0x%04X handle=0x%04X prop=0x%02X", i,
-            attr->type, attr->id.uuid.size, value, attr->handle, attr->property);
-
-        if (attr->type != BtdrvGattAttributeType_Service)
-            continue;
-
-        if (pocUuidIs16(&attr->id.uuid, DGLAB_COYOTE_V3_UUID16_SERVICE)) {
-            w->service_id = attr->id;
-            w->have_service = true;
-        } else if (pocUuidIs16(&attr->id.uuid, DGLAB_COYOTE_V3_UUID16_BATTERY_SERVICE)) {
-            w->battery_service_id = attr->id;
-            w->have_battery_service = true;
-        }
-    }
-
-    if (w->have_service) {
-        pocSetMilestone(DGLAB_POC_MILESTONE_SERVICE_FOUND);
-        pocLog("service 0x180C resolved");
-        pocEnterStep(w, PocStep_DiscoverCharacteristics);
-    }
-}
-
-static void pocHandleNotify(PocWorker* w, const BtdrvBleEventInfo* info)
-{
-    const BtdrvBleEventInfo* ev = info;
-    u32 size = ev->client_notify.size;
+    u32 size = (u32)op->size;
     char hex[3 * 20 + 1];
 
-    if (size > sizeof(ev->client_notify.data))
-        size = sizeof(ev->client_notify.data);
+    if (size > sizeof(op->data))
+        size = sizeof(op->data);
 
     if (size > 20)
         size = 20;
 
-    pocHex(hex, sizeof(hex), ev->client_notify.data, size);
-
     mutexLock(&g_poc.mutex);
     g_poc.status.notify_count++;
     g_poc.status.last_notify_size = size;
-    memcpy(g_poc.status.last_notify, ev->client_notify.data, size);
+
+    if (size)
+        memcpy(g_poc.status.last_notify, op->data, size);
+
     mutexUnlock(&g_poc.mutex);
 
     if (w->notify_logged < POC_NOTIFY_LOG_LIMIT) {
-        pocLog("notify type=%u size=%u data=%s", ev->client_notify.type, size, hex);
+        pocHex(hex, sizeof(hex), op->data, size);
+        pocLog("gatt op size=%u data=%s", size, hex);
         w->notify_logged++;
     }
 
-    if (size >= DGLAB_COYOTE_V3_B1_SIZE && ev->client_notify.data[0] == DGLAB_COYOTE_V3_HEADER_B1) {
+    if (size >= DGLAB_COYOTE_V3_B1_SIZE && op->data[0] == DGLAB_COYOTE_V3_HEADER_B1) {
         DglabCoyoteV3B1 b1;
 
-        pocSetMilestone(DGLAB_POC_MILESTONE_B1_RECEIVED);
-
-        if (dglabCoyoteV3DecodeB1(ev->client_notify.data, size, &b1)) {
+        if (dglabCoyoteV3DecodeB1(op->data, size, &b1)) {
+            pocSetMilestone(DGLAB_POC_MILESTONE_B1_RECEIVED);
             pocLog("B1 sequence=%u A=%u B=%u", b1.sequence, b1.strength_a, b1.strength_b);
         }
-    } else if (size >= 1 && pocUuidIs16(&ev->client_notify.char_uuid, DGLAB_COYOTE_V3_UUID16_CHAR_BATTERY)) {
+    } else if (size == 1 && w->have_battery) {
         mutexLock(&g_poc.mutex);
-        g_poc.status.battery_value = ev->client_notify.data[0];
+        g_poc.status.battery_value = op->data[0];
         g_poc.status.battery_valid = 1;
         g_poc.status.milestone |= DGLAB_POC_MILESTONE_BATTERY_READ;
         mutexUnlock(&g_poc.mutex);
-        pocLog("battery value=%u", ev->client_notify.data[0]);
+        pocLog("battery value=%u", op->data[0]);
     }
 }
 
-static void pocHandleScanResult(PocWorker* w, const BtdrvBleEventInfo* info)
+static void pocDrainGattOperations(PocWorker* w)
 {
-    const BtdrvBleEventInfo* ev = info;
-    u32 count = ev->scan_result.count;
+    for (u32 i = 0; i < 8; i++) {
+        BtdrvBleClientGattOperationInfo op;
+        Result rc;
 
-    if (count > 10)
-        count = 10;
+        memset(&op, 0, sizeof(op));
+        rc = btdevGetGattOperationResult(&op);
 
-    pocRecordScanResult();
-
-    // Remember the newest address even when the advertisement does not match,
-    // so the fallback action can still drive the GATT part of the PoC.
-    w->last_scan_address = ev->scan_result.address;
-    w->last_scan_addr_type = ev->scan_result.ble_addr_type;
-    w->have_last_scan = true;
-
-    if (w->scan_logged < POC_SCAN_LOG_LIMIT) {
-        pocLog("scan status=%u addr=%02X:%02X:%02X:%02X:%02X:%02X rssi=%d entries=%u",
-            ev->scan_result.status, ev->scan_result.address.address[0],
-            ev->scan_result.address.address[1], ev->scan_result.address.address[2],
-            ev->scan_result.address.address[3], ev->scan_result.address.address[4],
-            ev->scan_result.address.address[5], ev->scan_result.rssi, count);
-        w->scan_logged++;
-    }
-
-    for (u32 i = 0; i < count; i++) {
-        char hex[3 * 0x1D + 1];
-        u32 size = ev->scan_result.ad_list[i].size;
-
-        if (size > sizeof(ev->scan_result.ad_list[i].data))
-            size = sizeof(ev->scan_result.ad_list[i].data);
-
-        pocHex(hex, sizeof(hex), ev->scan_result.ad_list[i].data, size);
-
-        if (w->scan_logged < POC_SCAN_LOG_LIMIT) {
-            pocLog("  ad type=0x%02X size=%u data=%s", ev->scan_result.ad_list[i].type,
-                ev->scan_result.ad_list[i].size, hex);
-            w->scan_logged++;
+        if (R_FAILED(rc)) {
+            if (i == 0 && w->gatt_polls % 50 == 0)
+                pocLog("getGattOperationResult rc=0x%08X", (u32)rc);
+            break;
         }
 
-        if (!pocAdvertisementMatches(&ev->scan_result.ad_list[i]))
-            continue;
+        // An empty queue reports success with a zeroed payload, so only a
+        // payload with actual data is treated as an operation result.
+        if (op.size == 0)
+            break;
 
-        w->address = ev->scan_result.address;
-        w->ble_addr_type = ev->scan_result.ble_addr_type;
-        pocRecordMatch(&ev->scan_result.address, ev->scan_result.ble_addr_type);
-        pocSetMilestone(DGLAB_POC_MILESTONE_DEVICE_FOUND);
-        pocLog("coyote 3.0 found");
-        pocEnterStep(w, PocStep_RegisterClient);
+        pocHandleGattOperation(w, &op);
+    }
+
+    w->gatt_polls++;
+}
+
+// ---------------------------------------------------------------------------
+// Session steps
+// ---------------------------------------------------------------------------
+
+static void pocStopScan(PocWorker* w)
+{
+    if (!w->scanning)
         return;
-    }
+
+    Result rc = btdevStopBleScanSmartDevice();
+    pocLog("btdevStopBleScanSmartDevice rc=0x%08X", (u32)rc);
+    w->scanning = false;
 }
 
-static void pocHandleEvent(PocWorker* w, BtdrvBleEventType type, const BtdrvBleEventInfo* info)
+static bool pocScan_eventSetup(PocWorker* w)
 {
-    pocRecordEvent(type);
-
-    switch (type) {
-        case BtdrvBleEventType_ClientRegistration:
-            pocLog("event client registration result=0x%08X status=%u client_if=%u",
-                info->client_registration.result, info->client_registration.status,
-                info->client_registration.client_if);
-
-            if (info->client_registration.status == 1) {
-                w->client_if = info->client_registration.client_if;
-                w->client_registered = true;
-
-                mutexLock(&g_poc.mutex);
-                g_poc.status.client_if = w->client_if;
-                mutexUnlock(&g_poc.mutex);
-
-                pocSetMilestone(DGLAB_POC_MILESTONE_CLIENT_READY);
-                pocEnterStep(w, PocStep_Connect);
-            }
-            break;
-
-        case BtdrvBleEventType_ClientConnection:
-            pocLog("event client connection result=0x%08X status=%u conn_id=%u reason=%u",
-                info->client_connection.result, info->client_connection.status,
-                info->client_connection.conn_id, info->client_connection.reason);
-
-            if (info->client_connection.status == 0) {
-                w->conn_id = info->client_connection.conn_id;
-                w->connected = true;
-
-                mutexLock(&g_poc.mutex);
-                g_poc.status.conn_id = w->conn_id;
-                mutexUnlock(&g_poc.mutex);
-
-                pocSetMilestone(DGLAB_POC_MILESTONE_CONNECTED);
-                pocEnterStep(w, PocStep_DiscoverServices);
-            } else {
-                w->connected = false;
-
-                // A disconnect the PoC asked for (reconnect with another
-                // ARUID) is expected; anything else ends the run so the reason
-                // stays visible in the log.
-                if (w->self_disconnect) {
-                    w->self_disconnect = false;
-                } else {
-                    pocLog("disconnected by the device, ending run");
-                    w->step = PocStep_Finished;
-                }
-            }
-            break;
-
-        case BtdrvBleEventType_ClientCacheSave:
-            pocHandleCacheSave(w, info);
-            break;
-
-        case BtdrvBleEventType_ClientNotify:
-            pocHandleNotify(w, info);
-            break;
-
-        case BtdrvBleEventType_ClientConfigureMtu:
-            pocLog("event configure mtu result=0x%08X conn=%u mtu=%u", info->client_configure_mtu.result,
-                info->client_configure_mtu.conn_id, info->client_configure_mtu.mtu);
-
-            mutexLock(&g_poc.mutex);
-            g_poc.status.mtu = info->client_configure_mtu.mtu;
-            mutexUnlock(&g_poc.mutex);
-            break;
-
-        case BtdrvBleEventType_ScanResult:
-            pocHandleScanResult(w, info);
-            break;
-
-        default:
-            pocLog("event type=%u result=0x%08X", (u32)type, info->client_registration.result);
-            break;
-    }
+    return pocAcquireEvent(&w->scan_event, &w->scan_event_active, "btdevAcquireBleScanEvent",
+        btdevAcquireBleScanEvent);
 }
 
-static bool pocEnterStep(PocWorker* w, u32 step)
+// Waits for scan results and returns the first device seen.
+static bool pocPollScanResults(PocWorker* w, const char* label, BtdrvAddress* out)
 {
-    Result rc;
-
-    w->step = step;
-    w->step_start_ms = pocNowMs();
-
-    switch (step) {
-        case PocStep_Scan: {
-            rc = btdrvStartBleScan();
-            pocLog("btdrvStartBleScan rc=0x%08X", (u32)rc);
-
-            if (R_FAILED(rc)) {
-                pocFail(rc, "startBleScan");
-                return false;
-            }
-
-            w->scanning = true;
-            w->last_heartbeat_ms = pocNowMs();
-            pocSetMilestone(DGLAB_POC_MILESTONE_SCAN_STARTED);
-            pocSetState(DglabPocState_Scanning);
-            break;
-        }
-
-        case PocStep_RegisterClient: {
-            BtdrvGattAttributeUuid uuid = pocUuid16(DGLAB_COYOTE_V3_UUID16_SERVICE);
-
-            if (w->scanning) {
-                rc = btdrvStopBleScan();
-                pocLog("btdrvStopBleScan rc=0x%08X", (u32)rc);
-                w->scanning = false;
-            }
-
-            if (w->client_registered) {
-                pocLog("gatt client already registered, reconnecting");
-                pocEnterStep(w, PocStep_Connect);
-                break;
-            }
-
-            rc = btdrvRegisterGattClient(&uuid);
-            pocLog("btdrvRegisterGattClient rc=0x%08X", (u32)rc);
-
-            if (R_FAILED(rc)) {
-                pocFail(rc, "registerGattClient");
-                return false;
-            }
-
-            pocSetState(DglabPocState_Registering);
-            break;
-        }
-
-        case PocStep_Connect: {
-            rc = btdrvConnectGattServer(w->client_if, w->address, true, g_poc.aruid);
-            pocLog("btdrvConnectGattServer rc=0x%08X aruid_low=0x%08X", (u32)rc, (u32)g_poc.aruid);
-
-            if (R_FAILED(rc)) {
-                pocFail(rc, "connectGattServer");
-                return false;
-            }
-
-            pocSetState(DglabPocState_Connecting);
-            break;
-        }
-
-        case PocStep_DiscoverServices: {
-            BtdrvGattAttributeUuid service = pocUuid16(DGLAB_COYOTE_V3_UUID16_SERVICE);
-            BtdrvGattAttributeUuid battery = pocUuid16(DGLAB_COYOTE_V3_UUID16_BATTERY_SERVICE);
-
-            rc = btdrvGetGattService(w->conn_id, &service);
-            pocLog("btdrvGetGattService(0x180C) rc=0x%08X", (u32)rc);
-
-            Result battery_rc = btdrvGetGattService(w->conn_id, &battery);
-            pocLog("btdrvGetGattService(0x180A) rc=0x%08X", (u32)battery_rc);
-
-            if (R_FAILED(rc)) {
-                pocFail(rc, "getGattService");
-                return false;
-            }
-
-            pocSetState(DglabPocState_Discovering);
-            break;
-        }
-
-        case PocStep_DiscoverCharacteristics: {
-            BtdrvGattAttributeUuid filter_write = pocUuid16(DGLAB_COYOTE_V3_UUID16_CHAR_WRITE);
-            BtdrvGattAttributeUuid filter_notify = pocUuid16(DGLAB_COYOTE_V3_UUID16_CHAR_NOTIFY);
-            BtdrvGattAttributeUuid filter_battery = pocUuid16(DGLAB_COYOTE_V3_UUID16_CHAR_BATTERY);
-            u8 property = 0;
-
-            rc = btdrvGetGattFirstCharacteristic(w->conn_id, &w->service_id, true, &filter_write,
-                &property, &w->char_write_id);
-            pocLog("char 0x150A rc=0x%08X size=0x%X prop=0x%02X", (u32)rc, w->char_write_id.uuid.size,
-                property);
-
-            mutexLock(&g_poc.mutex);
-            g_poc.status.char_write_prop = property;
-            mutexUnlock(&g_poc.mutex);
-
-            property = 0;
-
-            Result notify_rc = btdrvGetGattFirstCharacteristic(w->conn_id, &w->service_id, true,
-                &filter_notify, &property, &w->char_notify_id);
-            pocLog("char 0x150B rc=0x%08X size=0x%X prop=0x%02X", (u32)notify_rc,
-                w->char_notify_id.uuid.size, property);
-
-            mutexLock(&g_poc.mutex);
-            g_poc.status.char_notify_prop = property;
-            mutexUnlock(&g_poc.mutex);
-
-            if (w->have_battery_service) {
-                property = 0;
-
-                Result battery_rc = btdrvGetGattFirstCharacteristic(w->conn_id,
-                    &w->battery_service_id, true, &filter_battery, &property, &w->char_battery_id);
-                pocLog("char 0x1500 rc=0x%08X size=0x%X prop=0x%02X", (u32)battery_rc,
-                    w->char_battery_id.uuid.size, property);
-
-                mutexLock(&g_poc.mutex);
-                g_poc.status.char_battery_prop = property;
-                mutexUnlock(&g_poc.mutex);
-            }
-
-            if (R_FAILED(rc) || w->char_write_id.uuid.size == 0) {
-                pocFail(rc, "characteristic 0x150A");
-                return false;
-            }
-
-            if (R_FAILED(notify_rc) || w->char_notify_id.uuid.size == 0) {
-                pocFail(notify_rc, "characteristic 0x150B");
-                return false;
-            }
-
-            pocSetMilestone(DGLAB_POC_MILESTONE_CHARS_FOUND);
-            pocEnterStep(w, PocStep_Subscribe);
-            break;
-        }
-
-        case PocStep_Subscribe: {
-            rc = btdrvRegisterGattNotification(w->conn_id, true, &w->service_id, &w->char_notify_id);
-            pocLog("btdrvRegisterGattNotification rc=0x%08X", (u32)rc);
-
-            if (R_FAILED(rc)) {
-                pocFail(rc, "registerNotification");
-                return false;
-            }
-
-            pocSetMilestone(DGLAB_POC_MILESTONE_NOTIFY_ON);
-            pocSetState(DglabPocState_Ready);
-            pocLog("session ready, auto_write=%u", g_poc.auto_write ? 1u : 0u);
-
-            w->next_b0_ms = pocNowMs();
-            w->step = PocStep_Connected;
-            break;
-        }
-
-        default:
-            break;
-    }
-
-    return true;
-}
-
-// Collects scan results for the probe duration and logs every entry.
-static u32 pocCollectScanResults(const char* label, Event* scan_event, bool have_event)
-{
-    u32 results_seen = 0;
-    u32 deadline = pocNowMs() + POC_BTDEV_PROBE_MS;
+    u32 deadline = pocNowMs() + POC_SCAN_TIMEOUT_MS;
 
     while (pocNowMs() < deadline) {
         BtdrvBleScanResult results[10];
         u8 total = 0;
-        bool stop;
+        Result rc;
 
-        mutexLock(&g_poc.mutex);
-        stop = g_poc.stop_requested;
-        mutexUnlock(&g_poc.mutex);
+        if (pocStopRequested() || w->restart_scan)
+            return false;
 
-        if (stop)
-            break;
-
-        if (have_event)
-            eventWait(scan_event, 500ull * 1000000ull);
-        else
-            svcSleepThread(500000000ull);
+        eventWait(&w->scan_event, 500ull * 1000000ull);
 
         memset(results, 0, sizeof(results));
+        rc = btdevGetBleScanResult(results, 10, &total);
 
-        Result rc = btdevGetBleScanResult(results, 10, &total);
-        pocLog("getBleScanResult(%s) rc=0x%08X count=%u", label, (u32)rc, total);
+        w->scan_polls++;
+
+        if (R_FAILED(rc) || total == 0) {
+            if (w->scan_polls % POC_SCAN_POLL_LOG_EVERY == 0)
+                pocLog("%s scan poll %u rc=0x%08X total=%u", label, w->scan_polls, (u32)rc,
+                    total);
+            continue;
+        }
+
+        pocRecordScanResult();
+        pocLog("%s scan found %u device(s)", label, total);
 
         for (u8 i = 0; i < total && i < 10; i++) {
-            pocLog("  %s scan %u addr=%02X:%02X:%02X:%02X:%02X:%02X count=%d", label, i,
+            pocLog("  %s scan %u addr=%02X:%02X:%02X:%02X:%02X:%02X", label, i,
                 results[i].addr.address[0], results[i].addr.address[1],
                 results[i].addr.address[2], results[i].addr.address[3],
-                results[i].addr.address[4], results[i].addr.address[5], results[i].count);
-            results_seen++;
+                results[i].addr.address[4], results[i].addr.address[5]);
         }
+
+        *out = results[0].addr;
+        return true;
     }
 
-    return results_seen;
+    pocLog("%s scan timed out", label);
+    return false;
 }
 
-// Diagnostic: run the same scan through libnx's btdev wrapper (bt + btm:u)
-// instead of btdrv.
-//
-// The btdrv event queue produced only empty payloads on HOS 22.5.0, so this
-// decides whether the higher level service can be used from the sysmodule. The
-// result also tells us whether the ARUID that bt/btm:u pass internally (0 in a
-// background process) is accepted.
-static void pocRunBtdevProbe(PocWorker* w)
+// Scans filtered by one service UUID. 0x1812 is what the device advertises.
+static bool pocScanSmart(PocWorker* w, u16 filter_uuid, BtdrvAddress* out)
 {
-    BtdrvGattAttributeUuid service = pocUuid16(DGLAB_COYOTE_V3_UUID16_SERVICE);
-    Event scan_event;
+    BtdrvGattAttributeUuid filter = pocUuid16(filter_uuid);
     Result rc;
-    u32 results_seen;
 
-    (void)w;
+    if (!pocScan_eventSetup(w))
+        return false;
 
-    pocLog("btdev probe (smart device 0x180C): btInitialize + btmuInitialize");
-    rc = btdevInitialize();
-    pocLog("btdevInitialize rc=0x%08X", (u32)rc);
+    rc = btdevStartBleScanSmartDevice(&filter);
+    pocLog("btdevStartBleScanSmartDevice(0x%04X) rc=0x%08X", filter_uuid, (u32)rc);
 
-    if (R_FAILED(rc)) {
-        pocLog("btdev probe: bt/btm:u unusable from this process");
-        return;
-    }
+    if (R_FAILED(rc))
+        return false;
 
-    memset(&scan_event, 0, sizeof(scan_event));
+    w->scanning = true;
+    w->scan_polls = 0;
+    pocSetMilestone(DGLAB_POC_MILESTONE_SCAN_STARTED);
+    pocSetState(DglabPocState_Scanning);
 
-    Result event_rc = btdevAcquireBleScanEvent(&scan_event);
-    pocLog("btdevAcquireBleScanEvent rc=0x%08X", (u32)event_rc);
+    char label[32];
+    snprintf(label, sizeof(label), "0x%04X", filter_uuid);
 
-    rc = btdevStartBleScanSmartDevice(&service);
-    pocLog("btdevStartBleScanSmartDevice(0x180C) rc=0x%08X", (u32)rc);
+    bool found = pocPollScanResults(w, label, out);
 
-    results_seen = pocCollectScanResults("smart", &scan_event, R_SUCCEEDED(event_rc));
-
-    rc = btdevStopBleScanSmartDevice();
-    pocLog("btdevStopBleScanSmartDevice rc=0x%08X", (u32)rc);
-
-    if (R_SUCCEEDED(event_rc))
-        eventClose(&scan_event);
-
-    btdevExit();
-
-    pocLog("btdev probe: done, %u results", results_seen);
+    pocStopScan(w);
+    return found;
 }
 
-// Control experiment for the smart device scan: btm's "general" scan uses a
-// manufacturer filter instead of a service UUID. If this one reports devices
-// while the smart device scan reports none, then the scan plumbing works and
-// only the filter is the problem (the Coyote may not advertise 0x180C).
-static void pocRunGeneralScanProbe(PocWorker* w)
+// Control experiment: btm's general scan uses a manufacturer data filter.
+static bool pocScanGeneral(PocWorker* w, BtdrvAddress* out)
 {
     BtdrvBleAdvertisePacketParameter param;
-    Event scan_event;
     Result rc;
-    u32 results_seen;
 
-    (void)w;
-
-    pocLog("btdev probe (general scan): btInitialize + btmuInitialize");
-    rc = btdevInitialize();
-    pocLog("btdevInitialize rc=0x%08X", (u32)rc);
-
-    if (R_FAILED(rc)) {
-        pocLog("btdev general probe: bt/btm:u unusable from this process");
-        return;
-    }
+    if (!pocScan_eventSetup(w))
+        return false;
 
     memset(&param, 0, sizeof(param));
-
     Result param_rc = btdevGetBleScanParameter(0xFFFFu, &param);
     pocLog("btdevGetBleScanParameter(0xFFFF) rc=0x%08X company=0x%04X pattern=%02X%02X%02X%02X%02X%02X",
         (u32)param_rc, param.company_id, param.pattern_data[0], param.pattern_data[1],
         param.pattern_data[2], param.pattern_data[3], param.pattern_data[4],
         param.pattern_data[5]);
 
-    memset(&scan_event, 0, sizeof(scan_event));
-
-    Result event_rc = btdevAcquireBleScanEvent(&scan_event);
-    pocLog("btdevAcquireBleScanEvent rc=0x%08X", (u32)event_rc);
-
     rc = btdevStartBleScanGeneral(param);
     pocLog("btdevStartBleScanGeneral rc=0x%08X", (u32)rc);
 
-    results_seen = pocCollectScanResults("general", &scan_event, R_SUCCEEDED(event_rc));
+    if (R_FAILED(rc))
+        return false;
+
+    w->scan_polls = 0;
+    pocSetMilestone(DGLAB_POC_MILESTONE_SCAN_STARTED);
+    pocSetState(DglabPocState_Scanning);
+
+    bool found = pocPollScanResults(w, "general", out);
 
     rc = btdevStopBleScanGeneral();
     pocLog("btdevStopBleScanGeneral rc=0x%08X", (u32)rc);
 
-    if (R_SUCCEEDED(event_rc))
-        eventClose(&scan_event);
-
-    btdevExit();
-
-    pocLog("btdev general probe: done, %u results", results_seen);
+    return found;
 }
 
-static void pocHandlePendingAction(PocWorker* w)
+static bool pocScanAny(PocWorker* w, BtdrvAddress* out)
 {
-    u32 action;
+    if (w->forced_filter == POC_UUID16_ADVERTISED_SERVICE)
+        return pocScanSmart(w, POC_UUID16_ADVERTISED_SERVICE, out);
 
-    mutexLock(&g_poc.mutex);
-    action = g_poc.pending_action;
-    g_poc.pending_action = 0;
-    mutexUnlock(&g_poc.mutex);
+    if (w->forced_filter == DGLAB_COYOTE_V3_UUID16_SERVICE)
+        return pocScanSmart(w, DGLAB_COYOTE_V3_UUID16_SERVICE, out);
 
+    if (w->forced_filter == 0xFFFFu)
+        return pocScanGeneral(w, out);
+
+    // Default order: the advertised UUID first, because the DG-LAB service only
+    // exists after connecting and cannot be used as a scan filter.
+    if (pocScanSmart(w, POC_UUID16_ADVERTISED_SERVICE, out)) {
+        w->filter_used = POC_UUID16_ADVERTISED_SERVICE;
+        return true;
+    }
+
+    if (pocStopRequested() || w->restart_scan)
+        return false;
+
+    pocLog("falling back to the protocol service UUID 0x180C for scanning");
+
+    if (pocScanSmart(w, DGLAB_COYOTE_V3_UUID16_SERVICE, out)) {
+        w->filter_used = DGLAB_COYOTE_V3_UUID16_SERVICE;
+        return true;
+    }
+
+    return false;
+}
+
+static bool pocConnect(PocWorker* w)
+{
+    Result rc;
+    u32 deadline;
+
+    if (!pocAcquireEvent(&w->conn_event, &w->conn_event_active,
+            "btdevAcquireBleConnectionStateChangedEvent",
+            btdevAcquireBleConnectionStateChangedEvent))
+        return false;
+
+    rc = btdevConnectToGattServer(w->address);
+    pocLog("btdevConnectToGattServer rc=0x%08X", (u32)rc);
+
+    if (R_FAILED(rc))
+        return false;
+
+    pocSetState(DglabPocState_Connecting);
+    deadline = pocNowMs() + POC_CONNECT_TIMEOUT_MS;
+
+    while (pocNowMs() < deadline) {
+        BtdrvBleConnectionInfo info[4];
+        u8 total = 0;
+
+        if (pocStopRequested())
+            return false;
+
+        eventWait(&w->conn_event, 500ull * 1000000ull);
+
+        memset(info, 0, sizeof(info));
+        rc = btdevGetBleConnectionInfoList(info, 4, &total);
+
+        if (R_FAILED(rc))
+            continue;
+
+        for (u8 i = 0; i < total && i < 4; i++) {
+            pocLog("conn %u handle=%u addr=%02X:%02X:%02X:%02X:%02X:%02X", i,
+                info[i].connection_handle, info[i].addr.address[0], info[i].addr.address[1],
+                info[i].addr.address[2], info[i].addr.address[3], info[i].addr.address[4],
+                info[i].addr.address[5]);
+
+            if (memcmp(info[i].addr.address, w->address.address, 6) != 0)
+                continue;
+
+            w->connection_handle = info[i].connection_handle;
+            w->connected = true;
+
+            mutexLock(&g_poc.mutex);
+            g_poc.status.conn_id = w->connection_handle;
+            mutexUnlock(&g_poc.mutex);
+
+            pocSetMilestone(DGLAB_POC_MILESTONE_CONNECTED);
+            return true;
+        }
+    }
+
+    pocLog("connect timed out");
+    return false;
+}
+
+static void pocDisconnect(PocWorker* w)
+{
+    if (!w->connected)
+        return;
+
+    Result rc = btdevDisconnectFromGattServer(w->connection_handle);
+    pocLog("btdevDisconnectFromGattServer rc=0x%08X", (u32)rc);
+    w->connected = false;
+}
+
+static bool pocDiscover(PocWorker* w)
+{
+    BtdrvGattAttributeUuid service_uuid = pocUuid16(DGLAB_COYOTE_V3_UUID16_SERVICE);
+    BtdrvGattAttributeUuid write_uuid = pocUuid16(DGLAB_COYOTE_V3_UUID16_CHAR_WRITE);
+    BtdrvGattAttributeUuid notify_uuid = pocUuid16(DGLAB_COYOTE_V3_UUID16_CHAR_NOTIFY);
+    bool flag = false;
+    Result rc = 0;
+
+    pocSetState(DglabPocState_Discovering);
+
+    if (!pocAcquireEvent(&w->discovery_event, &w->discovery_event_active,
+            "btdevAcquireBleServiceDiscoveryEvent", btdevAcquireBleServiceDiscoveryEvent))
+        return false;
+
+    u32 deadline = pocNowMs() + POC_DISCOVER_TIMEOUT_MS;
+
+    while (pocNowMs() < deadline && !flag) {
+        if (pocStopRequested())
+            return false;
+
+        eventWait(&w->discovery_event, 500ull * 1000000ull);
+
+        rc = btdevGetGattService(w->connection_handle, &service_uuid, &w->service, &flag);
+        pocLog("btdevGetGattService(0x180C) rc=0x%08X flag=%u", (u32)rc, flag);
+    }
+
+    if (!flag) {
+        pocFail(rc, "service 0x180C");
+        return false;
+    }
+
+    pocSetMilestone(DGLAB_POC_MILESTONE_SERVICE_FOUND);
+
+    bool write_flag = false;
+    bool notify_flag = false;
+
+    rc = btdevGattServiceGetCharacteristic(&w->service, &write_uuid, &w->char_write, &write_flag);
+    pocLog("char 0x150A rc=0x%08X flag=%u prop=0x%02X", (u32)rc, write_flag,
+        btdevGattCharacteristicGetProperties(&w->char_write));
+
+    Result notify_rc = btdevGattServiceGetCharacteristic(&w->service, &notify_uuid,
+        &w->char_notify, &notify_flag);
+    pocLog("char 0x150B rc=0x%08X flag=%u prop=0x%02X", (u32)notify_rc, notify_flag,
+        btdevGattCharacteristicGetProperties(&w->char_notify));
+
+    if (!write_flag || !notify_flag) {
+        pocFail(R_FAILED(rc) ? rc : notify_rc, "characteristics");
+        return false;
+    }
+
+    w->have_write = true;
+    w->have_notify = true;
+    pocSetCharProperty(&g_poc.status.char_write_prop,
+        btdevGattCharacteristicGetProperties(&w->char_write));
+    pocSetCharProperty(&g_poc.status.char_notify_prop,
+        btdevGattCharacteristicGetProperties(&w->char_notify));
+    pocSetMilestone(DGLAB_POC_MILESTONE_CHARS_FOUND);
+
+    // The battery characteristic is optional: it is only needed for the read test.
+    BtdrvGattAttributeUuid battery_service_uuid = pocUuid16(DGLAB_COYOTE_V3_UUID16_BATTERY_SERVICE);
+    bool battery_service_flag = false;
+
+    rc = btdevGetGattService(w->connection_handle, &battery_service_uuid, &w->battery_service,
+        &battery_service_flag);
+    pocLog("btdevGetGattService(0x180A) rc=0x%08X flag=%u", (u32)rc, battery_service_flag);
+
+    if (battery_service_flag) {
+        BtdrvGattAttributeUuid battery_uuid = pocUuid16(DGLAB_COYOTE_V3_UUID16_CHAR_BATTERY);
+        bool battery_flag = false;
+
+        rc = btdevGattServiceGetCharacteristic(&w->battery_service, &battery_uuid,
+            &w->char_battery, &battery_flag);
+        pocLog("char 0x1500 rc=0x%08X flag=%u prop=0x%02X", (u32)rc, battery_flag,
+            btdevGattCharacteristicGetProperties(&w->char_battery));
+
+        w->have_battery = battery_flag;
+        pocSetCharProperty(&g_poc.status.char_battery_prop,
+            btdevGattCharacteristicGetProperties(&w->char_battery));
+    }
+
+    return true;
+}
+
+static bool pocSubscribe(PocWorker* w)
+{
+    Result rc = btdevEnableGattCharacteristicNotification(&w->char_notify, true);
+    pocLog("btdevEnableGattCharacteristicNotification rc=0x%08X", (u32)rc);
+
+    if (R_FAILED(rc)) {
+        pocFail(rc, "enable notification");
+        return false;
+    }
+
+    if (!pocAcquireEvent(&w->gatt_event, &w->gatt_event_active,
+            "btdevAcquireBleGattOperationEvent", btdevAcquireBleGattOperationEvent))
+        return false;
+
+    pocSetMilestone(DGLAB_POC_MILESTONE_NOTIFY_ON);
+    pocSetState(DglabPocState_Ready);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
+// Returns true when the session should go back to scanning.
+static bool pocHandleAction(PocWorker* w, u32 action)
+{
     switch (action) {
         case DglabPocAction_WriteIdleB0:
-            if (!w->connected) {
-                pocLog("action ignored, not connected");
-                break;
-            }
-
-            pocLog("action write idle b0");
-            pocWriteIdleB0();
+            if (w->connected && w->have_write)
+                pocWriteIdleB0(w);
             break;
 
         case DglabPocAction_WriteZeroB0:
-            if (!w->connected) {
-                pocLog("action ignored, not connected");
-                break;
-            }
-
-            pocLog("action write zero b0");
-            pocWriteZeroB0();
+            if (w->connected && w->have_write)
+                pocWriteZeroB0(w);
             break;
 
         case DglabPocAction_ReadBattery:
-            if (!w->connected) {
-                pocLog("action ignored, not connected");
-                break;
-            }
-
-            pocLog("action read battery");
-            pocReadBattery();
+            if (w->connected && w->have_battery)
+                pocReadBattery(w);
             break;
 
-        case DglabPocAction_ToggleAutoWrite:
+        case DglabPocAction_ToggleAutoWrite: {
             mutexLock(&g_poc.mutex);
             g_poc.auto_write = !g_poc.auto_write;
             u32 enabled = g_poc.auto_write ? 1u : 0u;
             g_poc.status.auto_write = enabled;
             mutexUnlock(&g_poc.mutex);
-            pocLog("action auto_write=%u", enabled);
-            break;
-
-        case DglabPocAction_ReconnectAruid0:
-            pocLog("action reconnect with aruid 0");
-
-            if (w->connected) {
-                w->self_disconnect = true;
-                btdrvDisconnectGattServer(w->conn_id);
-                w->connected = false;
-            }
-
-            g_poc.aruid = 0;
-
-            mutexLock(&g_poc.mutex);
-            g_poc.status.aruid_low = 0;
-            mutexUnlock(&g_poc.mutex);
-
-            pocEnterStep(w, PocStep_Connect);
-            break;
-
-        // Some of the scan state lives in the shared Bluetooth stack, so when a
-        // scan produces nothing the first experiment is to clear and disable the
-        // filters the stack may still be applying from another user.
-        case DglabPocAction_RescanNoFilter: {
-            Result clear_rc = btdrvClearBleScanFilters();
-            Result filter_rc = btdrvEnableBleScanFilter(false);
-
-            pocLog("scan filter off: clear rc=0x%08X enable rc=0x%08X", (u32)clear_rc,
-                (u32)filter_rc);
-
-            if (w->scanning) {
-                btdrvStopBleScan();
-                w->scanning = false;
-            }
-
-            w->scan_attempts = 0;
-            pocEnterStep(w, PocStep_Scan);
+            pocLog("auto_write=%u", enabled);
             break;
         }
 
-        // Fallback that keeps the GATT half of the PoC usable even when the
-        // advertisement filter never matches.
-        case DglabPocAction_ConnectLastScan:
-            if (!w->have_last_scan) {
-                pocLog("connect last scan: no scan result seen yet");
-                break;
-            }
+        case DglabPocAction_ScanWithAdvertisedUuid:
+            pocLog("action: scan with the advertised UUID 0x1812");
+            w->forced_filter = POC_UUID16_ADVERTISED_SERVICE;
+            w->restart_scan = true;
+            return true;
 
-            w->address = w->last_scan_address;
-            w->ble_addr_type = w->last_scan_addr_type;
-            pocRecordMatch(&w->address, w->ble_addr_type);
-            pocSetMilestone(DGLAB_POC_MILESTONE_DEVICE_FOUND);
+        case DglabPocAction_ScanWithProtocolUuid:
+            pocLog("action: scan with the protocol UUID 0x180C");
+            w->forced_filter = DGLAB_COYOTE_V3_UUID16_SERVICE;
+            w->restart_scan = true;
+            return true;
 
-            pocLog("connecting to last scanned device %02X:%02X:%02X:%02X:%02X:%02X",
-                w->address.address[0], w->address.address[1], w->address.address[2],
-                w->address.address[3], w->address.address[4], w->address.address[5]);
+        case DglabPocAction_ScanWithGeneralFilter:
+            pocLog("action: scan with the general (manufacturer) filter");
+            w->forced_filter = 0xFFFFu;
+            w->restart_scan = true;
+            return true;
 
-            if (w->scanning) {
-                btdrvStopBleScan();
-                w->scanning = false;
-            }
-
-            if (w->client_registered)
-                pocEnterStep(w, PocStep_Connect);
-            else
-                pocEnterStep(w, PocStep_RegisterClient);
-            break;
+        case DglabPocAction_Rescan:
+        case DglabPocAction_RestartSession:
+            pocLog("action: rescan");
+            w->forced_filter = 0;
+            w->restart_scan = true;
+            return true;
 
         case DglabPocAction_Disconnect:
-            pocLog("action disconnect");
-            w->step = PocStep_Finished;
-            break;
-
-        case DglabPocAction_ProbeBtdev:
-            pocLog("action probe btdev");
-
-            if (w->scanning) {
-                btdrvStopBleScan();
-                w->scanning = false;
-            }
-
-            w->step = PocStep_BtdevProbe;
-            break;
-
-        case DglabPocAction_ProbeGeneralScan:
-            pocLog("action probe general scan");
-
-            if (w->scanning) {
-                btdrvStopBleScan();
-                w->scanning = false;
-            }
-
-            w->step = PocStep_BtdevGeneralProbe;
-            break;
+            pocLog("action: disconnect");
+            w->restart_scan = true;
+            return true;
 
         default:
             break;
     }
+
+    return false;
 }
 
-// Returns false when the run has ended.
-static bool pocStepRun(PocWorker* w)
+static bool pocTakeAction(PocWorker* w, u32* out_action)
 {
-    switch (w->step) {
-        case PocStep_Scan:
-            // Heartbeat so a silent scan is distinguishable from a broken event
-            // path when reading the log later.
-            if (pocElapsed(w->last_heartbeat_ms, POC_HEARTBEAT_MS)) {
-                u32 events;
-                u32 results;
-                u32 last_type;
+    mutexLock(&g_poc.mutex);
+    u32 action = g_poc.pending_action;
+    g_poc.pending_action = 0;
+    mutexUnlock(&g_poc.mutex);
 
-                w->last_heartbeat_ms = pocNowMs();
+    if (action == 0)
+        return false;
 
-                mutexLock(&g_poc.mutex);
-                events = g_poc.status.event_count;
-                results = g_poc.status.scan_results;
-                last_type = g_poc.status.last_event_type;
-                mutexUnlock(&g_poc.mutex);
+    *out_action = action;
+    return true;
+}
 
-                pocLog("scanning events=%u results=%u last_event=%u", events, results, last_type);
+// ---------------------------------------------------------------------------
+// Connected loop
+// ---------------------------------------------------------------------------
 
-                if (events == 0)
-                    pocLog("no BLE events received at all yet");
+static void pocConnectedLoop(PocWorker* w)
+{
+    w->next_b0_ms = pocNowMs();
 
-                // Prove whether the queue is empty or merely not signalled.
-                pocPollEventQueues(w);
-            }
+    while (!pocStopRequested() && !w->restart_scan) {
+        u32 action;
+        bool auto_write;
 
-            if (w->scanning && pocElapsed(w->step_start_ms, POC_SCAN_TIMEOUT_MS)) {
-                w->scan_attempts++;
-
-                // Nothing at all arrived on the managed event queue: try the
-                // other event queue btdrv exposes before giving up.
-                if (w->scan_attempts == 1 && !w->tried_hid_path) {
-                    pocLog("no events after %u ms, switching to the LE HID event source",
-                        POC_SCAN_TIMEOUT_MS);
-
-                    Result event_rc = pocAcquireBleEvent(w, true);
-                    pocLog("btdrvRegisterBleHidEvent rc=0x%08X", (u32)event_rc);
-                    w->tried_hid_path = true;
-
-                    if (w->scanning) {
-                        btdrvStopBleScan();
-                        w->scanning = false;
-                    }
-
-                    return pocEnterStep(w, PocStep_Scan);
-                }
-
-                if (w->scan_attempts >= POC_SCAN_MAX_ATTEMPTS) {
-                    pocFail(MAKERESULT(Module_Libnx, LibnxError_Timeout), "scan timeout");
-                    return false;
-                }
-
-                pocLog("scan restart %u", w->scan_attempts);
-                btdrvStopBleScan();
-                w->scanning = false;
-                return pocEnterStep(w, PocStep_Scan);
-            }
-            break;
-
-        case PocStep_RegisterClient:
-            if (pocElapsed(w->step_start_ms, POC_STEP_TIMEOUT_MS)) {
-                pocFail(MAKERESULT(Module_Libnx, LibnxError_Timeout), "client registration timeout");
-                return false;
-            }
-            break;
-
-        case PocStep_Connect:
-            if (pocElapsed(w->step_start_ms, POC_CONNECT_TIMEOUT_MS)) {
-                pocFail(MAKERESULT(Module_Libnx, LibnxError_Timeout), "connect timeout");
-                return false;
-            }
-            break;
-
-        case PocStep_DiscoverServices:
-            if (pocElapsed(w->step_start_ms, POC_STEP_TIMEOUT_MS)) {
-                pocFail(MAKERESULT(Module_Libnx, LibnxError_Timeout), "service discovery timeout");
-                return false;
-            }
-            break;
-
-        case PocStep_Connected: {
-            u32 now = pocNowMs();
-
-            mutexLock(&g_poc.mutex);
-            bool auto_write = g_poc.auto_write;
-            mutexUnlock(&g_poc.mutex);
-
-            if (auto_write && w->connected && (s32)(now - w->next_b0_ms) >= 0) {
-                w->next_b0_ms = now + POC_B0_INTERVAL_MS;
-                pocWriteIdleB0();
-            }
-            break;
+        if (w->gatt_event_active) {
+            eventWait(&w->gatt_event, 10000000ull); // 10ms
+            pocDrainGattOperations(w);
+        } else {
+            svcSleepThread(10000000ull);
         }
 
-        case PocStep_Finished:
-            return false;
+        while (pocTakeAction(w, &action)) {
+            if (pocHandleAction(w, action))
+                return;
+        }
 
-        case PocStep_BtdevProbe:
-            // Diagnostic run: report and end the session.
-            pocRunBtdevProbe(w);
-            return false;
+        mutexLock(&g_poc.mutex);
+        auto_write = g_poc.auto_write;
+        mutexUnlock(&g_poc.mutex);
 
-        case PocStep_BtdevGeneralProbe:
-            pocRunGeneralScanProbe(w);
-            return false;
-
-        default:
-            break;
+        if (auto_write && w->have_write && (s32)(pocNowMs() - w->next_b0_ms) >= 0) {
+            w->next_b0_ms = pocNowMs() + POC_B0_INTERVAL_MS;
+            pocWriteIdleB0(w);
+        }
     }
-
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1300,27 +903,32 @@ static bool pocStepRun(PocWorker* w)
 
 static void pocCleanup(PocWorker* w)
 {
-    if (w->scanning) {
-        btdrvStopBleScan();
-        w->scanning = false;
+    pocStopScan(w);
+    pocDisconnect(w);
+
+    if (w->scan_event_active) {
+        eventClose(&w->scan_event);
+        w->scan_event_active = false;
     }
 
-    if (w->connected && w->conn_id != 0) {
-        btdrvDisconnectGattServer(w->conn_id);
-        w->connected = false;
+    if (w->conn_event_active) {
+        eventClose(&w->conn_event);
+        w->conn_event_active = false;
     }
 
-    if (w->client_if != 0)
-        btdrvUnregisterGattClient(w->client_if);
-
-    if (w->ble_event_active) {
-        eventClose(&w->ble_event);
-        w->ble_event_active = false;
+    if (w->discovery_event_active) {
+        eventClose(&w->discovery_event);
+        w->discovery_event_active = false;
     }
 
-    if (w->btdrv_ready) {
-        btdrvExit();
-        w->btdrv_ready = false;
+    if (w->gatt_event_active) {
+        eventClose(&w->gatt_event);
+        w->gatt_event_active = false;
+    }
+
+    if (w->ble_ready) {
+        btdevExit();
+        w->ble_ready = false;
     }
 }
 
@@ -1332,64 +940,69 @@ static void pocThreadFunc(void* arg)
     (void)arg;
 
     memset(w, 0, sizeof(*w));
-    w->step = PocStep_Init;
-    w->step_start_ms = pocNowMs();
 
     pocSetState(DglabPocState_Initializing);
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
 
-    rc = btdrvInitialize();
-    if (R_FAILED(rc)) {
-        pocFail(rc, "btdrvInitialize");
-        goto out;
-    }
-    w->btdrv_ready = true;
+    rc = btdevInitialize();
+    pocLog("btdevInitialize rc=0x%08X", (u32)rc);
 
-    rc = pocAcquireBleEvent(w, false);
     if (R_FAILED(rc)) {
-        pocFail(rc, "btdrvInitializeBle");
+        pocFail(rc, "btdevInitialize");
         goto out;
     }
+
+    w->ble_ready = true;
     pocSetMilestone(DGLAB_POC_MILESTONE_BLE_READY);
-    pocLog("ble event source: managed (btdrvInitializeBle)");
 
-    bool enabled = false;
-    rc = btdrvIsBluetoothEnabled(&enabled);
-    pocLog("bluetooth adapter enabled rc=0x%08X value=%u", (u32)rc, enabled ? 1u : 0u);
+    while (!pocStopRequested()) {
+        BtdrvAddress address;
+        u32 action;
 
-    // Always ask for BLE explicitly. btdrvIsBluetoothEnabled reports the
-    // adapter, not whether the LE host is running, and a scan started while LE
-    // is idle returns success but never produces an event. The first hardware
-    // run showed exactly that: zero events, forever.
-    Result enable_rc = btdrvEnableBle();
-    pocLog("btdrvEnableBle rc=0x%08X", (u32)enable_rc);
+        while (pocTakeAction(w, &action)) {
+            if (pocHandleAction(w, action))
+                break;
+        }
 
-    // The event handle is acquired before the scan starts, so no BLE activity
-    // happens until the caller explicitly asks for it.
-    pocEnterStep(w, PocStep_Scan);
+        w->restart_scan = false;
 
-    while (true) {
-        BtdrvBleEventType type = 0;
-        BtdrvBleEventInfo info;
+        if (!pocScanAny(w, &address)) {
+            if (pocStopRequested() || w->restart_scan)
+                continue;
 
-        mutexLock(&g_poc.mutex);
-        bool stop = g_poc.stop_requested;
-        mutexUnlock(&g_poc.mutex);
+            w->scan_attempts++;
 
-        if (stop) {
-            pocLog("stop requested");
+            if (w->scan_attempts >= POC_SCAN_ATTEMPTS) {
+                pocFail(MAKERESULT(Module_Libnx, LibnxError_Timeout), "scan");
+                break;
+            }
+
+            continue;
+        }
+
+        pocRecordMatch(&address, w->filter_used);
+
+        if (!pocConnect(w)) {
+            if (pocStopRequested() || w->restart_scan)
+                continue;
+
+            w->scan_attempts++;
+
+            if (w->scan_attempts >= POC_SCAN_ATTEMPTS) {
+                pocFail(MAKERESULT(Module_Libnx, LibnxError_Timeout), "connect");
+                break;
+            }
+
+            continue;
+        }
+
+        if (!pocDiscover(w) || !pocSubscribe(w)) {
+            pocDisconnect(w);
             break;
         }
 
-        if (pocWaitEvent(&type, &info, POC_EVENT_WAIT_MS))
-            pocHandleEvent(w, type, &info);
-
-        // Actions are honoured in any step so that "disconnect" and "stop
-        // writing" also work while a later step is still making progress.
-        pocHandlePendingAction(w);
-
-        if (!pocStepRun(w))
-            break;
+        pocConnectedLoop(w);
+        pocDisconnect(w);
     }
 
 out:
@@ -1397,8 +1010,10 @@ out:
 
     mutexLock(&g_poc.mutex);
     bool failed = g_poc.status.state == DglabPocState_Failed;
+
     if (!failed && g_poc.status.state != DglabPocState_Ready)
         g_poc.status.state = DglabPocState_Stopped;
+
     g_poc.running = false;
     g_poc.stop_requested = false;
     mutexUnlock(&g_poc.mutex);
@@ -1431,7 +1046,6 @@ Result blePocStart(const DglabPocStartRequest* request)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
     }
 
-    // If a previous run has finished, its thread handle is still open.
     Thread previous = g_poc.worker_thread;
 
     mutexUnlock(&g_poc.mutex);
@@ -1442,7 +1056,6 @@ Result blePocStart(const DglabPocStartRequest* request)
     }
 
     mutexLock(&g_poc.mutex);
-    // Drop the closed handle so a later start can never close it twice.
     memset(&g_poc.worker_thread, 0, sizeof(g_poc.worker_thread));
     memset(&g_poc.status, 0, sizeof(g_poc.status));
 
@@ -1505,8 +1118,7 @@ Result blePocAction(const DglabPocActionRequest* request)
     g_poc.pending_action = request->action;
     mutexUnlock(&g_poc.mutex);
 
-    if (!running)
-    {
+    if (!running) {
         pocLog("action %u ignored: no run active", request->action);
         return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
     }

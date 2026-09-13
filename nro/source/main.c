@@ -338,17 +338,17 @@ int main(int argc, char* argv[])
         else if (down & HidNpadButton_Y)
             action = DglabPocAction_Disconnect;
         else if (down & HidNpadButton_R)
-            action = DglabPocAction_ReconnectAruid0;
+            action = DglabPocAction_RestartSession;
         else if (down & HidNpadButton_L)
             action = DglabPocAction_ToggleAutoWrite;
         else if (down & HidNpadButton_ZL)
-            action = DglabPocAction_RescanNoFilter;
+            action = DglabPocAction_Rescan;
         else if (down & HidNpadButton_ZR)
-            action = DglabPocAction_ConnectLastScan;
+            action = DglabPocAction_ScanWithProtocolUuid;
         else if (down & HidNpadButton_Up)
-            action = DglabPocAction_ProbeBtdev;
+            action = DglabPocAction_ScanWithAdvertisedUuid;
         else if (down & HidNpadButton_Down)
-            action = DglabPocAction_ProbeGeneralScan;
+            action = DglabPocAction_ScanWithGeneralFilter;
 
         if (action != 0) {
             // Start a run first when idle so a single button press works from
@@ -371,7 +371,7 @@ int main(int argc, char* argv[])
         printf("\n");
         printLog();
         printf("A start  X zero-B0  B battery  R aruid0  L auto  Y disconn  - stop  + exit\n");
-        printf("ZL rescan-no-filter  ZR last-scan  Up probe-btdev  Down probe-general\n");
+        printf("ZL rescan(0x1812->0x180C)  ZR scan 0x180C  Up scan 0x1812  Down general filter\n");
 
         consoleUpdate(NULL);
     }

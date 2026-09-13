@@ -453,7 +453,7 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
    5. 睡眠/唤醒
 7. 实现 DG-LAB Protocol 和 BLE Transport；
 8. 实现最小 NRO Client；
-9. 实现 Joy-Con / 六轴输入；
+9.  实现 Joy-Con / 六轴输入；
 10. 实现基础 UI；
 11. 实现 Overlay；
 12. 实现 Game Mod 示例；

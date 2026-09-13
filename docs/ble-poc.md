@@ -16,34 +16,48 @@ PoC 要回答的是优先级 #5 的问题：
 | CMIF 布局规则 | `sysmodule/include/dglab/ipc_cmif.h` |
 | NRO 观察与操作界面 | `nro/source/main.c` |
 
-## 为什么用 btdrv 而不是 btdev
+## 为什么用 btdev（以及 btdrv 为什么被放弃）
 
 libnx 提供两套 BLE 接口：
 
-1. `btdev` / `bt` / `btm:u`：面向 applet 的封装，内部使用
-   `appletGetAppletResourceUserId()`。
-2. `btdrv`：蓝牙驱动的底层封装，btm-sysmodule 使用的就是它。
+1. `btdrv`：蓝牙驱动的底层封装，btm-sysmodule 使用的就是它。需要自己处理
+   事件句柄、`BtdrvBleEventInfo` 的联合体以及 GATT id 的查询顺序。
+2. `btdev` / `bt` / `btm:u`：更高层的封装，扫描结果、服务、特征都是类型化结构。
 
-Sysmodule 是 `AppletType_None` 的后台进程，没有 applet，因此 PoC 走 `btdrv`。
-需要 AppletResourceUserId 的只有 `btdrvConnectGattServer`，该值由 NRO 通过 IPC 传入
-（NRO 是真实 applet，能拿到自己的 ARUID）。
+最初担心 `bt`／`btm:u` 是面向 applet 的服务（内部使用
+`appletGetAppletResourceUserId()`，后台 sysmodule 里是 0），所以先走 btdrv。
+实机结果是：
+
+- btdrv 的 BLE 事件通道在 HOS 22.5.0 上只返回空载荷（详见下文三次实测记录），
+  拿不到任何可用的扫描结果；
+- 反过来，`btdevInitialize`、`btdevStartBleScanSmartDevice` 等调用在后台 sysmodule 里
+  全部返回成功（`rc=0`），说明这套服务可用，ARUID=0 也没有被拒绝。
+
+因此当前实现改为 **btdev**：BLE 所有权仍在 sysmodule，代码也比 btdrv 版本短。
 
 用到的接口：
 
-    btdrvInitialize / btdrvExit
-    btdrvInitializeBle                          (获取 BLE 事件句柄)
-    btdrvIsBluetoothEnabled / btdrvEnableBle
-    btdrvStartBleScan / btdrvStopBleScan
-    btdrvRegisterGattClient
-    btdrvConnectGattServer / btdrvDisconnectGattServer
-    btdrvGetGattService
-    btdrvGetGattFirstCharacteristic
-    btdrvRegisterGattNotification
-    btdrvReadGattCharacteristic / btdrvWriteGattCharacteristic
-    btdrvGetBleManagedEventInfo                (事件结构 BtdrvBleEventInfo)
+    btdevInitialize / btdevExit
+    btdevAcquireBleScanEvent + btdevStartBleScanSmartDevice / btdevStopBleScanSmartDevice
+    btdevGetBleScanResult
+    btdevAcquireBleConnectionStateChangedEvent / btdevConnectToGattServer
+    btdevDisconnectFromGattServer / btdevGetBleConnectionInfoList
+    btdevAcquireBleServiceDiscoveryEvent / btdevGetGattService
+    btdevGattServiceGetCharacteristic
+    btdevAcquireBleGattOperationEvent / btdevGetGattOperationResult
+    btdevEnableGattCharacteristicNotification
+    btdevReadGattCharacteristic / btdevGattCharacteristicSetValue / btdevWriteGattCharacteristic
 
-刻意没有调用 `btdrvFinalizeBle`：它会改变系统级 BLE 状态，PoC 只关闭自己拿到的
-事件句柄并退出 btdrv 会话。
+### 扫描过滤器：广播里是 0x1812，不是 0x180C
+
+用手机 BLE 扫描工具（LightBlue）查看 Coyote 3.0 的广播：
+
+    名称          = 47L121000
+    Services UUIDs = 1812        ← 广播里的服务 UUID
+    （0x180C 是 DG-LAB 服务，连接之后才会出现在 GATT 服务列表里）
+
+所以按 `0x180C` 过滤的扫描永远找不到设备——这也是前面几次"扫描成功但 0 结果"的原因。
+现在默认先按 `0x1812` 扫描，失败再退回 `0x180C`。
 
 ## 安全性
 
@@ -77,16 +91,16 @@ Sysmodule 是 `AppletType_None` 的后台进程，没有 applet，因此 PoC 走
 
 | 按键 | 动作 |
 | --- | --- |
-| `A` | 开始 PoC（扫描 → 连接 → 发现 → 订阅 → 周期写入） |
+| `A` | 开始 PoC（扫描 0x1812 → 连接 → 发现 → 订阅 → 周期写入） |
 | `X` | 写入"双通道绝对置零"的 B0（序列号 1，预期设备回 B1） |
 | `B` | 读取电量特征（0x180A / 0x1500） |
-| `R` | 用 AppletResourceUserId = 0 重新连接 |
+| `R` | 重启会话（断开并重新扫描） |
 | `L` | 开关 100ms 的 B0 保活写入 |
 | `Y` | 断开连接 |
-| `ZL` | 清除并关闭扫描过滤器后重新扫描（扫描无结果时的第一个实验） |
-| `ZR` | 直接连接最近一次扫描到的地址（不要求广播匹配） |
-| `Up` | btdev 探针：bt/btm:u 的 smart device 扫描（按服务 UUID 0x180C 过滤） |
-| `Down` | btdev 探针：bt/btm:u 的 general 扫描（按厂商数据过滤），作为对照 |
+| `ZL` | 重新扫描（默认顺序：0x1812 → 0x180C） |
+| `ZR` | 只用协议服务 UUID `0x180C` 扫描（对照） |
+| `Up` | 只用广播里的 UUID `0x1812` 扫描 |
+| `Down` | 用 btm 的 general 过滤器（厂商数据）扫描（对照） |
 | `-` | 停止 PoC（清理并退出） |
 | `+` | 退出 NRO |
 
@@ -106,24 +120,33 @@ NRO 会在连接 sysmodule 之前先输出 `console ready`、日志文件状态�
 ## 每一步的预期
 
 1. 打开 NRO：显示 `state: idle`、IPC 版本号，说明 sysmodule 在运行。
-2. 按 `A`：日志依次出现 `poc start`、`state=init`、`btdrvInitialize rc=...`、
-   `btdrvInitializeBle rc=...`、`bluetooth enabled ...`、`state=scanning`、
-   `btdrvStartBleScan rc=...`。
-3. 扫描期间每 2 秒一条心跳：`scanning events=N results=N last_event=N`。
-   如果长时间 `events=0`，说明 BLE 事件通路根本没有回调，而不是扫描没找到设备。
-4. 扫描事件：日志打印前若干条扫描结果（地址、RSSI、AD 原始字节）。看到
-   `coyote 3.0 found` 表示识别到 `47L121000`（或广播里带 0x180C 服务）。
-5. 连接：`btdrvRegisterGattClient`、`btdrvConnectGattServer`，然后是
-   `state=discovering`、`btdrvGetGattService(0x180C)`、事件里列出的属性表。
-6. 特征：`char 0x150A ...`、`char 0x150B ...`、`char 0x1500 ...`，
-   包含每个特征的 property 位。
-7. 就绪：`state=ready`，随后 `b0 idle write #1 ...`，`b0 writes` 计数持续增长且
-   `failed 0`。
-8. 通知：转动设备本体的强度拨轮，应该出现 `notify ...` 与
+2. 按 `A`：日志依次出现
+
+       poc start aruid_low=0x...
+       btdevInitialize rc=0x00000000
+       btdevAcquireBleScanEvent rc=0x00000000
+       btdevStartBleScanSmartDevice(0x1812) rc=0x00000000
+       state=scanning
+
+3. 扫描：找到设备时打印
+
+       0x1812 scan found N device(s)
+         0x1812 scan 0 addr=XX:XX:XX:XX:XX:XX
+
+   长时间没有任何结果时每 10 次轮询打印一条
+   `0x1812 scan poll N rc=0x... total=0`；12 秒后超时会自动退回 `0x180C` 再试一次。
+4. 连接：`btdevConnectToGattServer rc=0x...`、`state=connecting`，随后
+   `conn 0 handle=... addr=...`，里程碑 `+conn`。
+5. 发现：`btdevGetGattService(0x180C) rc=0x... flag=1`、`state=discovering`，
+   然后是 `char 0x150A ... prop=0x..` 与 `char 0x150B ... prop=0x..`
+   （`0x150A` 应该有 write 位，`0x150B` 应该有 notify 位）。
+6. 就绪：`btdevEnableGattCharacteristicNotification rc=0x00000000`、`state=ready`，
+   随后 `b0 idle write #1 ...`，`b0 writes` 计数持续增长且 `failed 0`。
+7. 通知：转动设备本体的强度拨轮，应该出现 `gatt op size=4 data=B1...` 与
    `B1 sequence=0 A=.. B=..`，`notifications` 计数增长。
-9. 按 `X`：日志出现 `b0 zero write, sequence 1, expecting B1`，随后应收到
+8. 按 `X`：日志出现 `b0 zero write, sequence 1, expecting B1`，随后应收到
    `B1 sequence=1 ...`，里程碑 `+b1` 点亮。
-10. 按 `B`：应显示 `battery value=..`，里程碑 `+bat` 点亮。
+9. 按 `B`：应显示 `battery value=..`，里程碑 `+bat` 点亮。
 
 ## 扫描没有结果时怎么排查
 
@@ -257,6 +280,18 @@ NRO 顶部的 `milestones` 一行用 `+`/`.` 表示是否达成：
 - `b0`：至少写入成功一次
 - `b1`：收到 B1 报文
 - `bat`：读到电量
+
+## 第五次实机（改用 btdev 与 0x1812 过滤器）
+
+手机扫描给出的广播内容（名称 `47L121000`、Services UUIDs `1812`）解释了前面所有
+"扫描成功但 0 结果"：**广播里没有 0x180C**，它只存在于连接之后的 GATT 服务列表。
+
+本轮改动：
+
+1. 传输层整体改用 btdev（`bt` + `btm:u`），删除 btdrv 的事件/状态机代码；
+2. 扫描默认按 `0x1812` 过滤，12 秒没结果就自动退回 `0x180C` 再试一次；
+3. 连接、服务发现、特征查询、订阅通知、读写全部走 btdev 的类型化接口；
+4. 动作键改为扫描变体（见上表），便于在同一次实机里对比不同过滤器。
 
 ## 这次要确认的开放问题
 
