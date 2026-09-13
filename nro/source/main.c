@@ -344,6 +344,12 @@ int main(int argc, char* argv[])
             serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
         }
 
+        if (down & HidNpadButton_Up) {
+            DglabPocActionRequest request = { 0 };
+            request.action = DglabPocAction_ProbeBtdev;
+            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
+        }
+
         DglabPocStatus status;
         memset(&status, 0, sizeof(status));
         rc = serviceDispatchOut(&dglab, DGLAB_IPC_POC_CMD_STATUS, status);
@@ -363,7 +369,7 @@ int main(int argc, char* argv[])
         printf("\n");
         printLog();
         printf("A start  X zero-B0  B battery  R aruid0  L auto  Y disconn  - stop  + exit\n");
-        printf("ZL rescan-no-filter  ZR connect-last-scan\n");
+        printf("ZL rescan-no-filter  ZR connect-last-scan  Up probe-btdev\n");
 
         consoleUpdate(NULL);
     }

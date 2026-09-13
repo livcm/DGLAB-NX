@@ -2,6 +2,8 @@
 
 #include <dglab/protocol/coyote_v3.h>
 
+#include <switch/runtime/btdev.h>
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -25,6 +27,7 @@
 #define POC_HEARTBEAT_MS 2000u
 #define POC_POLL_INTERVAL_MS 100u
 #define POC_POLL_LOG_EVERY 20u
+#define POC_BTDEV_PROBE_MS 15000u
 
 // Advertisement data types from the Bluetooth SIG "Supplement to the Bluetooth
 // Core Specification". libnx documentation references a BtdrvAdType that is not
@@ -46,6 +49,7 @@ enum {
     PocStep_DiscoverServices,
     PocStep_DiscoverCharacteristics,
     PocStep_Subscribe,
+    PocStep_BtdevProbe,
     PocStep_Connected,
     PocStep_Finished,
 };
@@ -69,7 +73,6 @@ typedef struct {
     u32 last_poll_ms;
     u32 poll_count;
     Result last_poll_rc[2];
-    bool use_polling;
 
     bool scanning;
     bool connected;
@@ -475,13 +478,13 @@ static bool pocWaitEvent(BtdrvBleEventType* out_type, BtdrvBleEventInfo* out_inf
     return true;
 }
 
-// Asks both event queues for data without waiting on the event handle.
+// Asks both event queues for data without waiting on the event handle, purely
+// for the log.
 //
-// Waiting on the event can only tell us "nothing was signalled", which is what
-// the first two hardware runs showed. Polling separates the two possible
-// causes: either no data was produced at all, or the data exists but the event
-// handle is not signalled. If a poll ever returns an event, the PoC switches to
-// polling so the rest of the flow still works.
+// This must never feed the state machine: on HOS 22.5.0 an empty queue answers
+// with success and type 0, which the state machine would read as a real
+// registration event. An earlier revision did exactly that and drove a bogus
+// connect to 00:00:00:00:00:00, so the results here are log-only.
 static void pocPollEventQueues(PocWorker* w)
 {
     static const bool kHidQueue[2] = { false, true };
@@ -508,17 +511,6 @@ static void pocPollEventQueues(PocWorker* w)
                 (u32)type);
         }
 
-        // Only trust a successful poll whose type is inside the documented
-        // range, so an empty queue that happens to report success cannot be
-        // mistaken for a real event.
-        if (R_SUCCEEDED(rc) && type <= BtdrvBleEventType_ServerAttributeOperation) {
-            if (!w->use_polling) {
-                w->use_polling = true;
-                pocLog("polling returns data, switching to polling");
-            }
-
-            pocHandleEvent(w, type, &info);
-        }
     }
 
     w->poll_count++;
@@ -901,6 +893,83 @@ static bool pocEnterStep(PocWorker* w, u32 step)
     return true;
 }
 
+// Diagnostic: run the same scan through libnx's btdev wrapper (bt + btm:u)
+// instead of btdrv.
+//
+// The btdrv event queue produced only empty payloads on HOS 22.5.0, so this
+// decides whether the higher level service can be used from the sysmodule. The
+// result also tells us whether the ARUID that bt/btm:u pass internally (0 in a
+// background process) is accepted.
+static void pocRunBtdevProbe(PocWorker* w)
+{
+    BtdrvGattAttributeUuid service = pocUuid16(DGLAB_COYOTE_V3_UUID16_SERVICE);
+    Event scan_event;
+    u32 results_seen = 0;
+    u32 deadline;
+    Result rc;
+
+    (void)w;
+
+    pocLog("btdev probe: btInitialize + btmuInitialize");
+    rc = btdevInitialize();
+    pocLog("btdevInitialize rc=0x%08X", (u32)rc);
+
+    if (R_FAILED(rc)) {
+        pocLog("btdev probe: bt/btm:u unusable from this process");
+        return;
+    }
+
+    memset(&scan_event, 0, sizeof(scan_event));
+
+    Result event_rc = btdevAcquireBleScanEvent(&scan_event);
+    pocLog("btdevAcquireBleScanEvent rc=0x%08X", (u32)event_rc);
+
+    rc = btdevStartBleScanSmartDevice(&service);
+    pocLog("btdevStartBleScanSmartDevice(0x180C) rc=0x%08X", (u32)rc);
+
+    deadline = pocNowMs() + POC_BTDEV_PROBE_MS;
+
+    while (pocNowMs() < deadline) {
+        BtdrvBleScanResult results[10];
+        u8 total = 0;
+
+        mutexLock(&g_poc.mutex);
+        bool stop = g_poc.stop_requested;
+        mutexUnlock(&g_poc.mutex);
+
+        if (stop)
+            break;
+
+        if (R_SUCCEEDED(event_rc))
+            eventWait(&scan_event, 500ull * 1000000ull);
+        else
+            svcSleepThread(500000000ull);
+
+        memset(results, 0, sizeof(results));
+
+        Result get_rc = btdevGetBleScanResult(results, 10, &total);
+        pocLog("btdevGetBleScanResult rc=0x%08X count=%u", (u32)get_rc, total);
+
+        for (u8 i = 0; i < total && i < 10; i++) {
+            pocLog("  scan %u addr=%02X:%02X:%02X:%02X:%02X:%02X count=%d", i,
+                results[i].addr.address[0], results[i].addr.address[1],
+                results[i].addr.address[2], results[i].addr.address[3],
+                results[i].addr.address[4], results[i].addr.address[5], results[i].count);
+            results_seen++;
+        }
+    }
+
+    rc = btdevStopBleScanSmartDevice();
+    pocLog("btdevStopBleScanSmartDevice rc=0x%08X", (u32)rc);
+
+    if (R_SUCCEEDED(event_rc))
+        eventClose(&scan_event);
+
+    btdevExit();
+
+    pocLog("btdev probe: done, %u results", results_seen);
+}
+
 static void pocHandlePendingAction(PocWorker* w)
 {
     u32 action;
@@ -1021,6 +1090,17 @@ static void pocHandlePendingAction(PocWorker* w)
             w->step = PocStep_Finished;
             break;
 
+        case DglabPocAction_ProbeBtdev:
+            pocLog("action probe btdev");
+
+            if (w->scanning) {
+                btdrvStopBleScan();
+                w->scanning = false;
+            }
+
+            w->step = PocStep_BtdevProbe;
+            break;
+
         default:
             break;
     }
@@ -1126,6 +1206,11 @@ static bool pocStepRun(PocWorker* w)
         case PocStep_Finished:
             return false;
 
+        case PocStep_BtdevProbe:
+            // Diagnostic run: report and end the session.
+            pocRunBtdevProbe(w);
+            return false;
+
         default:
             break;
     }
@@ -1222,13 +1307,6 @@ static void pocThreadFunc(void* arg)
 
         if (pocWaitEvent(&type, &info, POC_EVENT_WAIT_MS))
             pocHandleEvent(w, type, &info);
-
-        // If the event handle never fires but the queue does hold data, keep
-        // draining it directly instead of waiting for a notification.
-        if (w->use_polling && pocElapsed(w->last_poll_ms, POC_POLL_INTERVAL_MS)) {
-            w->last_poll_ms = pocNowMs();
-            pocPollEventQueues(w);
-        }
 
         // Actions are honoured in any step so that "disconnect" and "stop
         // writing" also work while a later step is still making progress.

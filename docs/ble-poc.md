@@ -166,6 +166,41 @@ NRO 会在连接 sysmodule 之前先输出 `console ready`、日志文件状态�
 这样可以把"队列里没有数据"与"有数据但事件没通知"区分开；一旦轮询拿到事件，
 PoC 会自动切换到轮询模式继续跑完后续流程。
 
+## 第三次实机结果（HOS 22.5.0 / AMS 1.11.2 / Switch 1）
+
+轮询实验给出了两个结论，其中一个暴露了 PoC 自己的 bug：
+
+1. **空队列也返回 `rc=0` 且 `type=0`**。PoC 把这种结果当成真实的
+   `ClientRegistration` 事件，于是被虚假的 `status=1 client_if=3` 推进到连接阶段，
+   对着 `00:00:00:00:00:00` 发起连接。这是 PoC 的错，已改为**轮询只写日志、
+   绝不驱动状态机**。
+2. 事件句柄确实有回调，但**载荷全是空的**：整份日志里唯一的 `ScanResult` 是
+   `status=0 addr=00:00:00:00:00:00 rssi=0 entries=0`，从来没有出现过真实地址或广播数据。
+
+也就是说，在这台 HOS 22.5.0 上，btdrv 的 BLE 事件通道"会响但没内容"：调用全部成功，
+拿不到任何可用的扫描结果。可能的原因（都需要证据，不能靠猜）：新版本 HOS 改变了 BLE
+事件的路由或载荷布局；或者 btdrv 的 managed 状态只对 btm-sysmodule 有效。
+
+### 新增诊断：btdev 探针（`Up` 键）
+
+`Up` 会运行一次 btdev 探针，用 libnx 已经封装好的 `bt` + `btm:u` 路径重新走一遍扫描：
+
+```
+btdevInitialize
+btdevAcquireBleScanEvent
+btdevStartBleScanSmartDevice(0x180C)
+btdevGetBleScanResult        (每 500ms，共 15 秒)
+btdevStopBleScanSmartDevice
+btdevExit
+```
+
+每一步的返回码和扫描到的地址都会写进日志。判断方式：
+
+- 如果拿到真实地址 → 说明 bt/btm:u 在后台 sysmodule 里可用，后续传输实现改用 btdev
+  （代码还会更短），BLE 所有权仍然留在 sysmodule；
+- 如果 `btdevInitialize` 或扫描调用返回错误 → 说明后台进程用不了这套服务，
+  那时需要在"让 applet 承担 BLE"与"继续挖 btdrv"之间做架构决策。
+
 ## 里程碑
 
 NRO 顶部的 `milestones` 一行用 `+`/`.` 表示是否达成：
