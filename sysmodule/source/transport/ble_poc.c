@@ -55,6 +55,9 @@ typedef struct {
     Event ble_event;
     bool ble_event_active;
     bool btdrv_ready;
+    bool hid_event_path;    // true once the LE HID event queue is used instead
+    bool tried_hid_path;
+    bool wait_error_logged;
 
     u32 step;
     u32 step_start_ms;
@@ -402,6 +405,32 @@ static void pocReadBattery(void)
 
 static bool pocEnterStep(PocWorker* w, u32 step);
 
+// Acquires the BLE event handle. btdrv exposes two independent event queues
+// that carry the same BtdrvBleEventInfo payloads, so the second one is used as
+// a fallback when the first one never delivers anything.
+static Result pocAcquireBleEvent(PocWorker* w, bool hid_path)
+{
+    Result rc;
+
+    if (w->ble_event_active) {
+        eventClose(&w->ble_event);
+        w->ble_event_active = false;
+    }
+
+    w->hid_event_path = hid_path;
+    w->wait_error_logged = false;
+
+    if (hid_path)
+        rc = btdrvRegisterBleHidEvent(&w->ble_event);
+    else
+        rc = btdrvInitializeBle(&w->ble_event);
+
+    if (R_SUCCEEDED(rc))
+        w->ble_event_active = true;
+
+    return rc;
+}
+
 // Waits for one BLE event. Returns false on timeout, which is the normal case
 // while a step is making no progress.
 static bool pocWaitEvent(BtdrvBleEventType* out_type, BtdrvBleEventInfo* out_info, u32 timeout_ms)
@@ -413,14 +442,25 @@ static bool pocWaitEvent(BtdrvBleEventType* out_type, BtdrvBleEventInfo* out_inf
         return false;
 
     rc = eventWait(&w->ble_event, (u64)timeout_ms * 1000000ull);
-    if (R_FAILED(rc))
+    if (R_FAILED(rc)) {
+        // Log the first failure so a broken handle is distinguishable from the
+        // ordinary timeout that a quiet event queue produces.
+        if (!w->wait_error_logged) {
+            w->wait_error_logged = true;
+            pocLog("eventWait first failure rc=0x%08X (timeout is normal)", (u32)rc);
+        }
         return false;
+    }
 
     memset(out_info, 0, sizeof(*out_info));
 
-    rc = btdrvGetBleManagedEventInfo(out_info, sizeof(*out_info), out_type);
+    if (w->hid_event_path)
+        rc = btdrvGetLeHidEventInfo(out_info, sizeof(*out_info), out_type);
+    else
+        rc = btdrvGetBleManagedEventInfo(out_info, sizeof(*out_info), out_type);
+
     if (R_FAILED(rc)) {
-        pocLog("getBleManagedEventInfo rc=0x%08X", (u32)rc);
+        pocLog("ble event fetch rc=0x%08X", (u32)rc);
         return false;
     }
 
@@ -958,6 +998,24 @@ static bool pocStepRun(PocWorker* w)
             if (w->scanning && pocElapsed(w->step_start_ms, POC_SCAN_TIMEOUT_MS)) {
                 w->scan_attempts++;
 
+                // Nothing at all arrived on the managed event queue: try the
+                // other event queue btdrv exposes before giving up.
+                if (w->scan_attempts == 1 && !w->tried_hid_path) {
+                    pocLog("no events after %u ms, switching to the LE HID event source",
+                        POC_SCAN_TIMEOUT_MS);
+
+                    Result event_rc = pocAcquireBleEvent(w, true);
+                    pocLog("btdrvRegisterBleHidEvent rc=0x%08X", (u32)event_rc);
+                    w->tried_hid_path = true;
+
+                    if (w->scanning) {
+                        btdrvStopBleScan();
+                        w->scanning = false;
+                    }
+
+                    return pocEnterStep(w, PocStep_Scan);
+                }
+
                 if (w->scan_attempts >= POC_SCAN_MAX_ATTEMPTS) {
                     pocFail(MAKERESULT(Module_Libnx, LibnxError_Timeout), "scan timeout");
                     return false;
@@ -1066,22 +1124,24 @@ static void pocThreadFunc(void* arg)
     }
     w->btdrv_ready = true;
 
-    rc = btdrvInitializeBle(&w->ble_event);
+    rc = pocAcquireBleEvent(w, false);
     if (R_FAILED(rc)) {
         pocFail(rc, "btdrvInitializeBle");
         goto out;
     }
-    w->ble_event_active = true;
     pocSetMilestone(DGLAB_POC_MILESTONE_BLE_READY);
+    pocLog("ble event source: managed (btdrvInitializeBle)");
 
     bool enabled = false;
     rc = btdrvIsBluetoothEnabled(&enabled);
-    pocLog("bluetooth enabled rc=0x%08X value=%u", (u32)rc, enabled ? 1u : 0u);
+    pocLog("bluetooth adapter enabled rc=0x%08X value=%u", (u32)rc, enabled ? 1u : 0u);
 
-    if (R_SUCCEEDED(rc) && !enabled) {
-        rc = btdrvEnableBle();
-        pocLog("btdrvEnableBle rc=0x%08X", (u32)rc);
-    }
+    // Always ask for BLE explicitly. btdrvIsBluetoothEnabled reports the
+    // adapter, not whether the LE host is running, and a scan started while LE
+    // is idle returns success but never produces an event. The first hardware
+    // run showed exactly that: zero events, forever.
+    Result enable_rc = btdrvEnableBle();
+    pocLog("btdrvEnableBle rc=0x%08X", (u32)enable_rc);
 
     // The event handle is acquired before the scan starts, so no BLE activity
     // happens until the caller explicitly asks for it.
@@ -1164,9 +1224,13 @@ Result blePocStart(const DglabPocStartRequest* request)
     // Drop the closed handle so a later start can never close it twice.
     memset(&g_poc.worker_thread, 0, sizeof(g_poc.worker_thread));
     memset(&g_poc.status, 0, sizeof(g_poc.status));
+
+    // Clear the text but keep log_write_offset monotonic: readers track absolute
+    // offsets, and resetting it made them read stale bytes from the previous run.
+    memset(g_poc.log, 0, sizeof(g_poc.log));
+
     g_poc.status.state = DglabPocState_Initializing;
     g_poc.status.auto_write = g_poc.auto_write ? 1u : 0u;
-    g_poc.log_write_offset = 0;
     g_poc.pending_action = 0;
     g_poc.stop_requested = false;
     g_poc.aruid = request->applet_resource_user_id;
@@ -1247,6 +1311,11 @@ u32 blePocReadLog(u32 cursor, char* out, u32 out_size)
 
     write = g_poc.log_write_offset;
     earliest = (write > POC_LOG_CAPACITY) ? write - POC_LOG_CAPACITY : 0;
+
+    // A reader that is ahead of the writer (for example after the ring was
+    // cleared) simply starts from the write position.
+    if (cursor > write)
+        cursor = write;
 
     if (cursor < earliest)
         cursor = earliest;

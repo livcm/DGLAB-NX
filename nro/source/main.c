@@ -101,7 +101,8 @@ static void logAppend(const char* text, size_t size)
             continue;
         }
 
-        if (c == '\r')
+        // Skip padding left over from a cleared sysmodule log ring.
+        if (c == '\r' || c == '\0')
             continue;
 
         if (g_partial_len + 1 < sizeof(g_partial))

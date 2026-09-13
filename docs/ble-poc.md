@@ -127,6 +127,31 @@ NRO 会在连接 sysmodule 之前先输出 `console ready`、日志文件状态�
    `ad type=.. data=..` 会直接说明它到底广播了什么。此时可以按 `ZR` 直接连接，
    先把 GATT 与通知部分验证掉。
 
+## 第一次实机结果（2026-09-13）
+
+日志（`dglab-ble-poc.log`）显示整场会话 `events=0`，即 btdrv 的 BLE 事件通道**一次都没有
+回调**：
+
+- `btdrvInitializeBle`、`btdrvStartBleScan`、`btdrvClearBleScanFilters`、
+  `btdrvEnableBleScanFilter` 的返回值全是 0，调用都被接受；
+- 但这些调用本该产生的 `ScanResult` / `ScanFilter` 事件一个都没有；
+- 因此问题不在设备或广播，而在事件通道本身。
+
+据此本轮改动：
+
+1. 每次启动都显式调用 `btdrvEnableBle()`：`btdrvIsBluetoothEnabled` 只报告适配器状态，
+   并不代表 LE host 已经在运行；LE 空闲时启动扫描会返回成功但不产生任何事件。
+2. 记录第一次 `eventWait` 失败的返回码，用来区分"正常超时"与"句柄错误"。
+3. 若第一个事件队列在 20 秒内没有任何事件，自动切换到 btdrv 暴露的另一个事件队列
+   （`btdrvRegisterBleHidEvent` + `btdrvGetLeHidEventInfo`）并重新扫描，日志会写明切换。
+4. 修复日志环形缓冲在每次启动时重置写指针的问题：读端使用绝对偏移，重置写指针会让它
+   读到上一轮的旧数据，也就是第一次日志里那些被截断/串行的行。
+
+顺带记录的错误码：按 `R` 时 `btdrvConnectGattServer` 返回 `0x00300C71`
+（module `0x71`、description `0x1806`）。那次调用使用的是 `client_if=0` 和全零地址，
+因为当时还没有注册 GATT client、也没有扫描到设备，属于预期内的拒绝，不能据此判断
+连接本身是否可行。
+
 ## 里程碑
 
 NRO 顶部的 `milestones` 一行用 `+`/`.` 表示是否达成：
