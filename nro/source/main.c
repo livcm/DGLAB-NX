@@ -21,10 +21,13 @@
 #define LOG_LINES 12
 #define LOG_LINE_LEN 72
 #define LOG_POLL_ROUNDS 8
-#define LOG_FILE_PATH "sdmc:/switch/dglab-ble-poc.log"
+
+// Everything the NRO writes lives in one directory, created on startup.
+#define DATA_DIR "sdmc:/switch/DGLAB-NX"
+#define LOG_FILE_PATH DATA_DIR "/dglab-ble-poc.log"
 // Optional: connect straight to this address instead of scanning, for the case
 // where the console's scan filters cannot report the device.
-#define ADDRESS_FILE_PATH "sdmc:/switch/dglab-ble-address.txt"
+#define ADDRESS_FILE_PATH DATA_DIR "/dglab-ble-address.txt"
 
 static char g_log_lines[LOG_LINES][LOG_LINE_LEN];
 static int g_log_filled;
@@ -75,16 +78,26 @@ static void logPushLine(const char* line)
     }
 }
 
+// Creates sdmc:/switch/DGLAB-NX if it is not there yet. A failure here is not
+// fatal: the directory is usually already present, and if the card really is
+// unusable the fopen below reports it.
+static void ensureDataDir(void)
+{
+    mkdir("sdmc:/switch", 0777);
+    mkdir(DATA_DIR, 0777);
+}
+
 // libnx's default init already mounts sdmc, so mounting again must never be
 // treated as a hard failure: that would silently drop the whole log. Just try
 // to open the file and report what actually happened.
 static bool logFileOpen(void)
 {
+    ensureDataDir();
     g_log_file = fopen(LOG_FILE_PATH, "w");
 
     if (g_log_file == NULL) {
         fsdevMountSdmc();
-        mkdir("sdmc:/switch", 0777);
+        ensureDataDir();
         g_log_file = fopen(LOG_FILE_PATH, "w");
     }
 

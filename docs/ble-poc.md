@@ -109,10 +109,11 @@ libnx 提供两套 BLE 接口：
 
 NRO 会把收到的 sysmodule 日志同步写到：
 
-    sdmc:/switch/dglab-ble-poc.log
+    sdmc:/switch/DGLAB-NX/dglab-ble-poc.log
 
-打不开时退回到 `sdmc:/dglab-ble-poc.log`；NRO 启动后第二行会显示日志文件的实际状态
-（`log: ...` 或 `log: unavailable`）。测试结束后把这个文件（或屏幕照片）发回来即可。
+目录 `sdmc:/switch/DGLAB-NX/` 在 NRO 启动时自动创建。打不开时退回到
+`sdmc:/dglab-ble-poc.log`；NRO 启动后第二行会显示日志文件的实际状态（`log: ...` 或
+`log: unavailable`）。测试结束后把这个文件（或屏幕照片）发回来即可。
 
 NRO 会在连接 sysmodule 之前先输出 `console ready`、日志文件状态、`querying sysmodule...`，
 所以如果它卡住，屏幕上的最后一行就是卡住的位置。
@@ -323,7 +324,7 @@ btm 没有提供"设置过滤参数"的接口，只有"读取"，所以这些值
 
 把设备的蓝牙地址写进：
 
-    sdmc:/switch/dglab-ble-address.txt
+    sdmc:/switch/DGLAB-NX/dglab-ble-address.txt
 
 内容格式：
 
