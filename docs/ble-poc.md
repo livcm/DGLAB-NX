@@ -362,6 +362,39 @@ btdevConnectToGattServer rc=0x0005568F   (每次都是同一个错误)
 合起来看：**btm／bt 的扫描与连接接口是围绕任天堂自家设备生态设计的，不是通用 BLE
 外设接口。** 这解释了为什么"扫描开始成功、连接被拒、结果永远为空"。
 
+## 第八次实机结果（扫描事件也是 0）
+
+三种过滤器、多轮独立扫描，每次都是：
+
+```
+<filter> scan summary: events=0 polls=24 devices=0
+```
+
+`events=0` 是关键：连"扫描事件本身"都没有触发过，说明 btm 根本没有替我们运行扫描
+（否则至少会有扫描开始/结束事件）。同时 general 过滤器用的是 Nintendo 自己的
+company ID `0x0553`，即使扫描真的运行，也匹配不到 DG-LAB。
+
+注：Joy-Con 属于经典蓝牙 HID 设备，配对时走的是 BR/EDR 而不是 BLE 广播，所以
+"用 Joy-Con 验证 BLE 扫描通路"这个测试本身并不成立，不能作为 BLE 扫描可用的证据。
+
+### 最后一个驱动级尝试：`Left` 键
+
+btm 在扫描前会设置 BLE 的 scan interval / window；如果缺省值是 0，那么"扫描"实际上
+从未真正开启——这与我们的观测一致。`Left` 键会运行一次 btdrv 驱动级探针：
+
+1. `btdrvInitialize` + `btdrvInitializeBle` + `btdrvEnableBle`；
+2. 显式设置 `btdrvSetBleScanParameter`（phase 0：0x0060/0x0030；phase 1：0x0030/0x0030）；
+3. phase 0 不带过滤器扫描 10 秒，phase 1 用 `btdrvAddBleScanFilterCondition` 过滤
+   0x1812 后再扫描 10 秒；
+4. 期间不依赖事件句柄，直接轮询 `btdrvGetBleManagedEventInfo`，并把前三次读取的
+   `type` 与原始前 8 字节、以及所有 `ScanResult` 的地址/条目数打印出来。
+
+日志里的判读：
+
+- 出现 `btdrv probe: scan result ... addr=XX:...` → 驱动级扫描可用，可以基于它重做传输层；
+- 只有 `fetch type=0 raw=0000...` → 事件队列是空的，配合 `btdrvConnectGattServer` 的
+  拒绝（module `0x71`），基本可以确定这一代 HOS 不给后台进程通用 BLE 能力。
+
 ## 这次要确认的开放问题
 
 以下都是实现时无法从 libnx 头文件确定、只能靠实机日志回答的问题：

@@ -66,6 +66,7 @@ enum {
     DglabPocAction_ScanWithProtocolUuid = 8, ///< Scan filtered by 0x180C only.
     DglabPocAction_ScanWithAdvertisedUuid = 9, ///< Scan filtered by 0x1812 only.
     DglabPocAction_ScanWithGeneralFilter = 10, ///< Scan using btm's general (manufacturer data) filter.
+    DglabPocAction_ProbeBtdrvScan = 11, ///< Last driver-level attempt: set scan parameters and poll btdrv's BLE event queue.
 };
 
 // Direct connect: skip the scan entirely and connect to this address. Useful

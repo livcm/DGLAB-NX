@@ -836,6 +836,130 @@ static bool pocSubscribe(PocWorker* w)
 // Actions
 // ---------------------------------------------------------------------------
 
+// Last driver-level attempt.
+//
+// btm sets the BLE scan interval/window before it scans, so a zero default could
+// be the reason btdrv's own scan produced nothing in the earlier runs. This probe
+// sets explicit scan parameters, tries an unfiltered scan and a scan filtered on
+// the advertised service UUID, and polls the event queue directly instead of
+// relying on the event handle firing.
+static void pocRunBtdrvScanProbe(PocWorker* w)
+{
+    static const u16 kInterval[2] = { 0x0060u, 0x0030u };
+    static const u16 kWindow[2] = { 0x0030u, 0x0030u };
+    Event event;
+    Result rc;
+    u32 total_scan_results = 0;
+
+    pocStopScan(w);
+
+    rc = btdrvInitialize();
+    pocLog("btdrv probe: btdrvInitialize rc=0x%08X", (u32)rc);
+
+    if (R_FAILED(rc))
+        return;
+
+    memset(&event, 0, sizeof(event));
+    rc = btdrvInitializeBle(&event);
+    pocLog("btdrv probe: btdrvInitializeBle rc=0x%08X", (u32)rc);
+
+    if (R_FAILED(rc)) {
+        btdrvExit();
+        return;
+    }
+
+    bool enabled = false;
+    btdrvIsBluetoothEnabled(&enabled);
+    pocLog("btdrv probe: adapter enabled=%u", enabled ? 1u : 0u);
+
+    rc = btdrvEnableBle();
+    pocLog("btdrv probe: btdrvEnableBle rc=0x%08X", (u32)rc);
+
+    for (u32 phase = 0; phase < 2 && !pocStopRequested(); phase++) {
+        u32 deadline;
+        u32 fetches = 0;
+        u32 scan_results = 0;
+
+        rc = btdrvSetBleScanParameter(kInterval[phase], kWindow[phase]);
+        pocLog("btdrv probe: SetBleScanParameter(0x%04X, 0x%04X) rc=0x%08X", kInterval[phase],
+            kWindow[phase], (u32)rc);
+
+        if (phase == 1) {
+            BtdrvBleAdvertiseFilter filter;
+
+            memset(&filter, 0, sizeof(filter));
+            filter.index = 0;
+            filter.adv.size = 2;
+            filter.adv.type = 0x03; // complete list of 16-bit service UUIDs
+            filter.adv.data[0] = 0x12;
+            filter.adv.data[1] = 0x18; // 0x1812, little endian
+            filter.mask[0] = 0xFF;
+            filter.mask[1] = 0xFF;
+            filter.mask_size = 2;
+
+            rc = btdrvAddBleScanFilterCondition(&filter);
+            pocLog("btdrv probe: AddBleScanFilterCondition(0x1812) rc=0x%08X", (u32)rc);
+
+            rc = btdrvEnableBleScanFilter(true);
+            pocLog("btdrv probe: EnableBleScanFilter(true) rc=0x%08X", (u32)rc);
+        }
+
+        rc = btdrvStartBleScan();
+        pocLog("btdrv probe: btdrvStartBleScan (phase %u) rc=0x%08X", phase, (u32)rc);
+
+        deadline = pocNowMs() + 10000u;
+
+        while (pocNowMs() < deadline && !pocStopRequested()) {
+            BtdrvBleEventInfo info;
+            BtdrvBleEventType type = 0;
+
+            eventWait(&event, 200ull * 1000000ull);
+
+            memset(&info, 0, sizeof(info));
+            rc = btdrvGetBleManagedEventInfo(&info, sizeof(info), &type);
+            fetches++;
+
+            if (R_FAILED(rc)) {
+                if (fetches % 25 == 0)
+                    pocLog("btdrv probe: get event info rc=0x%08X", (u32)rc);
+                continue;
+            }
+
+            if (fetches <= 3) {
+                pocLog("btdrv probe: fetch type=%u raw=%02X%02X%02X%02X%02X%02X%02X%02X",
+                    (u32)type, info.data[0], info.data[1], info.data[2], info.data[3],
+                    info.data[4], info.data[5], info.data[6], info.data[7]);
+            }
+
+            if (type != BtdrvBleEventType_ScanResult)
+                continue;
+
+            scan_results++;
+            total_scan_results++;
+
+            if (scan_results <= 5) {
+                pocLog("btdrv probe: scan result status=%u addr=%02X:%02X:%02X:%02X:%02X:%02X entries=%u rssi=%d",
+                    info.scan_result.status, info.scan_result.address.address[0],
+                    info.scan_result.address.address[1], info.scan_result.address.address[2],
+                    info.scan_result.address.address[3], info.scan_result.address.address[4],
+                    info.scan_result.address.address[5], info.scan_result.count,
+                    info.scan_result.rssi);
+            }
+        }
+
+        pocLog("btdrv probe: phase %u done fetches=%u scan_results=%u", phase, fetches,
+            scan_results);
+
+        btdrvStopBleScan();
+    }
+
+    btdrvClearBleScanFilters();
+    pocLog("btdrv probe: done, %u scan result(s) in total", total_scan_results);
+
+    eventClose(&event);
+    btdrvExit();
+}
+
 // Returns true when the session should go back to scanning.
 static bool pocHandleAction(PocWorker* w, u32 action)
 {
@@ -887,6 +1011,11 @@ static bool pocHandleAction(PocWorker* w, u32 action)
         case DglabPocAction_RestartSession:
             pocLog("action: rescan");
             w->forced_filter = 0;
+            w->restart_scan = true;
+            return true;
+
+        case DglabPocAction_ProbeBtdrvScan:
+            pocRunBtdrvScanProbe(w);
             w->restart_scan = true;
             return true;
 

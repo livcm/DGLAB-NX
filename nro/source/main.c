@@ -417,6 +417,8 @@ int main(int argc, char* argv[])
             action = DglabPocAction_ScanWithAdvertisedUuid;
         else if (down & HidNpadButton_Down)
             action = DglabPocAction_ScanWithGeneralFilter;
+        else if (down & HidNpadButton_Left)
+            action = DglabPocAction_ProbeBtdrvScan;
 
         if (action != 0) {
             // Start a run first when idle so a single button press works from
@@ -449,6 +451,7 @@ int main(int argc, char* argv[])
 
         printf("A start  X zero-B0  B battery  R aruid0  L auto  Y disconn  - stop  + exit\n");
         printf("ZL rescan(0x1812->0x180C)  ZR scan 0x180C  Up scan 0x1812  Down general filter\n");
+        printf("Left btdrv scan probe (sets scan parameters, polls the queue)\n");
 
         consoleUpdate(NULL);
     }
