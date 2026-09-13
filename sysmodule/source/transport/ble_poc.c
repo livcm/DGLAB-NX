@@ -1060,6 +1060,8 @@ Result blePocStart(const DglabPocStartRequest* request)
     }
 
     mutexLock(&g_poc.mutex);
+    // Drop the closed handle so a later start can never close it twice.
+    memset(&g_poc.worker_thread, 0, sizeof(g_poc.worker_thread));
     memset(&g_poc.status, 0, sizeof(g_poc.status));
     g_poc.status.state = DglabPocState_Initializing;
     g_poc.status.auto_write = g_poc.auto_write ? 1u : 0u;
