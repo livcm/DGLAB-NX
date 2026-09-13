@@ -70,6 +70,7 @@ typedef struct {
     u16 filter_used;
     u16 forced_filter; // 0 = default order, otherwise scan only with this UUID
     bool restart_scan;
+    bool probe_btdrv;
     u32 scan_attempts;
 
     BtdevGattService service;             // 0x180C
@@ -307,6 +308,10 @@ static bool pocAcquireEvent(Event* event, bool* active, const char* name,
 // Outgoing B0 traffic
 // ---------------------------------------------------------------------------
 
+// Forward declarations: actions are handled from inside the scan poll loop too.
+static bool pocTakeAction(PocWorker* w, u32* out_action);
+static bool pocHandleAction(PocWorker* w, u32 action);
+
 static Result pocWriteCharacteristic(BtdevGattCharacteristic* characteristic, const u8* data,
     size_t size)
 {
@@ -510,9 +515,20 @@ static bool pocPollScanResults(PocWorker* w, const char* label, BtdrvAddress* ou
         BtdrvBleScanResult results[10];
         u8 total = 0;
         Result rc;
+        u32 action;
 
         if (pocStopRequested() || w->restart_scan)
             return false;
+
+        // Actions must be honoured while a scan is running: the user presses a
+        // key when nothing is happening, which is exactly when a scan is in
+        // progress. Dropping them here made the driver level probe look dead.
+        while (pocTakeAction(w, &action)) {
+            w->scan_attempts = 0;
+
+            if (pocHandleAction(w, action))
+                return false;
+        }
 
         Result wait_rc = eventWait(&w->scan_event, 500ull * 1000000ull);
 
@@ -1015,7 +1031,10 @@ static bool pocHandleAction(PocWorker* w, u32 action)
             return true;
 
         case DglabPocAction_ProbeBtdrvScan:
-            pocRunBtdrvScanProbe(w);
+            // Deferred: run it from the session loop, never from inside a scan
+            // poll, so the scan bookkeeping stays consistent.
+            pocLog("action: btdrv scan probe");
+            w->probe_btdrv = true;
             w->restart_scan = true;
             return true;
 
@@ -1156,6 +1175,12 @@ static void pocThreadFunc(void* arg)
         while (pocTakeAction(w, &action)) {
             if (pocHandleAction(w, action))
                 break;
+        }
+
+        if (w->probe_btdrv) {
+            w->probe_btdrv = false;
+            pocRunBtdrvScanProbe(w);
+            continue;
         }
 
         w->restart_scan = false;

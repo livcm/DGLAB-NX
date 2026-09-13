@@ -18,8 +18,12 @@
 #include <dglab/ipc.h>
 #include <dglab/ipc_poc.h>
 
+// The on screen ring keeps short lines for layout, but the file gets the whole
+// line: the sysmodule log lines carry filter patterns and UUIDs at the end, and
+// truncating them to the display width hid exactly that information.
 #define LOG_LINES 12
 #define LOG_LINE_LEN 72
+#define LOG_LINE_MAX 192
 #define LOG_POLL_ROUNDS 8
 
 // Everything the NRO writes lives in one directory, created on startup.
@@ -32,7 +36,7 @@
 static char g_log_lines[LOG_LINES][LOG_LINE_LEN];
 static int g_log_filled;
 static u32 g_log_cursor;
-static char g_partial[LOG_LINE_LEN];
+static char g_partial[LOG_LINE_MAX];
 static size_t g_partial_len;
 static FILE* g_log_file;
 static u8 g_target_address[6];
