@@ -4,6 +4,14 @@
 #include <switch.h>
 
 #include <dglab/ipc.h>
+#include <dglab/ipc_cmif.h>
+#include <dglab/ipc_poc.h>
+#include <dglab/transport/ble_poc.h>
+
+_Static_assert(sizeof(DglabPocStatus) <= DGLAB_IPC_INLINE_PAYLOAD_MAX,
+    "DglabPocStatus does not fit the inline IPC payload");
+_Static_assert(sizeof(DglabPocLogChunk) <= DGLAB_IPC_INLINE_PAYLOAD_MAX,
+    "DglabPocLogChunk does not fit the inline IPC payload");
 
 #define INNER_HEAP_SIZE 0x80000
 
@@ -55,13 +63,10 @@ static Result dglabMakeResponse(u32 type, u32 token, Result result, const void* 
 {
     void* tls = armGetTls();
 
-    // The CMIF data area starts at the IPC header aligned up to 16 bytes, so the
-    // word count has to include that alignment allowance. Without it the kernel
-    // copies only the CmifOutHeader and truncates the payload, which makes
-    // clients read zeroed data. This mirrors libnx's cmifMakeRequest accounting.
-    u32 actual_size = 16u + (u32)sizeof(CmifOutHeader) + data_size;
-    actual_size = (actual_size + 1u) & ~1u;
-    u32 num_data_words = (actual_size + 3u) / 4u;
+    // The word count has to include the alignment allowance described in
+    // dglab/ipc_cmif.h. Without it the kernel copies only the CmifOutHeader and
+    // truncates the payload, which makes clients read zeroed data.
+    u32 num_data_words = dglabResponseDataWords(data_size);
 
     HipcRequest hipc = hipcMakeRequestInline(tls,
         .type           = type,
@@ -152,6 +157,58 @@ static bool dglabHandleRequest(void)
             dglabMakeResponse(CmifCommandType_Request, token, 0, &pong, sizeof(pong));
             break;
         }
+        // Temporary BLE transport PoC commands, see common/include/dglab/ipc_poc.h.
+        case DGLAB_IPC_POC_CMD_START: {
+            DglabPocStartRequest request = { 0 };
+
+            if (!dglabRequestHasPayload(parsed.meta.num_data_words, sizeof(request))) {
+                dglabMakeResponse(CmifCommandType_Request, token,
+                    MAKERESULT(Module_Libnx, LibnxError_BadInput), NULL, 0);
+                break;
+            }
+
+            memcpy(&request, dglabRequestPayload(in), sizeof(request));
+            dglabMakeResponse(CmifCommandType_Request, token, blePocStart(&request), NULL, 0);
+            break;
+        }
+        case DGLAB_IPC_POC_CMD_STOP: {
+            dglabMakeResponse(CmifCommandType_Request, token, blePocStop(), NULL, 0);
+            break;
+        }
+        case DGLAB_IPC_POC_CMD_STATUS: {
+            DglabPocStatus status;
+
+            blePocGetStatus(&status);
+            dglabMakeResponse(CmifCommandType_Request, token, 0, &status, sizeof(status));
+            break;
+        }
+        case DGLAB_IPC_POC_CMD_LOG: {
+            DglabPocLogRequest request = { 0 };
+            DglabPocLogChunk chunk;
+
+            if (dglabRequestHasPayload(parsed.meta.num_data_words, sizeof(request)))
+                memcpy(&request, dglabRequestPayload(in), sizeof(request));
+
+            memset(&chunk, 0, sizeof(chunk));
+            chunk.next_cursor = blePocReadLog(request.cursor, chunk.text, sizeof(chunk.text));
+            chunk.size = (u32)strlen(chunk.text);
+
+            dglabMakeResponse(CmifCommandType_Request, token, 0, &chunk, sizeof(chunk));
+            break;
+        }
+        case DGLAB_IPC_POC_CMD_ACTION: {
+            DglabPocActionRequest request = { 0 };
+
+            if (!dglabRequestHasPayload(parsed.meta.num_data_words, sizeof(request))) {
+                dglabMakeResponse(CmifCommandType_Request, token,
+                    MAKERESULT(Module_Libnx, LibnxError_BadInput), NULL, 0);
+                break;
+            }
+
+            memcpy(&request, dglabRequestPayload(in), sizeof(request));
+            dglabMakeResponse(CmifCommandType_Request, token, blePocAction(&request), NULL, 0);
+            break;
+        }
         default:
             dglabMakeResponse(CmifCommandType_Request, token,
                 MAKERESULT(Module_Libnx, LibnxError_ShouldNotHappen), NULL, 0);
@@ -170,6 +227,8 @@ int main(int argc, char* argv[])
     Result rc = smRegisterService(&port, smEncodeName(DGLAB_IPC_SERVICE_NAME), false, 1);
     if (R_FAILED(rc))
         return rc;
+
+    blePocInitialize();
 
     while (true) {
         Handle session = INVALID_HANDLE;
