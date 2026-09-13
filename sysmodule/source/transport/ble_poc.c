@@ -50,6 +50,7 @@ enum {
     PocStep_DiscoverCharacteristics,
     PocStep_Subscribe,
     PocStep_BtdevProbe,
+    PocStep_BtdevGeneralProbe,
     PocStep_Connected,
     PocStep_Finished,
 };
@@ -893,6 +894,46 @@ static bool pocEnterStep(PocWorker* w, u32 step)
     return true;
 }
 
+// Collects scan results for the probe duration and logs every entry.
+static u32 pocCollectScanResults(const char* label, Event* scan_event, bool have_event)
+{
+    u32 results_seen = 0;
+    u32 deadline = pocNowMs() + POC_BTDEV_PROBE_MS;
+
+    while (pocNowMs() < deadline) {
+        BtdrvBleScanResult results[10];
+        u8 total = 0;
+        bool stop;
+
+        mutexLock(&g_poc.mutex);
+        stop = g_poc.stop_requested;
+        mutexUnlock(&g_poc.mutex);
+
+        if (stop)
+            break;
+
+        if (have_event)
+            eventWait(scan_event, 500ull * 1000000ull);
+        else
+            svcSleepThread(500000000ull);
+
+        memset(results, 0, sizeof(results));
+
+        Result rc = btdevGetBleScanResult(results, 10, &total);
+        pocLog("getBleScanResult(%s) rc=0x%08X count=%u", label, (u32)rc, total);
+
+        for (u8 i = 0; i < total && i < 10; i++) {
+            pocLog("  %s scan %u addr=%02X:%02X:%02X:%02X:%02X:%02X count=%d", label, i,
+                results[i].addr.address[0], results[i].addr.address[1],
+                results[i].addr.address[2], results[i].addr.address[3],
+                results[i].addr.address[4], results[i].addr.address[5], results[i].count);
+            results_seen++;
+        }
+    }
+
+    return results_seen;
+}
+
 // Diagnostic: run the same scan through libnx's btdev wrapper (bt + btm:u)
 // instead of btdrv.
 //
@@ -904,13 +945,12 @@ static void pocRunBtdevProbe(PocWorker* w)
 {
     BtdrvGattAttributeUuid service = pocUuid16(DGLAB_COYOTE_V3_UUID16_SERVICE);
     Event scan_event;
-    u32 results_seen = 0;
-    u32 deadline;
     Result rc;
+    u32 results_seen;
 
     (void)w;
 
-    pocLog("btdev probe: btInitialize + btmuInitialize");
+    pocLog("btdev probe (smart device 0x180C): btInitialize + btmuInitialize");
     rc = btdevInitialize();
     pocLog("btdevInitialize rc=0x%08X", (u32)rc);
 
@@ -927,37 +967,7 @@ static void pocRunBtdevProbe(PocWorker* w)
     rc = btdevStartBleScanSmartDevice(&service);
     pocLog("btdevStartBleScanSmartDevice(0x180C) rc=0x%08X", (u32)rc);
 
-    deadline = pocNowMs() + POC_BTDEV_PROBE_MS;
-
-    while (pocNowMs() < deadline) {
-        BtdrvBleScanResult results[10];
-        u8 total = 0;
-
-        mutexLock(&g_poc.mutex);
-        bool stop = g_poc.stop_requested;
-        mutexUnlock(&g_poc.mutex);
-
-        if (stop)
-            break;
-
-        if (R_SUCCEEDED(event_rc))
-            eventWait(&scan_event, 500ull * 1000000ull);
-        else
-            svcSleepThread(500000000ull);
-
-        memset(results, 0, sizeof(results));
-
-        Result get_rc = btdevGetBleScanResult(results, 10, &total);
-        pocLog("btdevGetBleScanResult rc=0x%08X count=%u", (u32)get_rc, total);
-
-        for (u8 i = 0; i < total && i < 10; i++) {
-            pocLog("  scan %u addr=%02X:%02X:%02X:%02X:%02X:%02X count=%d", i,
-                results[i].addr.address[0], results[i].addr.address[1],
-                results[i].addr.address[2], results[i].addr.address[3],
-                results[i].addr.address[4], results[i].addr.address[5], results[i].count);
-            results_seen++;
-        }
-    }
+    results_seen = pocCollectScanResults("smart", &scan_event, R_SUCCEEDED(event_rc));
 
     rc = btdevStopBleScanSmartDevice();
     pocLog("btdevStopBleScanSmartDevice rc=0x%08X", (u32)rc);
@@ -968,6 +978,57 @@ static void pocRunBtdevProbe(PocWorker* w)
     btdevExit();
 
     pocLog("btdev probe: done, %u results", results_seen);
+}
+
+// Control experiment for the smart device scan: btm's "general" scan uses a
+// manufacturer filter instead of a service UUID. If this one reports devices
+// while the smart device scan reports none, then the scan plumbing works and
+// only the filter is the problem (the Coyote may not advertise 0x180C).
+static void pocRunGeneralScanProbe(PocWorker* w)
+{
+    BtdrvBleAdvertisePacketParameter param;
+    Event scan_event;
+    Result rc;
+    u32 results_seen;
+
+    (void)w;
+
+    pocLog("btdev probe (general scan): btInitialize + btmuInitialize");
+    rc = btdevInitialize();
+    pocLog("btdevInitialize rc=0x%08X", (u32)rc);
+
+    if (R_FAILED(rc)) {
+        pocLog("btdev general probe: bt/btm:u unusable from this process");
+        return;
+    }
+
+    memset(&param, 0, sizeof(param));
+
+    Result param_rc = btdevGetBleScanParameter(0xFFFFu, &param);
+    pocLog("btdevGetBleScanParameter(0xFFFF) rc=0x%08X company=0x%04X pattern=%02X%02X%02X%02X%02X%02X",
+        (u32)param_rc, param.company_id, param.pattern_data[0], param.pattern_data[1],
+        param.pattern_data[2], param.pattern_data[3], param.pattern_data[4],
+        param.pattern_data[5]);
+
+    memset(&scan_event, 0, sizeof(scan_event));
+
+    Result event_rc = btdevAcquireBleScanEvent(&scan_event);
+    pocLog("btdevAcquireBleScanEvent rc=0x%08X", (u32)event_rc);
+
+    rc = btdevStartBleScanGeneral(param);
+    pocLog("btdevStartBleScanGeneral rc=0x%08X", (u32)rc);
+
+    results_seen = pocCollectScanResults("general", &scan_event, R_SUCCEEDED(event_rc));
+
+    rc = btdevStopBleScanGeneral();
+    pocLog("btdevStopBleScanGeneral rc=0x%08X", (u32)rc);
+
+    if (R_SUCCEEDED(event_rc))
+        eventClose(&scan_event);
+
+    btdevExit();
+
+    pocLog("btdev general probe: done, %u results", results_seen);
 }
 
 static void pocHandlePendingAction(PocWorker* w)
@@ -1101,6 +1162,17 @@ static void pocHandlePendingAction(PocWorker* w)
             w->step = PocStep_BtdevProbe;
             break;
 
+        case DglabPocAction_ProbeGeneralScan:
+            pocLog("action probe general scan");
+
+            if (w->scanning) {
+                btdrvStopBleScan();
+                w->scanning = false;
+            }
+
+            w->step = PocStep_BtdevGeneralProbe;
+            break;
+
         default:
             break;
     }
@@ -1209,6 +1281,10 @@ static bool pocStepRun(PocWorker* w)
         case PocStep_BtdevProbe:
             // Diagnostic run: report and end the session.
             pocRunBtdevProbe(w);
+            return false;
+
+        case PocStep_BtdevGeneralProbe:
+            pocRunGeneralScanProbe(w);
             return false;
 
         default:
@@ -1430,7 +1506,10 @@ Result blePocAction(const DglabPocActionRequest* request)
     mutexUnlock(&g_poc.mutex);
 
     if (!running)
+    {
+        pocLog("action %u ignored: no run active", request->action);
         return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
+    }
 
     pocLog("action queued %u", request->action);
 

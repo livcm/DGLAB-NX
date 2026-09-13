@@ -229,6 +229,22 @@ static void printLog(void)
         printf("%s\n", g_log_lines[LOG_LINES - g_log_filled + i]);
 }
 
+static Result pocSendStart(Service* dglab)
+{
+    DglabPocStartRequest request = { 0 };
+
+    request.applet_resource_user_id = appletGetAppletResourceUserId();
+    return serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_START, request);
+}
+
+static Result pocSendAction(Service* dglab, u32 action)
+{
+    DglabPocActionRequest request = { 0 };
+
+    request.action = action;
+    return serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_ACTION, request);
+}
+
 int main(int argc, char* argv[])
 {
     (void)argc;
@@ -286,90 +302,76 @@ int main(int argc, char* argv[])
         return 0;
     }
 
+    DglabPocStatus status;
+    Result status_rc = 0;
+
     while (appletMainLoop()) {
         padUpdate(&pad);
         u64 down = padGetButtonsDown(&pad);
 
+        // Refresh the status before handling buttons: the action handling needs
+        // to know whether a run is active, because the sysmodule drops actions
+        // when no worker is running.
+        memset(&status, 0, sizeof(status));
+        status_rc = serviceDispatchOut(&dglab, DGLAB_IPC_POC_CMD_STATUS, status);
+
+        if (R_SUCCEEDED(status_rc))
+            pocPollLog(&dglab);
+
+        bool run_active = R_SUCCEEDED(status_rc) && status.state != DglabPocState_Idle;
+
         if (down & HidNpadButton_Plus)
             break;
 
-        if (down & HidNpadButton_A) {
-            DglabPocStartRequest request = { 0 };
-            request.applet_resource_user_id = appletGetAppletResourceUserId();
-            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_START, request);
-        }
+        if (down & HidNpadButton_A)
+            pocSendStart(&dglab);
 
         if (down & HidNpadButton_Minus)
             serviceDispatch(&dglab, DGLAB_IPC_POC_CMD_STOP);
 
-        if (down & HidNpadButton_X) {
-            DglabPocActionRequest request = { 0 };
-            request.action = DglabPocAction_WriteZeroB0;
-            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
+        u32 action = 0;
+
+        if (down & HidNpadButton_X)
+            action = DglabPocAction_WriteZeroB0;
+        else if (down & HidNpadButton_B)
+            action = DglabPocAction_ReadBattery;
+        else if (down & HidNpadButton_Y)
+            action = DglabPocAction_Disconnect;
+        else if (down & HidNpadButton_R)
+            action = DglabPocAction_ReconnectAruid0;
+        else if (down & HidNpadButton_L)
+            action = DglabPocAction_ToggleAutoWrite;
+        else if (down & HidNpadButton_ZL)
+            action = DglabPocAction_RescanNoFilter;
+        else if (down & HidNpadButton_ZR)
+            action = DglabPocAction_ConnectLastScan;
+        else if (down & HidNpadButton_Up)
+            action = DglabPocAction_ProbeBtdev;
+        else if (down & HidNpadButton_Down)
+            action = DglabPocAction_ProbeGeneralScan;
+
+        if (action != 0) {
+            // Start a run first when idle so a single button press works from
+            // the idle screen.
+            if (!run_active)
+                pocSendStart(&dglab);
+
+            pocSendAction(&dglab, action);
         }
-
-        if (down & HidNpadButton_B) {
-            DglabPocActionRequest request = { 0 };
-            request.action = DglabPocAction_ReadBattery;
-            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
-        }
-
-        if (down & HidNpadButton_Y) {
-            DglabPocActionRequest request = { 0 };
-            request.action = DglabPocAction_Disconnect;
-            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
-        }
-
-        if (down & HidNpadButton_R) {
-            DglabPocActionRequest request = { 0 };
-            request.action = DglabPocAction_ReconnectAruid0;
-            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
-        }
-
-        if (down & HidNpadButton_L) {
-            DglabPocActionRequest request = { 0 };
-            request.action = DglabPocAction_ToggleAutoWrite;
-            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
-        }
-
-        if (down & HidNpadButton_ZL) {
-            DglabPocActionRequest request = { 0 };
-            request.action = DglabPocAction_RescanNoFilter;
-            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
-        }
-
-        if (down & HidNpadButton_ZR) {
-            DglabPocActionRequest request = { 0 };
-            request.action = DglabPocAction_ConnectLastScan;
-            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
-        }
-
-        if (down & HidNpadButton_Up) {
-            DglabPocActionRequest request = { 0 };
-            request.action = DglabPocAction_ProbeBtdev;
-            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
-        }
-
-        DglabPocStatus status;
-        memset(&status, 0, sizeof(status));
-        rc = serviceDispatchOut(&dglab, DGLAB_IPC_POC_CMD_STATUS, status);
-
-        if (R_SUCCEEDED(rc))
-            pocPollLog(&dglab);
 
         consoleClear();
         printf("DGLAB-NX BLE PoC   (IPC %u.%u.%u)\n\n", version.major, version.minor,
             version.patch);
 
-        if (R_SUCCEEDED(rc))
+        if (R_SUCCEEDED(status_rc))
             printStatus(&status);
         else
-            printf("PoC status failed (0x%08X)\n", rc);
+            printf("PoC status failed (0x%08X)\n", status_rc);
 
         printf("\n");
         printLog();
         printf("A start  X zero-B0  B battery  R aruid0  L auto  Y disconn  - stop  + exit\n");
-        printf("ZL rescan-no-filter  ZR connect-last-scan  Up probe-btdev\n");
+        printf("ZL rescan-no-filter  ZR last-scan  Up probe-btdev  Down probe-general\n");
 
         consoleUpdate(NULL);
     }

@@ -63,6 +63,7 @@ enum {
     DglabPocAction_RescanNoFilter   = 7, ///< Clear the scan filters, disable filtering and scan again.
     DglabPocAction_ConnectLastScan  = 8, ///< Connect to the last scanned address even if the advertisement did not match.
     DglabPocAction_ProbeBtdev       = 9, ///< Run the scan through libnx's btdev (bt/btm:u) wrapper instead of btdrv.
+    DglabPocAction_ProbeGeneralScan = 10, ///< btdev general scan (manufacturer filter) as a control experiment.
 };
 
 typedef struct {

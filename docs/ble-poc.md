@@ -54,19 +54,24 @@ Sysmodule 是 `AppletType_None` 的后台进程，没有 applet，因此 PoC 走
 
 ## 安装
 
-Sysmodule（Atmosphère）：
+仓库根目录的 `make` 会一次生成完整的发布布局：
 
-    SD:/atmosphere/contents/00FF072107210721/
-        ├── exefs.nsp
-        ├── toolbox.json
-        └── flags/boot2.flag
+    release/
+    ├── 00FF072107210721/      前端 sysmodule 目录（即 SD 上要放的目录）
+    │   ├── exefs.nsp
+    │   ├── toolbox.json
+    │   └── flags/boot2.flag
+    ├── DGLAB-NX.nro
+    └── DGLAB-NX-ovl.ovl       （尚未实现，见 overlay/AGENTS.md）
 
-也就是把构建目录 `sysmodule/00FF072107210721/` 整个复制过去。`boot2.flag` 表示随
-系统启动加载，需要重启生效。
+对应到 SD 卡：
 
-NRO：
+    release/00FF072107210721/  →  SD:/atmosphere/contents/00FF072107210721/
+    release/DGLAB-NX.nro       →  SD:/switch/DGLAB-NX.nro
+    release/DGLAB-NX-ovl.ovl   →  SD:/switch/.overlays/DGLAB-NX-ovl.ovl
 
-    SD:/switch/DGLAB-NX.nro
+`boot2.flag` 表示随系统启动加载，需要重启生效。也可以单独构建某个组件：
+`make -C sysmodule package`、`make -C nro package`。
 
 ## 操作
 
@@ -80,8 +85,13 @@ NRO：
 | `Y` | 断开连接 |
 | `ZL` | 清除并关闭扫描过滤器后重新扫描（扫描无结果时的第一个实验） |
 | `ZR` | 直接连接最近一次扫描到的地址（不要求广播匹配） |
+| `Up` | btdev 探针：bt/btm:u 的 smart device 扫描（按服务 UUID 0x180C 过滤） |
+| `Down` | btdev 探针：bt/btm:u 的 general 扫描（按厂商数据过滤），作为对照 |
 | `-` | 停止 PoC（清理并退出） |
 | `+` | 退出 NRO |
+
+动作键在 PoC 未运行时（界面显示 `state: idle`）会自动先启动一次运行，
+所以空闲界面直接按 `Up`／`Down` 也能工作。
 
 NRO 会把收到的 sysmodule 日志同步写到：
 
@@ -200,6 +210,35 @@ btdevExit
   （代码还会更短），BLE 所有权仍然留在 sysmodule；
 - 如果 `btdevInitialize` 或扫描调用返回错误 → 说明后台进程用不了这套服务，
   那时需要在"让 applet 承担 BLE"与"继续挖 btdrv"之间做架构决策。
+
+## 第四次实机结果（btdev 探针）
+
+```
+btdevInitialize rc=0x00000000                 ← bt + btm:u 在后台 sysmodule 里可用
+btdevAcquireBleScanEvent rc=0x00000000
+btdevStartBleScanSmartDevice(0x180C) rc=0x00000000
+btdevGetBleScanResult rc=0x00000000 count=0   ← 15 秒内一个设备都没有
+btdevStopBleScanSmartDevice rc=0x00000000
+btdev probe: done, 0 results
+```
+
+这是重要的一步：**`bt`／`btm:u` 这套服务在后台 sysmodule 里完全可用**（这是我们自己
+的 ARUID=0 也没有被拒绝），所以 BLE 所有权可以继续留在 sysmodule，不需要把 BLE 搬到
+applet。libnx 的 btdev 封装能直接用，后续传输实现的代码还会更短。
+
+但没有扫到任何设备。两条独立路径（btdrv 与 btm:u）都是"调用成功、结果为空"，所以
+问题更可能在**广播侧**而不是主机侧：
+
+1. 测试时设备是否已开机、处于未被占用的状态（没有连着手机 App）；
+2. 设备的广播包里到底有没有 0x180C 服务 UUID —— smart device 扫描就是按它过滤的，
+   如果设备只广播名称，这个过滤器永远匹配不到。
+
+因此新增 `Down`（general 扫描）作为对照：
+
+- 如果 general 扫描能列出设备，而 smart device 扫描不能 → 主机扫描没问题，
+  是广播内容/过滤器不匹配，需要改用名称匹配或直接连地址；
+- 如果两者都是 0 → 说明当时周围没有可发现的 BLE 设备，先用手机上的
+  nRF Connect 之类的工具确认 Coyote 在广播什么（名称、服务 UUID、厂商数据）。
 
 ## 里程碑
 
