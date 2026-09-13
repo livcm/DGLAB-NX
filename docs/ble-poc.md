@@ -152,6 +152,20 @@ NRO 会在连接 sysmodule 之前先输出 `console ready`、日志文件状态�
 因为当时还没有注册 GATT client、也没有扫描到设备，属于预期内的拒绝，不能据此判断
 连接本身是否可行。
 
+## 第二次实机结果（同一天，开启 BLE 与换事件源之后）
+
+- `btdrvEnableBle rc=0x00000000`：显式开启 BLE 成功，但事件依然为 0；
+- `btdrvInitializeBle` 与 `btdrvRegisterBleHidEvent` 都返回 0，两个事件句柄都拿到了；
+- 两个事件源上的 `eventWait` 只返回 `0x0000EA01`，即内核 `Timeout`
+  （module 1、description `0x75`）——说明句柄有效，只是**从未被触发**；
+- 结论：问题不在设备、广播或扫描参数，而是"没有任何 BLE 事件被投递到本 sysmodule"。
+
+因此第三次迭代改为**直接轮询事件队列**（`btdrvGetBleManagedEventInfo` /
+`btdrvGetLeHidEventInfo`），不再依赖事件句柄：日志会打印
+`poll managed rc=0x... type=...` 与 `poll lehid rc=0x... type=...`。
+这样可以把"队列里没有数据"与"有数据但事件没通知"区分开；一旦轮询拿到事件，
+PoC 会自动切换到轮询模式继续跑完后续流程。
+
 ## 里程碑
 
 NRO 顶部的 `milestones` 一行用 `+`/`.` 表示是否达成：
