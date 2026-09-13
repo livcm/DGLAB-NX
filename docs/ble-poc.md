@@ -426,6 +426,48 @@ btm 在扫描前会设置 BLE 的 scan interval / window；如果缺省值是 0�
     btdrv probe: ...（约 20 秒，phase 0 无过滤器，phase 1 过滤 0x1812）
     <filter> scan ...（0x1812 → 0x180C → general）
 
+## 第十一次实测：驱动级探针的结果（结论）
+
+```
+btdrv probe: btdrvInitialize rc=0x00000000
+btdrv probe: btdrvInitializeBle rc=0x00000000
+btdrv probe: adapter enabled=1
+btdrv probe: btdrvEnableBle rc=0x00000000
+btdrv probe: SetBleScanParameter(0x0060, 0x0030) rc=0x00000000
+btdrv probe: btdrvStartBleScan (phase 0) rc=0x00000000
+btdrv probe: fetch type=0 raw=37000000FF000000          ← 客户端注册事件带错误结果
+btdrv probe: fetch type=6 raw=0000000000000000          ← ScanResult，载荷全 0
+btdrv probe: scan result status=0 addr=00:00:00:00:00:00 entries=0 rssi=0
+btdrv probe: phase 0 done fetches=46 scan_results=1
+btdrv probe: SetBleScanParameter(0x0030, 0x0030) rc=0x00000000
+btdrv probe: AddBleScanFilterCondition(0x1812) rc=0x00000000
+btdrv probe: EnableBleScanFilter(true) rc=0x00000000
+btdrv probe: btdrvStartBleScan (phase 1) rc=0x00000000
+btdrv probe: phase 1 done fetches=50 scan_results=0
+btdrv probe: done, 1 scan result(s) in total
+```
+
+解读：
+
+- 所有 btdrv 调用都被接受（`rc=0`），说明**权限和调用顺序没有问题**；
+- 事件队列**确实有回调**，但 `ScanResult` 的载荷全为 0，从来没有真实地址或广播数据；
+- `type=0` 的客户端注册事件带着 `result=0x00000037`、`client_if=0xFF`，也就是
+  **注册本身是失败的**（`0xFF` 是无效接口号）。
+
+### 结论（截至 HOS 22.5.0 / AMS 1.11.2）
+
+已经排除的可能：扫描过滤器 UUID、扫描参数（interval/window）、事件源选择（managed 与
+LE HID 两个队列）、轮询与事件两种读取方式、按地址直连、以及权限/调用顺序。
+
+剩下的解释是：libnx 的 BLE 绑定（btdrv/btm）面向 HOS 5~9 时代实现，在 22.5.0 上要么
+事件载荷布局已改变（读到的是空/错位数据），要么 Nintendo 只对系统自身的流程开放
+通用 BLE 客户端能力（btm 的 general 过滤固定为 Nintendo company ID `0x0553`、
+smart device 过滤为空、连接请求被直接拒绝）。
+
+**因此在本机环境下，"Switch 后台 sysmodule 直连 BLE 外设"这条路暂时走不通。**
+继续深入只有两个方向：逆向 HOS 22.5 的 BLE ABI（工作量大、结果不确定，且违反
+"不猜测 API" 的项目原则），或者换传输层。
+
 ## 这次要确认的开放问题
 
 以下都是实现时无法从 libnx 头文件确定、只能靠实机日志回答的问题：
