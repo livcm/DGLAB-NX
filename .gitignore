@@ -15,7 +15,9 @@ build/
 # sysmodule/DGLAB-NX.json and deliberately not duplicated here.
 sysmodule/[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]/
 
-# Local protocol reference clone (see docs/dglab-protocol.md)
+# Safety net in case a protocol reference clone ends up here. The standard
+# location is the sibling directory ../dglab-bluetooth-protocol,
+# see docs/dglab-protocol.md.
 reference/
 
 # macOS
