@@ -12,7 +12,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET		:=	DGLAB-NX
 BUILD		:=	build
-SOURCES		:=	source
+SOURCES		:=	source source/protocol
 DATA		:=	data
 INCLUDES	:=	include ../common/include
 
