@@ -190,13 +190,15 @@ make -C tests/protocol
 
 ## 已知限制与后续工作
 
-- 尚未实现 BLE transport（扫描、连接、GATT 读写、通知），这是下一步；
-- 尚未把会话层接入 Sysmodule 主循环：`sysmodule/source/main.c` 目前只提供最小 IPC，
-  没有创建 BLE 连接、也没有驱动 `dglabCoyoteV3SessionTick()`；
+- BLE transport 目前只有 PoC（扫描、连接、服务发现、读写、通知），见
+  `docs/ble-poc.md`；它尚未接入本文件的协议会话层，写的还是固定报文；
+- 尚未把会话层接入 Sysmodule 主循环：`sysmodule/source/main.c` 目前只提供最小 IPC
+  与 PoC 调试命令，没有驱动 `dglabCoyoteV3SessionTick()`；
 - 会话层的时间目前由测试以虚拟时间提供，尚未与真实 100ms 定时源结合；
-- 尚未实现电量读取（`0x180A/0x1500`）；
+- 电量读取只在 PoC 里通过临时 IPC 命令触发，尚未进入正式接口；
 - 尚未实现 V2 协议；
-- IPC 目前只有 `GET_VERSION` 与 `PING`，设备连接、强度与波形控制命令尚未加入。
+- 稳定 IPC 目前只有 `GET_VERSION` 与 `PING`；PoC 的调试命令位于临时的
+  `common/include/dglab/ipc_poc.h`，设备连接、强度与波形控制命令尚未设计。
 
 ## 参考
 
