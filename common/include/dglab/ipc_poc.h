@@ -68,8 +68,17 @@ enum {
     DglabPocAction_ScanWithGeneralFilter = 10, ///< Scan using btm's general (manufacturer data) filter.
 };
 
+// Direct connect: skip the scan entirely and connect to this address. Useful
+// because btm's scan filters are system configured and may not match a generic
+// BLE peripheral.
+#define DGLAB_POC_START_FLAG_TARGET_ADDRESS (1u << 0)
+
 typedef struct {
     u64 applet_resource_user_id;
+    u32 flags;            ///< DGLAB_POC_START_FLAG_*
+    u32 scan_filter;      ///< 0 = default order, otherwise a 16-bit UUID or 0xFFFF for the general filter
+    u8 target_address[6]; ///< Used with DGLAB_POC_START_FLAG_TARGET_ADDRESS
+    u8 pad[2];
 } DglabPocStartRequest;
 
 typedef struct {

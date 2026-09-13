@@ -22,6 +22,9 @@
 #define LOG_LINE_LEN 72
 #define LOG_POLL_ROUNDS 8
 #define LOG_FILE_PATH "sdmc:/switch/dglab-ble-poc.log"
+// Optional: connect straight to this address instead of scanning, for the case
+// where the console's scan filters cannot report the device.
+#define ADDRESS_FILE_PATH "sdmc:/switch/dglab-ble-address.txt"
 
 static char g_log_lines[LOG_LINES][LOG_LINE_LEN];
 static int g_log_filled;
@@ -29,6 +32,8 @@ static u32 g_log_cursor;
 static char g_partial[LOG_LINE_LEN];
 static size_t g_partial_len;
 static FILE* g_log_file;
+static u8 g_target_address[6];
+static bool g_target_address_valid;
 
 static const char* pocStateName(u32 state)
 {
@@ -229,11 +234,61 @@ static void printLog(void)
         printf("%s\n", g_log_lines[LOG_LINES - g_log_filled + i]);
 }
 
+// Reads an optional "XX:XX:XX:XX:XX:XX" file so the PoC can skip the console's
+// scan filters and connect straight to a known address.
+static bool loadTargetAddress(u8 out[6])
+{
+    FILE* file = fopen(ADDRESS_FILE_PATH, "r");
+    char line[64];
+    unsigned int bytes[6];
+
+    if (file == NULL)
+        return false;
+
+    if (fgets(line, sizeof(line), file) == NULL) {
+        fclose(file);
+        return false;
+    }
+
+    fclose(file);
+
+    if (sscanf(line, "%x:%x:%x:%x:%x:%x", &bytes[0], &bytes[1], &bytes[2], &bytes[3],
+            &bytes[4], &bytes[5]) != 6)
+        return false;
+
+    for (int i = 0; i < 6; i++)
+        out[i] = (u8)bytes[i];
+
+    return true;
+}
+
+// Idle, failed and stopped all mean the sysmodule has no worker running, so a
+// new run has to be started before an action can be accepted.
+static bool pocStateIsActive(u32 state)
+{
+    switch (state) {
+        case DglabPocState_Idle:
+        case DglabPocState_Failed:
+        case DglabPocState_Stopped:
+            return false;
+        default:
+            return true;
+    }
+}
+
 static Result pocSendStart(Service* dglab)
 {
     DglabPocStartRequest request = { 0 };
 
     request.applet_resource_user_id = appletGetAppletResourceUserId();
+
+    g_target_address_valid = loadTargetAddress(request.target_address);
+
+    if (g_target_address_valid) {
+        request.flags |= DGLAB_POC_START_FLAG_TARGET_ADDRESS;
+        memcpy(g_target_address, request.target_address, sizeof(g_target_address));
+    }
+
     return serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_START, request);
 }
 
@@ -318,7 +373,7 @@ int main(int argc, char* argv[])
         if (R_SUCCEEDED(status_rc))
             pocPollLog(&dglab);
 
-        bool run_active = R_SUCCEEDED(status_rc) && status.state != DglabPocState_Idle;
+        bool run_active = R_SUCCEEDED(status_rc) && pocStateIsActive(status.state);
 
         if (down & HidNpadButton_Plus)
             break;
@@ -370,6 +425,15 @@ int main(int argc, char* argv[])
 
         printf("\n");
         printLog();
+
+        if (g_target_address_valid) {
+            printf("target: %02X:%02X:%02X:%02X:%02X:%02X (from %s)\n", g_target_address[0],
+                g_target_address[1], g_target_address[2], g_target_address[3],
+                g_target_address[4], g_target_address[5], ADDRESS_FILE_PATH);
+        } else {
+            printf("target: none, scanning (see %s)\n", ADDRESS_FILE_PATH);
+        }
+
         printf("A start  X zero-B0  B battery  R aruid0  L auto  Y disconn  - stop  + exit\n");
         printf("ZL rescan(0x1812->0x180C)  ZR scan 0x180C  Up scan 0x1812  Down general filter\n");
 

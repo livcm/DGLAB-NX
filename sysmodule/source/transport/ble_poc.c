@@ -101,6 +101,9 @@ typedef struct {
     bool auto_write;
     u64 aruid;
     u32 pending_action;
+    bool use_target_address;
+    u8 target_address[6];
+    u32 start_scan_filter;
 
     // Worker owned.
     PocWorker worker;
@@ -468,6 +471,35 @@ static bool pocScan_eventSetup(PocWorker* w)
         btdevAcquireBleScanEvent);
 }
 
+// btm keeps its scan filters in system state that a third party cannot set, and
+// the scan start functions take a filter from the caller. Logging the stored
+// values shows whether our filter can ever match anything.
+static void pocLogStoredScanParameters(void)
+{
+    BtdrvBleAdvertisePacketParameter param;
+    BtdrvGattAttributeUuid uuid;
+    Result rc;
+
+    memset(&param, 0, sizeof(param));
+    rc = btdevGetBleScanParameter(0xFFFFu, &param);
+    pocLog("stored scan param 0xFFFF rc=0x%08X company=0x%04X pattern=%02X%02X%02X%02X%02X%02X",
+        (u32)rc, param.company_id, param.pattern_data[0], param.pattern_data[1],
+        param.pattern_data[2], param.pattern_data[3], param.pattern_data[4],
+        param.pattern_data[5]);
+
+    memset(&param, 0, sizeof(param));
+    rc = btdevGetBleScanParameter(0x0001u, &param);
+    pocLog("stored scan param 0x0001 rc=0x%08X company=0x%04X pattern=%02X%02X%02X%02X%02X%02X",
+        (u32)rc, param.company_id, param.pattern_data[0], param.pattern_data[1],
+        param.pattern_data[2], param.pattern_data[3], param.pattern_data[4],
+        param.pattern_data[5]);
+
+    memset(&uuid, 0, sizeof(uuid));
+    rc = btdevGetBleScanParameter2(0x0002u, &uuid);
+    pocLog("stored smart device UUID rc=0x%08X size=0x%X bytes=%02X%02X%02X%02X", (u32)rc,
+        uuid.size, uuid.uuid[0], uuid.uuid[1], uuid.uuid[2], uuid.uuid[3]);
+}
+
 // Waits for scan results and returns the first device seen.
 static bool pocPollScanResults(PocWorker* w, const char* label, BtdrvAddress* out)
 {
@@ -587,8 +619,9 @@ static bool pocScanAny(PocWorker* w, BtdrvAddress* out)
     if (w->forced_filter == 0xFFFFu)
         return pocScanGeneral(w, out);
 
-    // Default order: the advertised UUID first, because the DG-LAB service only
-    // exists after connecting and cannot be used as a scan filter.
+    // Default order: the advertised UUID first (the DG-LAB service only exists
+    // after connecting and cannot be used as a scan filter), then the protocol
+    // UUID, then btm's general scan as the last control attempt.
     if (pocScanSmart(w, POC_UUID16_ADVERTISED_SERVICE, out)) {
         w->filter_used = POC_UUID16_ADVERTISED_SERVICE;
         return true;
@@ -601,6 +634,16 @@ static bool pocScanAny(PocWorker* w, BtdrvAddress* out)
 
     if (pocScanSmart(w, DGLAB_COYOTE_V3_UUID16_SERVICE, out)) {
         w->filter_used = DGLAB_COYOTE_V3_UUID16_SERVICE;
+        return true;
+    }
+
+    if (pocStopRequested() || w->restart_scan)
+        return false;
+
+    pocLog("falling back to the general (manufacturer) scan filter");
+
+    if (pocScanGeneral(w, out)) {
+        w->filter_used = 0xFFFFu;
         return true;
     }
 
@@ -955,6 +998,17 @@ static void pocThreadFunc(void* arg)
     w->ble_ready = true;
     pocSetMilestone(DGLAB_POC_MILESTONE_BLE_READY);
 
+    pocLogStoredScanParameters();
+
+    if (g_poc.use_target_address) {
+        pocLog("direct connect to %02X:%02X:%02X:%02X:%02X:%02X, scan skipped",
+            g_poc.target_address[0], g_poc.target_address[1], g_poc.target_address[2],
+            g_poc.target_address[3], g_poc.target_address[4], g_poc.target_address[5]);
+    } else if (g_poc.start_scan_filter != 0) {
+        pocLog("scan filter forced to 0x%04X", g_poc.start_scan_filter);
+        w->forced_filter = (u16)g_poc.start_scan_filter;
+    }
+
     while (!pocStopRequested()) {
         BtdrvAddress address;
         u32 action;
@@ -966,7 +1020,11 @@ static void pocThreadFunc(void* arg)
 
         w->restart_scan = false;
 
-        if (!pocScanAny(w, &address)) {
+        if (g_poc.use_target_address) {
+            memcpy(address.address, g_poc.target_address, sizeof(address.address));
+            w->filter_used = 0;
+            pocSetMilestone(DGLAB_POC_MILESTONE_DEVICE_FOUND);
+        } else if (!pocScanAny(w, &address)) {
             if (pocStopRequested() || w->restart_scan)
                 continue;
 
@@ -1070,6 +1128,9 @@ Result blePocStart(const DglabPocStartRequest* request)
     g_poc.stop_requested = false;
     g_poc.aruid = request->applet_resource_user_id;
     g_poc.status.aruid_low = (u32)g_poc.aruid;
+    g_poc.use_target_address = (request->flags & DGLAB_POC_START_FLAG_TARGET_ADDRESS) != 0;
+    memcpy(g_poc.target_address, request->target_address, sizeof(g_poc.target_address));
+    g_poc.start_scan_filter = request->scan_filter;
     g_poc.running = true;
     mutexUnlock(&g_poc.mutex);
 
