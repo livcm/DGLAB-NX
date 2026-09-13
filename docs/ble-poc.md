@@ -412,6 +412,20 @@ btm 在扫描前会设置 BLE 的 scan interval / window；如果缺省值是 0�
 `bytes=` 这些字段正好在行尾，所以你看到的是 `pattern=0` 这种断尾。现在**屏幕仍显示
 短行，但写入 SD 的日志保留完整行**（最长 192 字符）。
 
+## 第十次实测：探针改为自动执行
+
+这一轮日志只有一次会话、没有 `action queued 11`（`Left` 没被按下），但日志截断修复
+生效了：`pattern=000100000100`、`pattern=ADDE00EFBE00` 都能完整看到。
+
+为了让这一步不再依赖按键时机，**每次会话开始都会自动运行一次 btdrv 驱动级探针**
+（`Left` 仍然可以手动重复）。同时把单次扫描超时从 12 秒降到 8 秒，避免一次会话过长。
+
+于是按 `A` 的日志顺序是：
+
+    poc start ... / btdevInitialize / stored scan param ...
+    btdrv probe: ...（约 20 秒，phase 0 无过滤器，phase 1 过滤 0x1812）
+    <filter> scan ...（0x1812 → 0x180C → general）
+
 ## 这次要确认的开放问题
 
 以下都是实现时无法从 libnx 头文件确定、只能靠实机日志回答的问题：

@@ -35,7 +35,7 @@
 #define POC_LOG_CAPACITY 4096u
 #define POC_LOG_LINE_MAX 160u
 
-#define POC_SCAN_TIMEOUT_MS 12000u
+#define POC_SCAN_TIMEOUT_MS 8000u
 #define POC_CONNECT_TIMEOUT_MS 12000u
 #define POC_DISCOVER_TIMEOUT_MS 8000u
 #define POC_SCAN_ATTEMPTS 3u
@@ -1167,6 +1167,12 @@ static void pocThreadFunc(void* arg)
         pocLog("scan filter forced to 0x%04X", g_poc.start_scan_filter);
         w->forced_filter = (u16)g_poc.start_scan_filter;
     }
+
+    // The driver level scan is the last untested path and it must not depend on
+    // the user pressing a key while the right step happens to be running, so it
+    // runs once automatically at the start of every session. The Left key can
+    // still repeat it on demand.
+    pocRunBtdrvScanProbe(w);
 
     while (!pocStopRequested()) {
         BtdrvAddress address;
