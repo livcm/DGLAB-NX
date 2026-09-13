@@ -21,20 +21,24 @@ PROTOCOL_DIR := $(SYSROOT)/source/protocol
 INCLUDES     := -I$(SYSROOT)/include
 BUILD        := build
 
-TARGET  := $(BUILD)/test_coyote_v3
-SOURCES := test_coyote_v3.c $(PROTOCOL_DIR)/coyote_v3.c
-HEADERS := $(SYSROOT)/include/dglab/protocol/coyote_v3.h
+TESTS            := $(wildcard test_*.c)
+BINS             := $(patsubst test_%.c,$(BUILD)/test_%,$(TESTS))
+PROTOCOL_SOURCES := $(wildcard $(PROTOCOL_DIR)/*.c)
+HEADERS          := $(wildcard $(SYSROOT)/include/dglab/protocol/*.h) test_support.h
 
 .PHONY: all test clean
 
 all: test
 
-test: $(TARGET)
-	@$(TARGET)
+test: $(BINS)
+	@for bin in $(BINS); do \
+		echo "== $$(basename $$bin)"; \
+		$$bin || exit 1; \
+	done
 
-$(TARGET): $(SOURCES) $(HEADERS)
+$(BUILD)/test_%: test_%.c $(PROTOCOL_SOURCES) $(HEADERS)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) $(INCLUDES) $(SOURCES) -o $@
+	$(CC) $(CFLAGS) $(INCLUDES) $< $(PROTOCOL_SOURCES) -o $@
 
 clean:
 	@rm -rf $(BUILD)

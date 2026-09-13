@@ -8,75 +8,7 @@
 
 #include <dglab/protocol/coyote_v3.h>
 
-#include <stdio.h>
-#include <string.h>
-
-static int g_checks;
-static int g_failures;
-
-#define CHECK(condition)                                                    \
-    do {                                                                    \
-        g_checks++;                                                         \
-        if (!(condition)) {                                                 \
-            printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #condition);     \
-            g_failures++;                                                   \
-        }                                                                   \
-    } while (0)
-
-#define CHECK_U8(actual, expected)                                          \
-    do {                                                                    \
-        unsigned int check_actual = (unsigned int)(actual);                 \
-        unsigned int check_expected = (unsigned int)(expected);             \
-        g_checks++;                                                         \
-        if (check_actual != check_expected) {                               \
-            printf("FAIL %s:%d: %s = 0x%02X, expected 0x%02X\n", __FILE__,  \
-                __LINE__, #actual, check_actual, check_expected);           \
-            g_failures++;                                                   \
-        }                                                                   \
-    } while (0)
-
-static bool bytesFromHex(const char* hex, uint8_t* out, size_t out_size)
-{
-    if (strlen(hex) != out_size * 2)
-        return false;
-
-    for (size_t i = 0; i < out_size; i++) {
-        unsigned int value = 0;
-        if (sscanf(hex + i * 2, "%2x", &value) != 1)
-            return false;
-        out[i] = (uint8_t)value;
-    }
-
-    return true;
-}
-
-static void printHex(const char* label, const uint8_t* bytes, size_t size)
-{
-    printf("  %s = ", label);
-    for (size_t i = 0; i < size; i++)
-        printf("%02X", bytes[i]);
-    printf("\n");
-}
-
-static void expectBytes(const char* name, const uint8_t* actual, const char* expected_hex,
-    size_t size)
-{
-    uint8_t expected[DGLAB_COYOTE_V3_B0_SIZE];
-
-    if (!bytesFromHex(expected_hex, expected, size)) {
-        printf("FAIL %s: malformed test vector '%s'\n", name, expected_hex);
-        g_failures++;
-        return;
-    }
-
-    g_checks++;
-    if (memcmp(actual, expected, size) != 0) {
-        printf("FAIL %s: packet mismatch\n", name);
-        printHex("actual  ", actual, size);
-        printHex("expected", expected, size);
-        g_failures++;
-    }
-}
+#include "test_support.h"
 
 static void expectWaveformEquals(const char* name, const DglabCoyoteV3WaveformSlot* actual,
     const DglabCoyoteV3WaveformSlot* expected)
@@ -441,6 +373,5 @@ int main(void)
     testDecodeRejectsMalformedPackets();
     testGattConstants();
 
-    printf("\n%d checks, %d failures\n", g_checks, g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return testFinish();
 }
