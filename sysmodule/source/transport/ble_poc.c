@@ -23,6 +23,8 @@
 #define POC_NOTIFY_LOG_LIMIT 6u
 #define POC_SCAN_LOG_LIMIT 6u
 #define POC_HEARTBEAT_MS 2000u
+#define POC_POLL_INTERVAL_MS 100u
+#define POC_POLL_LOG_EVERY 20u
 
 // Advertisement data types from the Bluetooth SIG "Supplement to the Bluetooth
 // Core Specification". libnx documentation references a BtdrvAdType that is not
@@ -64,6 +66,10 @@ typedef struct {
     u32 scan_attempts;
     u32 next_b0_ms;
     u32 last_heartbeat_ms;
+    u32 last_poll_ms;
+    u32 poll_count;
+    Result last_poll_rc[2];
+    bool use_polling;
 
     bool scanning;
     bool connected;
@@ -93,6 +99,7 @@ typedef struct {
     // Guarded by mutex.
     DglabPocStatus status;
     u32 log_write_offset;
+    u32 log_valid_from; // first offset that still holds current-run text
     char log[POC_LOG_CAPACITY];
     Thread worker_thread;
     bool running;
@@ -404,6 +411,7 @@ static void pocReadBattery(void)
 // ---------------------------------------------------------------------------
 
 static bool pocEnterStep(PocWorker* w, u32 step);
+static void pocHandleEvent(PocWorker* w, BtdrvBleEventType type, const BtdrvBleEventInfo* info);
 
 // Acquires the BLE event handle. btdrv exposes two independent event queues
 // that carry the same BtdrvBleEventInfo payloads, so the second one is used as
@@ -465,6 +473,55 @@ static bool pocWaitEvent(BtdrvBleEventType* out_type, BtdrvBleEventInfo* out_inf
     }
 
     return true;
+}
+
+// Asks both event queues for data without waiting on the event handle.
+//
+// Waiting on the event can only tell us "nothing was signalled", which is what
+// the first two hardware runs showed. Polling separates the two possible
+// causes: either no data was produced at all, or the data exists but the event
+// handle is not signalled. If a poll ever returns an event, the PoC switches to
+// polling so the rest of the flow still works.
+static void pocPollEventQueues(PocWorker* w)
+{
+    static const bool kHidQueue[2] = { false, true };
+
+    for (u32 i = 0; i < 2; i++) {
+        BtdrvBleEventInfo info;
+        BtdrvBleEventType type = 0;
+        Result rc;
+
+        memset(&info, 0, sizeof(info));
+
+        if (kHidQueue[i])
+            rc = btdrvGetLeHidEventInfo(&info, sizeof(info), &type);
+        else
+            rc = btdrvGetBleManagedEventInfo(&info, sizeof(info), &type);
+
+        bool log_now = R_SUCCEEDED(rc) || (w->poll_count % POC_POLL_LOG_EVERY) == 0 ||
+                       rc != w->last_poll_rc[i];
+
+        w->last_poll_rc[i] = rc;
+
+        if (log_now) {
+            pocLog("poll %s rc=0x%08X type=%u", kHidQueue[i] ? "lehid" : "managed", (u32)rc,
+                (u32)type);
+        }
+
+        // Only trust a successful poll whose type is inside the documented
+        // range, so an empty queue that happens to report success cannot be
+        // mistaken for a real event.
+        if (R_SUCCEEDED(rc) && type <= BtdrvBleEventType_ServerAttributeOperation) {
+            if (!w->use_polling) {
+                w->use_polling = true;
+                pocLog("polling returns data, switching to polling");
+            }
+
+            pocHandleEvent(w, type, &info);
+        }
+    }
+
+    w->poll_count++;
 }
 
 static void pocHandleCacheSave(PocWorker* w, const BtdrvBleEventInfo* info)
@@ -993,6 +1050,9 @@ static bool pocStepRun(PocWorker* w)
 
                 if (events == 0)
                     pocLog("no BLE events received at all yet");
+
+                // Prove whether the queue is empty or merely not signalled.
+                pocPollEventQueues(w);
             }
 
             if (w->scanning && pocElapsed(w->step_start_ms, POC_SCAN_TIMEOUT_MS)) {
@@ -1163,6 +1223,13 @@ static void pocThreadFunc(void* arg)
         if (pocWaitEvent(&type, &info, POC_EVENT_WAIT_MS))
             pocHandleEvent(w, type, &info);
 
+        // If the event handle never fires but the queue does hold data, keep
+        // draining it directly instead of waiting for a notification.
+        if (w->use_polling && pocElapsed(w->last_poll_ms, POC_POLL_INTERVAL_MS)) {
+            w->last_poll_ms = pocNowMs();
+            pocPollEventQueues(w);
+        }
+
         // Actions are honoured in any step so that "disconnect" and "stop
         // writing" also work while a later step is still making progress.
         pocHandlePendingAction(w);
@@ -1228,6 +1295,7 @@ Result blePocStart(const DglabPocStartRequest* request)
     // Clear the text but keep log_write_offset monotonic: readers track absolute
     // offsets, and resetting it made them read stale bytes from the previous run.
     memset(g_poc.log, 0, sizeof(g_poc.log));
+    g_poc.log_valid_from = g_poc.log_write_offset;
 
     g_poc.status.state = DglabPocState_Initializing;
     g_poc.status.auto_write = g_poc.auto_write ? 1u : 0u;
@@ -1311,6 +1379,11 @@ u32 blePocReadLog(u32 cursor, char* out, u32 out_size)
 
     write = g_poc.log_write_offset;
     earliest = (write > POC_LOG_CAPACITY) ? write - POC_LOG_CAPACITY : 0;
+
+    // Never hand out bytes from before the current run: the ring is cleared at
+    // start, and starting mid line also produced a truncated first line.
+    if (g_poc.log_valid_from > earliest)
+        earliest = g_poc.log_valid_from;
 
     // A reader that is ahead of the writer (for example after the ring was
     // cleared) simply starts from the write position.
