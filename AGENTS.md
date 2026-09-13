@@ -432,12 +432,12 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
    4. 蓝牙音频
    5. 睡眠/唤醒
 7. 实现 DG-LAB Protocol 和 BLE Transport；
-1.  实现最小 NRO Client；
-2.  实现 Joy-Con / 六轴输入；
-3.  实现基础 UI；
-4.  实现 Overlay；
-5.  实现 Game Mod 示例；
-6.  完善文档、测试和错误处理。
+8. 实现最小 NRO Client；
+9. 实现 Joy-Con / 六轴输入；
+10. 实现基础 UI；
+11. 实现 Overlay；
+12. 实现 Game Mod 示例；
+13. 完善文档、测试和错误处理。
 
 除非任务明确要求，否则不要在核心功能尚未稳定前过早实现复杂 UI
 或大量 Game Mod。
