@@ -78,6 +78,8 @@ NRO：
 | `R` | 用 AppletResourceUserId = 0 重新连接 |
 | `L` | 开关 100ms 的 B0 保活写入 |
 | `Y` | 断开连接 |
+| `ZL` | 清除并关闭扫描过滤器后重新扫描（扫描无结果时的第一个实验） |
+| `ZR` | 直接连接最近一次扫描到的地址（不要求广播匹配） |
 | `-` | 停止 PoC（清理并退出） |
 | `+` | 退出 NRO |
 
@@ -85,7 +87,11 @@ NRO 会把收到的 sysmodule 日志同步写到：
 
     sdmc:/switch/dglab-ble-poc.log
 
-测试结束后把这个文件（或屏幕照片）发回来即可。
+打不开时退回到 `sdmc:/dglab-ble-poc.log`；NRO 启动后第二行会显示日志文件的实际状态
+（`log: ...` 或 `log: unavailable`）。测试结束后把这个文件（或屏幕照片）发回来即可。
+
+NRO 会在连接 sysmodule 之前先输出 `console ready`、日志文件状态、`querying sysmodule...`，
+所以如果它卡住，屏幕上的最后一行就是卡住的位置。
 
 ## 每一步的预期
 
@@ -93,19 +99,33 @@ NRO 会把收到的 sysmodule 日志同步写到：
 2. 按 `A`：日志依次出现 `poc start`、`state=init`、`btdrvInitialize rc=...`、
    `btdrvInitializeBle rc=...`、`bluetooth enabled ...`、`state=scanning`、
    `btdrvStartBleScan rc=...`。
-3. 扫描事件：日志打印前若干条扫描结果（地址、RSSI、AD 原始字节）。看到
+3. 扫描期间每 2 秒一条心跳：`scanning events=N results=N last_event=N`。
+   如果长时间 `events=0`，说明 BLE 事件通路根本没有回调，而不是扫描没找到设备。
+4. 扫描事件：日志打印前若干条扫描结果（地址、RSSI、AD 原始字节）。看到
    `coyote 3.0 found` 表示识别到 `47L121000`（或广播里带 0x180C 服务）。
-4. 连接：`btdrvRegisterGattClient`、`btdrvConnectGattServer`，然后是
+5. 连接：`btdrvRegisterGattClient`、`btdrvConnectGattServer`，然后是
    `state=discovering`、`btdrvGetGattService(0x180C)`、事件里列出的属性表。
-5. 特征：`char 0x150A ...`、`char 0x150B ...`、`char 0x1500 ...`，
+6. 特征：`char 0x150A ...`、`char 0x150B ...`、`char 0x1500 ...`，
    包含每个特征的 property 位。
-6. 就绪：`state=ready`，随后 `b0 idle write #1 ...`，`b0 writes` 计数持续增长且
+7. 就绪：`state=ready`，随后 `b0 idle write #1 ...`，`b0 writes` 计数持续增长且
    `failed 0`。
-7. 通知：转动设备本体的强度拨轮，应该出现 `notify ...` 与
+8. 通知：转动设备本体的强度拨轮，应该出现 `notify ...` 与
    `B1 sequence=0 A=.. B=..`，`notifications` 计数增长。
-8. 按 `X`：日志出现 `b0 zero write, sequence 1, expecting B1`，随后应收到
+9. 按 `X`：日志出现 `b0 zero write, sequence 1, expecting B1`，随后应收到
    `B1 sequence=1 ...`，里程碑 `+b1` 点亮。
-9. 按 `B`：应显示 `battery value=..`，里程碑 `+bat` 点亮。
+10. 按 `B`：应显示 `battery value=..`，里程碑 `+bat` 点亮。
+
+## 扫描没有结果时怎么排查
+
+里程碑停在 `scan` 时，先看心跳行：
+
+1. `events=0`：连 BLE 事件都没收到，问题在事件通路（`btdrvInitializeBle` 拿到的事件
+   与 `btdrvGetBleManagedEventInfo` 的配对），与设备无关。
+2. `events>0, results=0`：事件通路没问题，但扫描没有产生结果，可能是广播被过滤或设备
+   没有在广播。按 `ZL` 关闭过滤器重新扫描试一次。
+3. `results>0` 但没有 `coyote 3.0 found`：广播内容与我们预期的 AD 类型不一致，日志里的
+   `ad type=.. data=..` 会直接说明它到底广播了什么。此时可以按 `ZR` 直接连接，
+   先把 GATT 与通知部分验证掉。
 
 ## 里程碑
 

@@ -22,6 +22,7 @@
 #define POC_SCAN_MAX_ATTEMPTS 3u
 #define POC_NOTIFY_LOG_LIMIT 6u
 #define POC_SCAN_LOG_LIMIT 6u
+#define POC_HEARTBEAT_MS 2000u
 
 // Advertisement data types from the Bluetooth SIG "Supplement to the Bluetooth
 // Core Specification". libnx documentation references a BtdrvAdType that is not
@@ -59,10 +60,12 @@ typedef struct {
     u32 step_start_ms;
     u32 scan_attempts;
     u32 next_b0_ms;
+    u32 last_heartbeat_ms;
 
     bool scanning;
     bool connected;
     bool self_disconnect; // set when the PoC itself asks for the disconnect
+    bool client_registered;
     bool have_service;
     bool have_battery_service;
     u8 client_if;
@@ -76,6 +79,9 @@ typedef struct {
     BtdrvGattId char_battery_id;
     u32 notify_logged;
     u32 scan_logged;
+    BtdrvAddress last_scan_address;
+    u8 last_scan_addr_type;
+    bool have_last_scan;
 } PocWorker;
 
 typedef struct {
@@ -256,6 +262,16 @@ static void pocRecordScanResult(void)
 {
     mutexLock(&g_poc.mutex);
     g_poc.status.scan_results++;
+    mutexUnlock(&g_poc.mutex);
+}
+
+// Counts every event the stack hands us, whatever its type. Without this a scan
+// that produces nothing looks the same as an event path that never fires.
+static void pocRecordEvent(BtdrvBleEventType type)
+{
+    mutexLock(&g_poc.mutex);
+    g_poc.status.event_count++;
+    g_poc.status.last_event_type = (u32)type;
     mutexUnlock(&g_poc.mutex);
 }
 
@@ -503,6 +519,12 @@ static void pocHandleScanResult(PocWorker* w, const BtdrvBleEventInfo* info)
 
     pocRecordScanResult();
 
+    // Remember the newest address even when the advertisement does not match,
+    // so the fallback action can still drive the GATT part of the PoC.
+    w->last_scan_address = ev->scan_result.address;
+    w->last_scan_addr_type = ev->scan_result.ble_addr_type;
+    w->have_last_scan = true;
+
     if (w->scan_logged < POC_SCAN_LOG_LIMIT) {
         pocLog("scan status=%u addr=%02X:%02X:%02X:%02X:%02X:%02X rssi=%d entries=%u",
             ev->scan_result.status, ev->scan_result.address.address[0],
@@ -542,6 +564,8 @@ static void pocHandleScanResult(PocWorker* w, const BtdrvBleEventInfo* info)
 
 static void pocHandleEvent(PocWorker* w, BtdrvBleEventType type, const BtdrvBleEventInfo* info)
 {
+    pocRecordEvent(type);
+
     switch (type) {
         case BtdrvBleEventType_ClientRegistration:
             pocLog("event client registration result=0x%08X status=%u client_if=%u",
@@ -550,6 +574,7 @@ static void pocHandleEvent(PocWorker* w, BtdrvBleEventType type, const BtdrvBleE
 
             if (info->client_registration.status == 1) {
                 w->client_if = info->client_registration.client_if;
+                w->client_registered = true;
 
                 mutexLock(&g_poc.mutex);
                 g_poc.status.client_if = w->client_if;
@@ -635,6 +660,7 @@ static bool pocEnterStep(PocWorker* w, u32 step)
             }
 
             w->scanning = true;
+            w->last_heartbeat_ms = pocNowMs();
             pocSetMilestone(DGLAB_POC_MILESTONE_SCAN_STARTED);
             pocSetState(DglabPocState_Scanning);
             break;
@@ -647,6 +673,12 @@ static bool pocEnterStep(PocWorker* w, u32 step)
                 rc = btdrvStopBleScan();
                 pocLog("btdrvStopBleScan rc=0x%08X", (u32)rc);
                 w->scanning = false;
+            }
+
+            if (w->client_registered) {
+                pocLog("gatt client already registered, reconnecting");
+                pocEnterStep(w, PocStep_Connect);
+                break;
             }
 
             rc = btdrvRegisterGattClient(&uuid);
@@ -839,6 +871,54 @@ static void pocHandlePendingAction(PocWorker* w)
             pocEnterStep(w, PocStep_Connect);
             break;
 
+        // Some of the scan state lives in the shared Bluetooth stack, so when a
+        // scan produces nothing the first experiment is to clear and disable the
+        // filters the stack may still be applying from another user.
+        case DglabPocAction_RescanNoFilter: {
+            Result clear_rc = btdrvClearBleScanFilters();
+            Result filter_rc = btdrvEnableBleScanFilter(false);
+
+            pocLog("scan filter off: clear rc=0x%08X enable rc=0x%08X", (u32)clear_rc,
+                (u32)filter_rc);
+
+            if (w->scanning) {
+                btdrvStopBleScan();
+                w->scanning = false;
+            }
+
+            w->scan_attempts = 0;
+            pocEnterStep(w, PocStep_Scan);
+            break;
+        }
+
+        // Fallback that keeps the GATT half of the PoC usable even when the
+        // advertisement filter never matches.
+        case DglabPocAction_ConnectLastScan:
+            if (!w->have_last_scan) {
+                pocLog("connect last scan: no scan result seen yet");
+                break;
+            }
+
+            w->address = w->last_scan_address;
+            w->ble_addr_type = w->last_scan_addr_type;
+            pocRecordMatch(&w->address, w->ble_addr_type);
+            pocSetMilestone(DGLAB_POC_MILESTONE_DEVICE_FOUND);
+
+            pocLog("connecting to last scanned device %02X:%02X:%02X:%02X:%02X:%02X",
+                w->address.address[0], w->address.address[1], w->address.address[2],
+                w->address.address[3], w->address.address[4], w->address.address[5]);
+
+            if (w->scanning) {
+                btdrvStopBleScan();
+                w->scanning = false;
+            }
+
+            if (w->client_registered)
+                pocEnterStep(w, PocStep_Connect);
+            else
+                pocEnterStep(w, PocStep_RegisterClient);
+            break;
+
         case DglabPocAction_Disconnect:
             pocLog("action disconnect");
             w->step = PocStep_Finished;
@@ -854,6 +934,27 @@ static bool pocStepRun(PocWorker* w)
 {
     switch (w->step) {
         case PocStep_Scan:
+            // Heartbeat so a silent scan is distinguishable from a broken event
+            // path when reading the log later.
+            if (pocElapsed(w->last_heartbeat_ms, POC_HEARTBEAT_MS)) {
+                u32 events;
+                u32 results;
+                u32 last_type;
+
+                w->last_heartbeat_ms = pocNowMs();
+
+                mutexLock(&g_poc.mutex);
+                events = g_poc.status.event_count;
+                results = g_poc.status.scan_results;
+                last_type = g_poc.status.last_event_type;
+                mutexUnlock(&g_poc.mutex);
+
+                pocLog("scanning events=%u results=%u last_event=%u", events, results, last_type);
+
+                if (events == 0)
+                    pocLog("no BLE events received at all yet");
+            }
+
             if (w->scanning && pocElapsed(w->step_start_ms, POC_SCAN_TIMEOUT_MS)) {
                 w->scan_attempts++;
 

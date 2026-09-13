@@ -70,14 +70,23 @@ static void logPushLine(const char* line)
     }
 }
 
-static void logFileOpen(void)
+// libnx's default init already mounts sdmc, so mounting again must never be
+// treated as a hard failure: that would silently drop the whole log. Just try
+// to open the file and report what actually happened.
+static bool logFileOpen(void)
 {
-    if (R_FAILED(fsdevMountSdmc()))
-        return;
-
-    // The switch directory usually exists already; a failure here is not fatal.
-    mkdir("sdmc:/switch", 0777);
     g_log_file = fopen(LOG_FILE_PATH, "w");
+
+    if (g_log_file == NULL) {
+        fsdevMountSdmc();
+        mkdir("sdmc:/switch", 0777);
+        g_log_file = fopen(LOG_FILE_PATH, "w");
+    }
+
+    if (g_log_file == NULL)
+        g_log_file = fopen("sdmc:/dglab-ble-poc.log", "w");
+
+    return g_log_file != NULL;
 }
 
 static void logAppend(const char* text, size_t size)
@@ -184,6 +193,9 @@ static void printStatus(const DglabPocStatus* status)
     printf("b0 writes: %u (failed %u)  auto=%u\n", status->b0_write_count,
         status->b0_write_failures, status->auto_write);
 
+    printf("ble events: %u (last type %u)  scan results: %u\n", status->event_count,
+        status->last_event_type, status->scan_results);
+
     printf("notifications: %u  battery: ", status->notify_count);
 
     if (status->battery_valid)
@@ -222,18 +234,34 @@ int main(int argc, char* argv[])
     (void)argv;
 
     consoleInit(NULL);
-    logFileOpen();
+
+    // Print something before touching the filesystem or IPC, so that a stall
+    // shows up on screen instead of looking like a dead NRO.
+    printf("DGLAB-NX BLE PoC\n\n");
+    printf("console ready\n");
+    consoleUpdate(NULL);
+
+    if (logFileOpen())
+        printf("log: %s\n", LOG_FILE_PATH);
+    else
+        printf("log: unavailable, nothing will be saved\n");
+
+    consoleUpdate(NULL);
 
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
     padInitializeDefault(&pad);
 
+    printf("querying sysmodule...\n");
+    consoleUpdate(NULL);
+
     Service dglab;
     Result rc = smGetService(&dglab, DGLAB_IPC_SERVICE_NAME);
 
     if (R_FAILED(rc)) {
-        printf("DGLAB sysmodule not found (0x%08X)\n", rc);
+        printf("\nDGLAB sysmodule not found (0x%08X)\n", rc);
         printf("Install the sysmodule and reboot the console.\n");
+        printf("If it is installed, check that it is running.\n");
         printf("\nPress + to exit.\n");
         consoleUpdate(NULL);
 
@@ -303,6 +331,18 @@ int main(int argc, char* argv[])
             serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
         }
 
+        if (down & HidNpadButton_ZL) {
+            DglabPocActionRequest request = { 0 };
+            request.action = DglabPocAction_RescanNoFilter;
+            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
+        }
+
+        if (down & HidNpadButton_ZR) {
+            DglabPocActionRequest request = { 0 };
+            request.action = DglabPocAction_ConnectLastScan;
+            serviceDispatchIn(&dglab, DGLAB_IPC_POC_CMD_ACTION, request);
+        }
+
         DglabPocStatus status;
         memset(&status, 0, sizeof(status));
         rc = serviceDispatchOut(&dglab, DGLAB_IPC_POC_CMD_STATUS, status);
@@ -310,7 +350,7 @@ int main(int argc, char* argv[])
         if (R_SUCCEEDED(rc))
             pocPollLog(&dglab);
 
-        printf("\x1b[2J\x1b[H");
+        consoleClear();
         printf("DGLAB-NX BLE PoC   (IPC %u.%u.%u)\n\n", version.major, version.minor,
             version.patch);
 
@@ -322,6 +362,7 @@ int main(int argc, char* argv[])
         printf("\n");
         printLog();
         printf("A start  X zero-B0  B battery  R aruid0  L auto  Y disconn  - stop  + exit\n");
+        printf("ZL rescan-no-filter  ZR connect-last-scan\n");
 
         consoleUpdate(NULL);
     }

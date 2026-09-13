@@ -59,6 +59,9 @@ enum {
     DglabPocAction_ReadBattery      = 4, ///< Read the battery characteristic.
     DglabPocAction_ReconnectAruid0  = 5, ///< Retry the connection with AppletResourceUserId 0.
     DglabPocAction_ToggleAutoWrite  = 6, ///< Toggle the 100ms B0 keepalive while connected.
+    // Diagnostics for the case where the scan reports no usable result:
+    DglabPocAction_RescanNoFilter   = 7, ///< Clear the scan filters, disable filtering and scan again.
+    DglabPocAction_ConnectLastScan  = 8, ///< Connect to the last scanned address even if the advertisement did not match.
 };
 
 typedef struct {
@@ -92,6 +95,8 @@ typedef struct {
     u32 battery_valid;
     u32 last_notify_size;
     u32 mtu;
+    u32 event_count;     ///< BLE events received from btdrv, any type.
+    u32 last_event_type; ///< BtdrvBleEventType of the last event.
 
     u8 address[6];
     u8 address_valid;
