@@ -217,6 +217,26 @@ DG-LAB Bluetooth Protocol 的官方参考仓库为：
 - sysmodule 配置；
 - NRO 配置。
 
+## 8.1 发布产物布局
+
+所有编译产物统一生成到仓库根目录的 `release/`，用根目录的 `make` 一次构建：
+
+    release/
+    ├── <TITLE_ID>/        Atmosphère sysmodule 目录
+    │   ├── exefs.nsp
+    │   ├── toolbox.json
+    │   └── flags/boot2.flag
+    ├── DGLAB-NX.nro       前端 NRO
+    └── DGLAB-NX-ovl.ovl   Overlay
+
+规则：
+
+- 根目录 `make` 构建全部组件并生成上述布局；`make clean` 清除这些产物；
+- 各组件用 `make -C <component> package` 只生成自己那一部分；
+- `<TITLE_ID>` 目录名必须由 `sysmodule/DGLAB-NX.json` 推导，禁止在 Makefile、
+  脚本或文档里另写一份；
+- `release/` 属于构建产物，不提交到 Git。
+
 如果当前没有自动化测试，应至少进行：
 
 - 编译检查；

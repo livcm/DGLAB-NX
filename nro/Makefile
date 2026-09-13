@@ -44,6 +44,11 @@ DATA		:=	data
 INCLUDES	:=	include ../common/include
 #ROMFS	:=	romfs
 
+# Release layout (see AGENTS.md): the NRO is copied next to the sysmodule
+# package under release/ at the repository root.
+RELEASE_DIR	:=	$(CURDIR)/../release
+RELEASE_NRO	:=	$(RELEASE_DIR)/$(TARGET).nro
+
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
@@ -155,10 +160,16 @@ ifneq ($(ROMFS),)
 	export NROFLAGS += --romfsdir=$(CURDIR)/$(ROMFS)
 endif
 
-.PHONY: $(BUILD) clean all
+.PHONY: $(BUILD) clean all package
 
 #---------------------------------------------------------------------------------
-all: $(BUILD)
+all: package
+
+package: $(BUILD)
+	@test -f $(OUTPUT).nro || { echo "error: $(OUTPUT).nro not found"; exit 1; }
+	@mkdir -p $(RELEASE_DIR)
+	@cp $(OUTPUT).nro $(RELEASE_NRO)
+	@echo "released ... $(RELEASE_NRO)"
 
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
@@ -168,7 +179,7 @@ $(BUILD):
 clean:
 	@echo clean ...
 ifeq ($(strip $(APP_JSON)),)
-	@rm -fr $(BUILD) $(TARGET).nro $(TARGET).nacp $(TARGET).elf
+	@rm -fr $(BUILD) $(TARGET).nro $(TARGET).nacp $(TARGET).elf $(RELEASE_NRO)
 else
 	@rm -fr $(BUILD) $(TARGET).nsp $(TARGET).nso $(TARGET).npdm $(TARGET).elf
 endif

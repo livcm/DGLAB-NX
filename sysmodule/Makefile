@@ -118,7 +118,10 @@ TITLE_ID_HEX := $(shell sed -nE 's/^[[:space:]]*"title_id"[[:space:]]*:[[:space:
 TITLE_ID_DIR := $(shell printf '%s' '$(TITLE_ID_HEX)' | sed 's/^0x//' | tr '[:lower:]' '[:upper:]')
 TITLE_ID_TID := 0x$(TITLE_ID_DIR)
 
-PKG_DIR      := $(CURDIR)/$(TITLE_ID_DIR)
+# Release layout (see AGENTS.md): every build artifact lands under release/ at
+# the repository root, so the SD card contents can be copied in one go.
+RELEASE_DIR  := $(CURDIR)/../release
+PKG_DIR      := $(RELEASE_DIR)/$(TITLE_ID_DIR)
 TOOLBOX_JSON := $(PKG_DIR)/toolbox.json
 FLAGS_DIR    := $(PKG_DIR)/flags
 BOOT2_FLAG   := $(FLAGS_DIR)/boot2.flag

@@ -259,6 +259,9 @@ Sysmodule 的构建必须区分：
         └── flags/
             └── boot2.flag
 
+该目录位于仓库根目录的 `release/` 下（见根 `AGENTS.md` 的“发布产物布局”），
+Title ID 目录名由 `DGLAB-NX.json` 推导。
+
 其中：
 
 - `exefs.nsp` 是构建产生的 Sysmodule NSP；
