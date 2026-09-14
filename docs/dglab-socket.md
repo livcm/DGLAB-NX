@@ -153,8 +153,8 @@ https://dungeon-lab.cn/s/?v=1&action=socket&url=<编码后的 ws://host:port?tid
 | `common/include/dglab/ipc.h` | 对外的 `NET_*` IPC 命令与结构体，见 `docs/ipc.md` |
 
 `sysmodule/source/net` 全部是平台无关代码，主机测试在 `tests/net` 里跑。
-NRO 侧的界面与二维码渲染还没有实现（AGENTS.md 优先级 5.4），目前只能用 IPC
-命令读出地址与二维码内容。
+NRO 侧的界面与二维码渲染见 `docs/nro-ui.md`：界面通过上面的 IPC 命令读出地址与
+二维码内容，自己编码并绘制二维码。
 
 ### 拓扑：Switch 同时是服务端和控制端
 

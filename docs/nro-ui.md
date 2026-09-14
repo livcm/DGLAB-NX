@@ -150,3 +150,83 @@
 
 后端先实现 libnx framebuffer。这样将来换 deko3d 只是"再实现一个 canvas 后端"，
 UI 逻辑一行都不用动。按这个结构估计：路线 A 约半天，路线 B 约 1~2 天，路线 C 是另立项目。
+
+---
+
+## 实现记录（优先级 5.4）
+
+按上面的建议落地了三层结构，文件如下：
+
+| 文件 | 层 | 说明 |
+| --- | --- | --- |
+| `nro/source/ui/qr.c` | 内容 | QR 编码器（byte 模式、纠错等级 L/M/Q/H、版本 1..10，最大 57×57） |
+| `nro/source/ui/canvas.c` | canvas | 纯 RGBA8888 缓冲区的矩形、位图字体、二维码绘制，带裁剪 |
+| `nro/source/ui/screen.c` | 内容/布局 | 标题、服务器状态、二维码、日志、按键提示的排版 |
+| `nro/source/platform/framebuffer.c` | 后端 | libnx framebuffer 的 begin/end 与字体来源 |
+| `nro/source/main.c` | 应用 | IPC 轮询、按键处理、视图切换 |
+
+`nro/source/ui` 全部与 libnx 无关，因此界面可以在电脑上渲染检查。
+
+### 二维码编码器是怎么验证的
+
+QR 编码器是自己写的（devkitPro 里没有可用 QR 库），所以它必须被独立实现验证，
+而不是"看起来画对了"：
+
+- 参考实现用 macOS CoreImage 的 `CIQRCodeGenerator`，工具在
+  `tests/qr/tools/gen_reference.m`；
+- 生成的矩阵放在 `tests/qr/golden/`，测试逐模块比对（版本、纠错分块、掩码选择、
+  模块布局任何一处错了都会 diff 出来）；
+- 约定：参考实现返回的符号带 1 模块静区，生成器会去掉；样例必须是**纯小写、
+  无数字**的文本，否则 CoreImage 会做混合模式分段（numeric/alphanumeric），
+  那是本项目不会做的优化。
+
+本项目只实现 byte 模式，带数字的地址（例如真实的
+`ws://192.168.1.161:9999/<uuid>`）同样能编码，只是**可能比 Apple 的编码器大一个
+版本**（45×45 而不是 41×41）。这只是占用更多屏幕，不影响可扫。
+
+工作过程中被这些测试抓到的真实 bug：格式信息两块的位置写反（等价于转置）、
+版本 1 被当成有校正图案（越界写内存）、暗模块被格式信息保留区覆盖、以及信封构造
+没有转义 `pulse` 命令里的引号。
+
+### 字体
+
+文本用 libnx 自带的那张 16×16 点阵字体（`default_font_bin`），没有引入
+freetype 之类的依赖：
+
+- 该符号没有公开声明，只在 `console.h` 的注释里出现，因此代码里显式 `extern`；
+  `nm libnx.a` 显示它是 0x2000 字节（256 个字形 × 32 字节），与 16×16 一致；
+- 位序（每行 2 字节、行内 LSB 优先）是把字体数据从 `libnx.a` 里抽出来逐个字形
+  渲染确认的，并在 `nro/source/platform/framebuffer.c` 里注明。
+
+### 界面内容与按键
+
+- 服务器状态：状态、局域网地址、控制器 uuid、App uuid、连接/指令/上报计数、
+  App 上报的强度与上限、最近一次协议错误；
+- 右侧：二维码 + 其内容（自动换行，模块大小按剩余高度自适应）；
+- 下方：sysmodule 日志（`NET_LOG` 增量读取）；
+- 按键：`A` 启动服务端、`Y` 停止、`X` 测试强度、`B` 清空波形、`ZL` 测试波形、
+  `L`/`R` 调整测试强度、`-` 打开 BLE PoC 控制台视图、`+` 退出。
+
+BLE PoC 的控制台视图挪到了 `nro/source/ble_poc_view.c`：它需要独占屏幕和 console，
+所以进入前会释放 framebuffer，退出后再建。
+
+### 主机侧检查
+
+```
+make -C tests/qr        # QR 与 CoreImage 参考矩阵逐模块比对
+make -C tests/canvas    # canvas 裁剪/字体位序/二维码绘制/整屏排版
+```
+
+排版还能直接渲染成图片查看：
+
+```
+tests/canvas/tools/render_preview.c   # 用法见文件头部注释
+```
+
+### 实机待确认
+
+1. framebuffer 与 console 视图来回切换（`framebufferClose` → `consoleInit` →
+   `consoleExit` → `framebufferCreate`）是否稳定；
+2. 二维码在真实屏幕上以 8~10 像素/模块渲染时的扫码成功率；
+3. 手柄按键提示是否符合实际使用习惯；
+4. 1080p dock 模式下 `nwindowGetDefault()` 的分辨率（当前按 720p 固定布局）。
