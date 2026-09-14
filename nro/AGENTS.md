@@ -41,6 +41,10 @@ HOS HID 协议。libnx 和官方 `switch-examples` 都可以作为 API 和用法
 
 应该先用 Console 来呈现字符 UI，待 NRO 的业务逻辑全部实现后再实现 GUI。
 
+各可选 UI 方案（console / framebuffer / deko3d / SDL2 / OpenGL / Borealis / ImGui）的
+依赖、工作量与取舍见 `docs/nro-ui.md`；当前结论是先走 libnx framebuffer 自绘
+（零额外依赖，且二维码需要严格正方形的模块）。
+
 HOS 并没有提供类似 UIKit / SwiftUI / Android Views 的通用
 Nintendo 原生 UI Framework 给普通 Homebrew 使用。
 
