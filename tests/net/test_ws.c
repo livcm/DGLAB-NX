@@ -393,6 +393,9 @@ static void testLoopback(void)
     CHECK(send(client, kMaskedHello, sizeof(kMaskedHello), 0) == (ssize_t)sizeof(kMaskedHello));
 
     CHECK(wsConnHandshake(&conn));
+    // The DG-LAB Socket protocol reads the client id from the request target,
+    // so the connection has to keep it.
+    CHECK(strcmp(conn.target, "/1a2b3c") == 0);
 
     char response[256];
     ssize_t got = recv(client, response, sizeof(response) - 1, 0);

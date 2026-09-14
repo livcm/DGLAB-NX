@@ -537,6 +537,7 @@ complete:
 
     conn->rx_len = leftover;
     conn->handshake_done = true;
+    memcpy(conn->target, handshake.target, sizeof(conn->target));
 
     return true;
 }

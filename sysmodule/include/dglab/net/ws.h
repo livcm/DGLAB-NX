@@ -46,6 +46,10 @@ typedef struct {
     uint8_t rx[WS_MAX_MESSAGE + 64];
     size_t rx_len;
     bool handshake_done;
+    // Request target of the handshake, for example "/<clientId>" or "/?tid=<clientId>".
+    // The DG-LAB Socket protocol carries the controller id here, so the layer
+    // above needs it after the handshake to decide how to pair the connection.
+    char target[192];
 } WsConn;
 
 // SHA-1 (RFC 3174) and base64 (RFC 4648) helpers, exposed for the host tests.

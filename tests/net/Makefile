@@ -12,13 +12,16 @@ CFLAGS   += -Wall -Wextra -Werror
 ROOT     := ../..
 SYSROOT  := $(ROOT)/sysmodule
 NET_DIR  := $(SYSROOT)/source/net
-INCLUDES := -I$(SYSROOT)/include
+PROTO_DIR := $(SYSROOT)/source/protocol
+COMMON   := $(ROOT)/common/include
+# hostshim supplies a stand in for <switch/types.h>, see hostshim/switch/types.h.
+INCLUDES := -Ihostshim -I$(SYSROOT)/include -I$(COMMON)
 BUILD    := build
 
 TESTS  := $(wildcard test_*.c)
 BINS   := $(patsubst test_%.c,$(BUILD)/test_%,$(TESTS))
-SOURCES := $(wildcard $(NET_DIR)/*.c)
-HEADERS := $(wildcard $(SYSROOT)/include/dglab/net/*.h)
+SOURCES := $(wildcard $(NET_DIR)/*.c) $(wildcard $(PROTO_DIR)/*.c)
+HEADERS := $(wildcard $(SYSROOT)/include/dglab/net/*.h) $(wildcard $(COMMON)/dglab/*.h)
 
 .PHONY: all test clean
 
