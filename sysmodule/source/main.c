@@ -308,12 +308,13 @@ int main(int argc, char* argv[])
 
     blePocInitialize();
 
-    // The socket server is deliberately NOT started at boot: holding sockets
+    // Boot does as little as possible: the lock and the session core (random
+    // source, controller id, log ring). No threads, no services beyond csrng.
+    // The socket server is deliberately NOT started here - holding sockets
     // across a system sleep is what makes a console hang, and the console can go
     // to sleep without anyone using the server. The NRO starts it with A (or any
     // client with NET_START) and stops it again with Y.
     dglabNetSocketInitialize();
-    dglabNetSocketStartSleepWatch();
 
     while (true) {
         Handle session = INVALID_HANDLE;

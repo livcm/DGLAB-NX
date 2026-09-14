@@ -15,15 +15,15 @@
 #include <stddef.h>
 #include <switch.h>
 
-// Initialises the transport's lock. Must be called once before any other
-// function here, including the status readers of the IPC handlers.
+// Prepares the transport lock and the session core (random source, controller
+// id, log ring). Must be called once at startup, before any other function here,
+// including the status readers of the IPC handlers.
+//
+// Nothing else happens at startup on purpose: an earlier revision registered a
+// power state module and spawned a thread here, and the console stopped booting
+// at the logo. Threads, sockets and the power state watch all belong to
+// dglabNetSocketStart().
 void dglabNetSocketInitialize(void);
-
-// Registers with the power state coordinator so the server is torn down before
-// the console sleeps and started again when it wakes up. Bounded: when the
-// registration fails (another process may hold the module id), the server keeps
-// running and the failure is logged.
-void dglabNetSocketStartSleepWatch(void);
 
 // Starts the server. Idempotent: calling it while the server already runs
 // reports success. 0 selects DGLAB_NET_DEFAULT_PORT.

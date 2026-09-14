@@ -47,6 +47,7 @@ static struct {
     u16 requested_port; // port to bring back up after a sleep
     bool restart_after_sleep;
     uint64_t last_activity_ms;
+    bool idle_stop_pending; // set by the tick thread, applied by the IPC thread
     volatile bool stopping;
     int listen_fd;
     Thread accept_thread;
@@ -128,6 +129,8 @@ static void netLog(const char* fmt, ...)
 
 // Creates the server core on first use (defined below, next to the public API).
 static void netCoreEnsureReady(u16 port);
+// Marks an idle server for shutdown (defined with the sleep handling).
+static void netCheckIdle(void);
 
 static void netSetTimeout(int fd, int option, int seconds)
 {
@@ -394,6 +397,8 @@ static void netTickThreadMain(void* arg)
     while (!g_net.stopping) {
         svcSleepThread((u64)NET_TICK_INTERVAL_NS);
 
+        netCheckIdle();
+
         mutexLock(&g_net.mutex);
         dglabNetServerPoll(&g_net.server, netNowMs(NULL));
         mutexUnlock(&g_net.mutex);
@@ -403,15 +408,19 @@ static void netTickThreadMain(void* arg)
 // ---------------------------------------------------------------------------
 // Sleep handling
 //
-// Holding sockets across a system sleep is what makes a console hang, so the
-// server is torn down when the power state coordinator asks the console to
-// sleep and started again when it wakes up. There is no precedence for this in
-// the examples, so a failed registration (the module id may be taken by a system
-// process) is logged and the server simply keeps running.
+// Holding sockets across a system sleep is what hangs a console. Everything in
+// this section therefore happens while the server runs, never at boot: an
+// earlier revision did it at boot and the console stopped booting at the logo.
+//
+// The power state watch is registered by dglabNetSocketStart(). Its thread lives
+// for the whole process, so it never has to be joined from inside itself - which
+// matters, because the thread has to tear the server down before it acknowledges
+// ReadySleep.
 // ---------------------------------------------------------------------------
 
 static PscPmModule g_pm_module;
 static bool g_pm_registered;
+static bool g_pm_attempted;
 static Thread g_pm_thread;
 
 static void netSleepStopServer(void)
@@ -451,33 +460,7 @@ static void netSleepResumeServer(void)
     dglabNetSocketStart(port);
 }
 
-// Seconds with nobody connected before the server closes itself. Holding the
-// listening socket across a sleep is what hangs the console, and there is no
-// reliable sleep notification, so a forgotten server is put away on its own.
-#define NET_IDLE_STOP_MS (5u * 60u * 1000u)
-
-static void netCheckIdleStop(void)
-{
-    bool stop = false;
-    uint64_t now = netNowMs(NULL);
-
-    mutexLock(&g_net.mutex);
-
-    if (g_net.running && g_net.server.status.clients == 0 &&
-        g_net.last_activity_ms != 0 &&
-        now - g_net.last_activity_ms >= NET_IDLE_STOP_MS)
-        stop = true;
-
-    mutexUnlock(&g_net.mutex);
-
-    if (stop) {
-        netLog("no client for %u minutes, stopping the server before it can be slept",
-            (unsigned)(NET_IDLE_STOP_MS / 60000u));
-        dglabNetSocketStop();
-    }
-}
-
-static void netSleepThreadMain(void* arg)
+static void netPmThreadMain(void* arg)
 {
     (void)arg;
 
@@ -485,14 +468,8 @@ static void netSleepThreadMain(void* arg)
         PscPmState state;
         u32 flags;
 
-        if (g_pm_registered) {
-            // The event is not autoclear, so a timeout just means "nothing yet".
-            eventWait(&g_pm_module.event, 1000000000ull);
-        } else {
-            svcSleepThread(1000000000ull);
-        }
-
-        netCheckIdleStop();
+        // The event is not autoclear; the timeout only keeps the loop ticking.
+        eventWait(&g_pm_module.event, 500000000ull);
 
         while (g_pm_registered &&
                R_SUCCEEDED(pscPmModuleGetRequest(&g_pm_module, &state, &flags))) {
@@ -516,72 +493,82 @@ static void netSleepThreadMain(void* arg)
     }
 }
 
-void dglabNetSocketStartSleepWatch(void)
+// Registers the power state watch and starts its thread. Called by
+// dglabNetSocketStart, at most once per process; failures are logged and the
+// server simply keeps running.
+static void netPmStart(void)
 {
     static const u32 dependencies[] = { PscPmModuleId_WlanSockets };
-    // The system owns the WlanSockets id (hardware answered 0x0000108A for it),
-    // so a free id is tried afterwards. Registering with an id nothing else uses
-    // only means the system waits for our acknowledgement, which it gets; this
-    // is an experiment and the log names the id that worked.
-    static const PscPmModuleId kCandidateIds[] = {
-        PscPmModuleId_WlanSockets,
-        200,
-        201,
-    };
     Result rc;
-    Result last_rc = 0;
-    size_t candidate;
 
-    dglabNetSocketInitialize();
+    if (g_pm_attempted)
+        return;
 
-    // The core has to exist before the power state is watched, so that its log
-    // (and the SD card copy of it) works from the first line on.
-    mutexLock(&g_net.mutex);
-    netCoreEnsureReady((u16)DGLAB_NET_DEFAULT_PORT);
-    mutexUnlock(&g_net.mutex);
+    g_pm_attempted = true;
 
     rc = pscmInitialize();
 
-    if (R_SUCCEEDED(rc)) {
-        for (candidate = 0; candidate < sizeof(kCandidateIds) / sizeof(kCandidateIds[0]);
-             candidate++) {
-            rc = pscmGetPmModule(&g_pm_module, kCandidateIds[candidate], dependencies, 1, false);
+    if (R_SUCCEEDED(rc))
+        rc = pscmGetPmModule(&g_pm_module, PscPmModuleId_WlanSockets, dependencies, 1, false);
 
-            if (R_SUCCEEDED(rc)) {
-                netLog("sleep watch registered as module %u",
-                    (unsigned)kCandidateIds[candidate]);
-                break;
-            }
-
-            last_rc = rc;
-        }
-    } else {
-        last_rc = rc;
-    }
-
-    if (R_SUCCEEDED(rc)) {
-        g_pm_registered = true;
-    } else {
-        // The server still runs; it just cannot be told to step aside for sleep,
-        // which is why it stops itself when idle and why the NRO asks the user
-        // to stop it before sleeping.
+    if (R_FAILED(rc)) {
+        // Real hardware answers 0x0000108A here: the system owns that module id.
         netLog("sleep watch unavailable rc=0x%08X, the server cannot stop for sleep",
-            (unsigned)last_rc);
+            (unsigned)rc);
+        return;
     }
 
-    rc = threadCreate(&g_pm_thread, netSleepThreadMain, NULL, NULL, NET_THREAD_STACK_SIZE,
+    g_pm_registered = true;
+
+    rc = threadCreate(&g_pm_thread, netPmThreadMain, NULL, NULL, NET_THREAD_STACK_SIZE,
         NET_THREAD_PRIORITY, -2);
 
     if (R_SUCCEEDED(rc))
         rc = threadStart(&g_pm_thread);
 
     if (R_FAILED(rc)) {
-        netLog("housekeeping thread rc=0x%08X", (unsigned)rc);
+        netLog("sleep watch thread rc=0x%08X", (unsigned)rc);
+        g_pm_registered = false;
+        pscPmModuleClose(&g_pm_module);
         return;
     }
 
-    if (g_pm_registered)
-        netLog("registered with the power state coordinator");
+    netLog("sleep watch registered as module %u", (unsigned)PscPmModuleId_WlanSockets);
+}
+
+// A server nobody connected to for a while puts itself away: holding the
+// listening socket across a sleep is what hangs the console, and there is no
+// working sleep notification. The tick thread only marks the request; the stop
+// itself happens on the next IPC call, because a server thread must not join
+// itself.
+#define NET_IDLE_STOP_MS (5u * 60u * 1000u)
+
+static void netCheckIdle(void)
+{
+    mutexLock(&g_net.mutex);
+
+    if (g_net.running && g_net.server.status.clients == 0 && g_net.last_activity_ms != 0 &&
+        netNowMs(NULL) - g_net.last_activity_ms >= NET_IDLE_STOP_MS)
+        g_net.idle_stop_pending = true;
+
+    mutexUnlock(&g_net.mutex);
+}
+
+static void netApplyPendingStop(void)
+{
+    bool pending;
+
+    mutexLock(&g_net.mutex);
+    pending = g_net.idle_stop_pending;
+    g_net.idle_stop_pending = false;
+    mutexUnlock(&g_net.mutex);
+
+    if (!pending)
+        return;
+
+    netLog("no client for %u minutes, stopping the server before it can be slept",
+        (unsigned)(NET_IDLE_STOP_MS / 60000u));
+    dglabNetSocketStop();
 }
 
 // ---------------------------------------------------------------------------
@@ -590,11 +577,16 @@ void dglabNetSocketStartSleepWatch(void)
 
 void dglabNetSocketInitialize(void)
 {
-    if (g_net.mutex_ready)
-        return;
+    if (!g_net.mutex_ready) {
+        mutexInit(&g_net.mutex);
+        g_net.mutex_ready = true;
+    }
 
-    mutexInit(&g_net.mutex);
-    g_net.mutex_ready = true;
+    // Boot does only this: the session core and its log ring. Threads, sockets,
+    // services and the power state watch all wait for dglabNetSocketStart().
+    mutexLock(&g_net.mutex);
+    netCoreEnsureReady((u16)DGLAB_NET_DEFAULT_PORT);
+    mutexUnlock(&g_net.mutex);
 }
 
 static Result netOpenListenSocket(u16 port, int* out_fd)
@@ -665,6 +657,8 @@ Result dglabNetSocketStart(u16 port)
 {
     Result rc;
     int fd = -1;
+
+    netApplyPendingStop();
 
     if (port == 0)
         port = (u16)DGLAB_NET_DEFAULT_PORT;
@@ -777,6 +771,10 @@ Result dglabNetSocketStart(u16 port)
 
     mutexUnlock(&g_net.mutex);
 
+    // The power state watch needs its own IPC and a thread, so it is started
+    // here rather than at boot: the watch only matters while the server runs.
+    netPmStart();
+
     return 0;
 }
 
@@ -886,6 +884,8 @@ Result dglabNetSocketGetStatus(DglabNetStatus* out)
     if (!out)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
+    netApplyPendingStop();
+
     mutexLock(&g_net.mutex);
     dglabNetServerGetStatus(&g_net.server, out);
     mutexUnlock(&g_net.mutex);
@@ -900,6 +900,8 @@ Result dglabNetSocketGetQr(char* out, size_t out_size, size_t* out_written)
     if (!out || out_size == 0)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
+    netApplyPendingStop();
+
     mutexLock(&g_net.mutex);
     ok = dglabNetServerGetQr(&g_net.server, out, out_size, out_written);
     mutexUnlock(&g_net.mutex);
@@ -913,6 +915,8 @@ Result dglabNetSocketSend(const DglabNetSendRequest* request)
 
     if (!request)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    netApplyPendingStop();
 
     mutexLock(&g_net.mutex);
     result = dglabNetServerSend(&g_net.server, request);
@@ -938,6 +942,8 @@ u32 dglabNetSocketReadLog(u32 cursor, char* out, size_t out_size)
 
     if (!out || out_size == 0)
         return cursor;
+
+    netApplyPendingStop();
 
     mutexLock(&g_net.mutex);
     next = dglabNetServerReadLog(&g_net.server, cursor, out, out_size);
