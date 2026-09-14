@@ -536,15 +536,14 @@ static void netPmThreadMain(void* arg)
 static void netPmStart(void)
 {
     static const u32 dependencies[] = { PscPmModuleId_WlanSockets };
-    // The system owns the WlanSockets id (hardware answered 0x0000108A), so a
-    // free id is tried afterwards. Registering under an id nothing else uses
-    // only means the system waits for our acknowledgement, which it gets. The
-    // same attempt at boot stopped the console at the logo, which is why this
-    // entire function lives behind dglabNetSocketStart.
+    // Only this one id is ever attempted, and only after the user started the
+    // server. Requesting any other id freezes the whole console: the ids 200 and
+    // 201 did it once at boot (stuck on the logo) and once on the A press (every
+    // button dead until the power button). This attempt is safe by contrast: the
+    // system owns the id, the call returns 0x0000108A immediately, and it has
+    // been through several hardware runs.
     static const PscPmModuleId kCandidates[] = {
         PscPmModuleId_WlanSockets,
-        200,
-        201,
     };
     Result rc;
     Result last_rc = 0;
