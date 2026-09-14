@@ -26,6 +26,7 @@
 // back as a file instead of as a photo of the screen.
 #define DATA_DIR "sdmc:/switch/DGLAB-NX"
 #define LOG_FILE_PATH DATA_DIR "/dglab-net.log"
+#define BOOT_LOG_PATH DATA_DIR "/dglab-boot.log"
 
 typedef enum {
     DglabView_Exit = 0,
@@ -40,6 +41,35 @@ static char g_partial[256];
 static size_t g_partial_len;
 static u32 g_test_strength = 10;
 static FILE* g_log_file;
+static FILE* g_boot_log;
+
+// Writes one line to the boot log. The screen has been unreliable in the field
+// (a black window with no way to tell how far startup got), so every step of
+// startup is also recorded on the SD card.
+static void bootLog(const char* fmt, ...)
+{
+    va_list args;
+
+    if (g_boot_log == NULL) {
+        mkdir("sdmc:/switch", 0777);
+        mkdir(DATA_DIR, 0777);
+
+        g_boot_log = fopen(BOOT_LOG_PATH, "w");
+
+        if (g_boot_log == NULL)
+            g_boot_log = fopen("sdmc:/dglab-boot.log", "w");
+
+        if (g_boot_log == NULL)
+            return;
+    }
+
+    va_start(args, fmt);
+    vfprintf(g_boot_log, fmt, args);
+    va_end(args);
+
+    fputc('\n', g_boot_log);
+    fflush(g_boot_log);
+}
 
 // ---------------------------------------------------------------------------
 // Log ring
@@ -294,43 +324,59 @@ int main(int argc, char* argv[])
     (void)argc;
     (void)argv;
 
+    bootLog("DGLAB-NX started");
+
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
 
     PadState pad;
     padInitializeDefault(&pad);
+    bootLog("input configured");
 
     Service dglab;
     Result service_result = smGetService(&dglab, DGLAB_IPC_SERVICE_NAME);
+    bootLog("smGetService(%s) = 0x%08X", DGLAB_IPC_SERVICE_NAME, (unsigned)service_result);
 
     if (R_FAILED(service_result)) {
+        bootLog("no sysmodule: showing the console notice");
         showNotice(&pad, "DGLAB-NX: the sysmodule is not running (0x%08X)", service_result);
+        bootLog("console notice finished, exiting");
         return 0;
     }
 
     if (!dglabFramebufferOpen()) {
+        bootLog("framebuffer failed: showing the console notice");
         showNotice(&pad, "DGLAB-NX: the framebuffer could not be created");
+        bootLog("console notice finished, exiting");
         serviceClose(&dglab);
         return 0;
     }
 
+    bootLog("framebuffer ready, entering the UI loop");
     logFileOpen();
 
     while (true) {
         DglabViewResult result = runSocketView(&dglab, &pad);
 
-        if (result == DglabView_Exit)
+        if (result == DglabView_Exit) {
+            bootLog("UI loop left, exiting");
             break;
+        }
 
         // The BLE PoC view takes the console and the screen over, so the
         // framebuffer is released while it runs and created again afterwards.
+        bootLog("switching to the BLE PoC console view");
         dglabFramebufferClose();
         dglabBlePocViewRun();
+        bootLog("back from the BLE PoC view");
 
         if (!dglabFramebufferOpen())
             break;
     }
 
     dglabFramebufferClose();
+
+    if (g_boot_log != NULL)
+        fclose(g_boot_log);
 
     if (g_log_file != NULL)
         fclose(g_log_file);

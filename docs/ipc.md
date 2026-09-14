@@ -42,7 +42,7 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 | --- | --- | --- | --- | --- |
 | `GET_VERSION` | 0 | — | `DglabIpcVersion` | 服务版本 |
 | `PING` | 1 | — | `u32` = `DGLAB_IPC_PING_MAGIC` | 确认连到了正确的服务 |
-| `NET_START` | 2 | `DglabNetStartRequest` | — | 启动 WebSocket 服务端；`port = 0` 用 `DGLAB_NET_DEFAULT_PORT` |
+| `NET_START` | 2 | `DglabNetStartRequest` | — | 启动 WebSocket 服务端；`port = 0` 用 `DGLAB_NET_DEFAULT_PORT`。服务端**不会开机自启**，见 `docs/dglab-socket.md` |
 | `NET_STOP` | 3 | — | — | 停止服务端并断开所有连接 |
 | `NET_STATUS` | 4 | — | `DglabNetStatus` | 状态快照，见下 |
 | `NET_QR` | 5 | — | `DglabNetQrChunk` | 二维码内容；没有局域网地址时返回错误 |

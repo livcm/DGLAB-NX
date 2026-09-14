@@ -238,6 +238,19 @@ static void drawQr(DglabCanvas* canvas, const DglabFont* font, const DglabScreen
 
     drawPanel(canvas, font, panel_x, panel_y, panel_w, panel_h, "scan this with the DG-LAB app");
 
+    if (state->status.state != DglabNetState_Listening &&
+        state->status.state != DglabNetState_Paired) {
+        char message[96];
+
+        // The server is not running yet, which is a different situation from a
+        // console that has no LAN address.
+        snprintf(message, sizeof(message),
+            "the socket server is not running. press A to start it on port %u.",
+            (unsigned)state->status.port);
+        drawWrapped(canvas, font, panel_x + 20, panel_y + 60, (panel_w - 40) / 16, message, kWarn);
+        return;
+    }
+
     if (!state->url_ok || !state->url || state->url[0] == '\0') {
         // Wrapped, because the panel is 41 characters wide and the message is
         // longer than that.

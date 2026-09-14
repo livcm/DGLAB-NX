@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -42,6 +43,8 @@ static struct {
     bool nifm_ready;
     bool csprng_ready;
     bool running;
+    u16 requested_port; // port to bring back up after a sleep
+    bool restart_after_sleep;
     volatile bool stopping;
     int listen_fd;
     Thread accept_thread;
@@ -56,6 +59,37 @@ static struct {
         { .fd = -1, .active = false, .thread_valid = false },
     },
 };
+
+// The sysmodule log is mirrored to the SD card: when the console hangs on sleep,
+// this file is the only record of what the sysmodule was doing at the time.
+#define NET_LOG_DIR "sdmc:/switch/DGLAB-NX"
+#define NET_LOG_PATH NET_LOG_DIR "/dglab-sys.log"
+
+static FILE* g_log_file;
+static u32 g_log_tick;
+
+static void netFileLog(void* context, const char* line)
+{
+    (void)context;
+
+    if (g_log_file == NULL) {
+        // Opening early in boot can fail while the filesystem comes up, so this
+        // is retried now and then instead of only once.
+        if (g_log_tick++ % 64u != 0u)
+            return;
+
+        mkdir("sdmc:/switch", 0777);
+        mkdir(NET_LOG_DIR, 0777);
+
+        g_log_file = fopen(NET_LOG_PATH, "a");
+
+        if (g_log_file == NULL)
+            return;
+    }
+
+    fprintf(g_log_file, "%s\n", line);
+    fflush(g_log_file);
+}
 
 // ---------------------------------------------------------------------------
 // Platform callbacks for the platform independent core
@@ -120,6 +154,9 @@ static void netLog(const char* fmt, ...)
     dglabNetServerLog(&g_net.server, "%s", line);
     mutexUnlock(&g_net.mutex);
 }
+
+// Creates the server core on first use (defined below, next to the public API).
+static void netCoreEnsureReady(u16 port);
 
 static void netSetTimeout(int fd, int option, int seconds)
 {
@@ -360,6 +397,132 @@ static void netTickThreadMain(void* arg)
 }
 
 // ---------------------------------------------------------------------------
+// Sleep handling
+//
+// Holding sockets across a system sleep is what makes a console hang, so the
+// server is torn down when the power state coordinator asks the console to
+// sleep and started again when it wakes up. There is no precedence for this in
+// the examples, so a failed registration (the module id may be taken by a system
+// process) is logged and the server simply keeps running.
+// ---------------------------------------------------------------------------
+
+static PscPmModule g_pm_module;
+static Thread g_pm_thread;
+
+static void netSleepStopServer(void)
+{
+    bool was_running;
+
+    mutexLock(&g_net.mutex);
+    was_running = g_net.running;
+    mutexUnlock(&g_net.mutex);
+
+    if (!was_running)
+        return;
+
+    netLog("sleep requested, stopping the socket server");
+    dglabNetSocketStop();
+
+    mutexLock(&g_net.mutex);
+    g_net.restart_after_sleep = true;
+    mutexUnlock(&g_net.mutex);
+}
+
+static void netSleepResumeServer(void)
+{
+    bool restart;
+    u16 port;
+
+    mutexLock(&g_net.mutex);
+    restart = g_net.restart_after_sleep;
+    port = g_net.requested_port;
+    g_net.restart_after_sleep = false;
+    mutexUnlock(&g_net.mutex);
+
+    if (!restart)
+        return;
+
+    netLog("woke up, starting the socket server again");
+    dglabNetSocketStart(port);
+}
+
+static void netSleepThreadMain(void* arg)
+{
+    (void)arg;
+
+    for (;;) {
+        PscPmState state;
+        u32 flags;
+
+        // The event is not autoclear, so a timeout just means "nothing yet".
+        eventWait(&g_pm_module.event, 1000000000ull);
+
+        while (R_SUCCEEDED(pscPmModuleGetRequest(&g_pm_module, &state, &flags))) {
+            switch (state) {
+                case PscPmState_ReadySleep:
+                case PscPmState_ReadyShutdown:
+                    netSleepStopServer();
+                    break;
+
+                case PscPmState_ReadyAwaken:
+                    netSleepResumeServer();
+                    break;
+
+                default:
+                    break;
+            }
+
+            // Every request has to be answered, or the system waits for us.
+            pscPmModuleAcknowledge(&g_pm_module, state);
+        }
+    }
+}
+
+void dglabNetSocketStartSleepWatch(void)
+{
+    static const u32 dependencies[] = { PscPmModuleId_WlanSockets };
+    Result rc;
+
+    dglabNetSocketInitialize();
+
+    // The core has to exist before the power state is watched, so that its log
+    // (and the SD card copy of it) works from the first line on.
+    mutexLock(&g_net.mutex);
+    netCoreEnsureReady((u16)DGLAB_NET_DEFAULT_PORT);
+    mutexUnlock(&g_net.mutex);
+
+    rc = pscmInitialize();
+
+    if (R_FAILED(rc)) {
+        netLog("psc:m unavailable rc=0x%08X, the server cannot stop for sleep", (unsigned)rc);
+        return;
+    }
+
+    rc = pscmGetPmModule(&g_pm_module, PscPmModuleId_WlanSockets, dependencies, 1, false);
+
+    if (R_FAILED(rc)) {
+        netLog("pm module rc=0x%08X, the server stays up across sleep", (unsigned)rc);
+        pscmExit();
+        return;
+    }
+
+    rc = threadCreate(&g_pm_thread, netSleepThreadMain, NULL, NULL, NET_THREAD_STACK_SIZE,
+        NET_THREAD_PRIORITY, -2);
+
+    if (R_SUCCEEDED(rc))
+        rc = threadStart(&g_pm_thread);
+
+    if (R_FAILED(rc)) {
+        netLog("sleep thread rc=0x%08X, the server stays up across sleep", (unsigned)rc);
+        pscPmModuleClose(&g_pm_module);
+        pscmExit();
+        return;
+    }
+
+    netLog("registered with the power state coordinator");
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -401,9 +564,27 @@ static Result netOpenListenSocket(u16 port, int* out_fd)
     return 0;
 }
 
-Result dglabNetSocketStart(u16 port)
+// Creates the server core on first use. Must be called with the lock held.
+static void netCoreEnsureReady(u16 port)
 {
     DglabNetServerConfig config;
+
+    if (g_net.core_ready)
+        return;
+
+    memset(&config, 0, sizeof(config));
+    config.port = port;
+    config.now_ms = netNowMs;
+    config.fill_random = netFillRandom;
+    config.get_ip = netGetIp;
+    config.log_sink = netFileLog;
+
+    dglabNetServerInit(&g_net.server, &config);
+    g_net.core_ready = true;
+}
+
+Result dglabNetSocketStart(u16 port)
+{
     Result rc;
     int fd = -1;
 
@@ -461,16 +642,8 @@ Result dglabNetSocketStart(u16 port)
         g_net.bsd_ready = true;
     }
 
-    if (!g_net.core_ready) {
-        memset(&config, 0, sizeof(config));
-        config.port = port;
-        config.now_ms = netNowMs;
-        config.fill_random = netFillRandom;
-        config.get_ip = netGetIp;
-
-        dglabNetServerInit(&g_net.server, &config);
-        g_net.core_ready = true;
-    }
+    netCoreEnsureReady(port);
+    g_net.requested_port = port;
 
     rc = netOpenListenSocket(port, &fd);
 

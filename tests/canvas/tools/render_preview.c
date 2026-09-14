@@ -13,6 +13,7 @@
 //       tests/canvas/tools/render_preview.c nro/source/ui/*.c -o /tmp/preview
 //   /tmp/preview /tmp/font.bin /tmp/preview.bmp
 //   /tmp/preview /tmp/font.bin /tmp/nowifi.bmp nowifi   (no LAN address yet)
+//   /tmp/preview /tmp/font.bin /tmp/stopped.bmp stopped (server not started)
 //   sips -s format png /tmp/preview.bmp --out /tmp/preview.png
 
 #include <dglab/ui/screen.h>
@@ -160,6 +161,13 @@ int main(int argc, char** argv)
         state.status.ip_text[0] = '\0';
         state.status.ip = 0;
         state.status.state = DglabNetState_Listening;
+        state.status.peer_id[0] = '\0';
+        state.status.paired = 0;
+    }
+
+    if (argc >= 4 && strcmp(argv[3], "stopped") == 0) {
+        state.url_ok = false;
+        state.status.state = DglabNetState_Idle;
         state.status.peer_id[0] = '\0';
         state.status.paired = 0;
     }

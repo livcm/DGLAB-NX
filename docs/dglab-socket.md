@@ -170,6 +170,40 @@ sysmodule 内部直接扮演控制端：
 
 `controller_id` 在 stop/start 之间保持不变，所以二维码不用重新扫。
 
+### 服务端不会开机自启
+
+`dglabNetSocketStartSleepWatch()` 在 sysmodule 启动时只做两件事：建好会话核心，
+并向电源管理注册睡眠通知。**服务端本身要等客户端调用 `NET_START`（NRO 上按 `A`）
+才启动**，因为持有 socket 会让整机睡眠出问题（见下一节），而大部分人根本不会用到
+这个服务。`NET_STOP`（NRO 上按 `Y`）会把它收掉。
+
+### 睡眠与唤醒
+
+持有 socket 跨过整机睡眠是"睡死"的常见原因（实机反馈：加载 sysmodule 后休眠会卡死，
+只能强制重启）。因此 sysmodule 会通过 `psc:m` 注册一个电源管理模块：
+
+| 收到 | 动作 |
+| --- | --- |
+| `PscPmState_ReadySleep` / `ReadyShutdown` | 停掉服务端（关 socket、结束线程），然后确认 |
+| `PscPmState_ReadyAwaken` | 如果睡眠前在运行就重新启动，然后确认 |
+
+实现是保守的：注册用的模块 id 是 `PscPmModuleId_WlanSockets`，若该 id 已被系统占用
+（`pscmGetPmModule` 返回失败），就只记一行日志并照常运行——此时睡眠时的网络收放由
+"不自动启动"这条策略兜底。**这一条尚未在实机上验证过**（devkitPro 的例子里没有
+`psc` 的用法可参考），需要看 `dglab-sys.log` 里是否出现
+`registered with the power state coordinator` 以及睡眠时的
+`sleep requested, stopping the socket server`。
+
+### 日志文件（SD 卡）
+
+排查实机问题全靠这三个文件：
+
+| 文件 | 写入方 | 内容 |
+| --- | --- | --- |
+| `sdmc:/switch/DGLAB-NX/dglab-sys.log` | sysmodule | 服务端自身的日志（含睡眠请求、PS 注册结果） |
+| `sdmc:/switch/DGLAB-NX/dglab-net.log` | NRO | 界面读到的 `NET_LOG` 增量副本 |
+| `sdmc:/switch/DGLAB-NX/dglab-boot.log` | NRO | 启动到哪一步（黑屏时唯一的线索） |
+
 ### 连接与错误处理
 
 | 情况 | 行为 |

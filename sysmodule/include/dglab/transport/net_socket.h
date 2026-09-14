@@ -19,6 +19,12 @@
 // function here, including the status readers of the IPC handlers.
 void dglabNetSocketInitialize(void);
 
+// Registers with the power state coordinator so the server is torn down before
+// the console sleeps and started again when it wakes up. Bounded: when the
+// registration fails (another process may hold the module id), the server keeps
+// running and the failure is logged.
+void dglabNetSocketStartSleepWatch(void);
+
 // Starts the server. Idempotent: calling it while the server already runs
 // reports success. 0 selects DGLAB_NET_DEFAULT_PORT.
 Result dglabNetSocketStart(u16 port);
