@@ -115,3 +115,38 @@
 2. 文本方案：自带位图字体表（推荐起步）或 stb_truetype + 共享字体；
 3. 是否接受引入 C++17 与 portlibs —— 决定 Borealis / ImGui 是否进入候选；
 4. overlay 的 UI 方案另行调研。
+
+## framebuffer → deko3d 迁移评估
+
+**结论：不难，但取决于"搬到哪一层"。** libnx 的 framebuffer 与 deko3d 都用同一个
+`nwindowGetDefault()`，所以窗口、输入、主循环这些代码完全不变；变的只是"像素怎么送上屏"。
+
+| 路线 | 做法 | 一次性工作量 | 绘制代码 | 适合 |
+| --- | --- | --- | --- | --- |
+| A. 保留 CPU 光栅化 | deko3d 里建 PitchLinear 图像，CPU 直接写像素，再 blit/全屏 quad 到 swapchain | 小 | **不用改** | 我们的界面（静态二维码 + 文字 + 少量控件） |
+| B. 半 GPU | 二维码/位图当纹理（CPU 生成一次），矩形与文字用 quad 批绘 | 中 | 部分重写 | 需要频繁重绘或动画 |
+| C. 全 GPU / 成品 UI | 字体图集、精灵批、动画、vsync 管理；或直接用 Borealis | 大 | 重写绘制层 | 追求观感的正式界面 |
+
+### 核对过的关键事实
+
+- deko3d 随 libnx 提供；最小骨架见 `examples/switch/graphics/deko3d/deko_basic`
+  （233 行：device → mem block → image → swapchain → command list → present）
+- 图像布局可选 `DkImageFlags_PitchLinear`（线性）或默认的 BlockLinear；
+  **要 CPU 直接写像素必须显式选线性**（BlockLinear 需要 swizzle）
+- `dkMemBlockGetCpuAddr()` + `dkMemBlockFlushCpuCache()` 提供了"CPU 写、GPU 读"的
+  正规路径，不需要自己做缓存魔术
+- libnx 的 console 是**可插拔渲染器**（`ConsoleRenderer` 的
+  init/deinit/drawChar/scrollWindow/flushAndSwap 回调）。官方示例里已经有现成的
+  deko3d 版渲染器（`examples/switch/graphics/deko3d/deko_console/source/gpu_console.c`，
+  486 行）和 OpenGL 版（`opengl/gpu_console`，467 行）——**纯文字界面迁移成本很低**
+- 待实测的一点：swapchain 的图像是否接受 PitchLinear；若不行，就退化成
+  "CPU 写纹理 + blit 到 swapchain"，仍然属于路线 A
+
+### 建议
+
+现在就把 NRO 的 UI 写成三层：
+
+    内容/布局（QR、状态、按钮） → canvas 抽象（fillRect / drawText / drawBitmap / present） → 后端
+
+后端先实现 libnx framebuffer。这样将来换 deko3d 只是"再实现一个 canvas 后端"，
+UI 逻辑一行都不用动。按这个结构估计：路线 A 约半天，路线 B 约 1~2 天，路线 C 是另立项目。
