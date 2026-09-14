@@ -219,6 +219,14 @@ static void drawStatus(DglabCanvas* canvas, const DglabFont* font, const DglabSc
 
     snprintf(buffer, sizeof(buffer), "test strength %u", (unsigned)state->test_strength);
     drawLine(canvas, font, x, y, "buttons", buffer, kMuted);
+
+    // While the server is up the sysmodule holds a listening socket, and this
+    // console hangs if that happens across a sleep. Say so on screen.
+    if (status->state == DglabNetState_Listening || status->state == DglabNetState_Paired) {
+        y += LINE_HEIGHT;
+        drawWrapped(canvas, font, x, y, (STATUS_WIDTH - 32) / 16,
+            "do not sleep the console while the server runs: press Y first.", kWarn);
+    }
 }
 
 static void drawQr(DglabCanvas* canvas, const DglabFont* font, const DglabScreenState* state)

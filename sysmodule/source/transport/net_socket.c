@@ -30,6 +30,8 @@ typedef struct {
     Thread thread;
     bool thread_valid; ///< a handle exists and has to be joined before reuse
     bool active;       ///< a running connection owns the slot
+    Mutex write_mutex; ///< serialises frames from the core and from wsConnRecv
+    bool write_mutex_ready;
     WsConn conn;
 } NetSocketClient;
 
@@ -44,6 +46,7 @@ static struct {
     bool running;
     u16 requested_port; // port to bring back up after a sleep
     bool restart_after_sleep;
+    uint64_t last_activity_ms;
     volatile bool stopping;
     int listen_fd;
     Thread accept_thread;
@@ -154,7 +157,8 @@ static void netPeerText(int fd, char* out, size_t out_size)
 
 static int netSocketRead(void* context, uint8_t* buffer, size_t size)
 {
-    int fd = *(const int*)context;
+    NetSocketClient* slot = context;
+    int fd = slot->fd;
     ssize_t rc;
 
     do {
@@ -169,8 +173,15 @@ static int netSocketRead(void* context, uint8_t* buffer, size_t size)
 
 static int netSocketWrite(void* context, const uint8_t* buffer, size_t size)
 {
-    int fd = *(const int*)context;
+    NetSocketClient* slot = context;
+    int fd = slot->fd;
     size_t written = 0;
+    int result;
+
+    // The core (heartbeats, commands) and the client thread (pong and close
+    // replies inside wsConnRecv) both write to the same socket, so frames have
+    // to be serialised here or they interleave.
+    mutexLock(&slot->write_mutex);
 
     while (written < size) {
         ssize_t rc = send(fd, buffer + written, size - written, 0);
@@ -178,13 +189,19 @@ static int netSocketWrite(void* context, const uint8_t* buffer, size_t size)
         if (rc < 0 && errno == EINTR)
             continue;
 
-        if (rc <= 0)
+        if (rc <= 0) {
+            mutexUnlock(&slot->write_mutex);
             return -1;
+        }
 
         written += (size_t)rc;
     }
 
-    return (int)size;
+    result = (int)size;
+
+    mutexUnlock(&slot->write_mutex);
+
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +274,20 @@ static void netStartClient(int fd)
 
     netSetTimeout(fd, SO_SNDTIMEO, NET_TRANSFER_TIMEOUT_S);
 
+    // Logged before the handshake: without this, "the phone never reached us"
+    // and "the phone connected but the handshake never finished" look the same
+    // in the log.
+    {
+        char peer[32];
+
+        netPeerText(fd, peer, sizeof(peer));
+        netLog("accept from %s", peer);
+
+        mutexLock(&g_net.mutex);
+        g_net.last_activity_ms = netNowMs(NULL);
+        mutexUnlock(&g_net.mutex);
+    }
+
     mutexLock(&g_net.mutex);
 
     for (size_t i = 0; i < DGLAB_NET_MAX_CLIENTS; i++) {
@@ -300,9 +331,14 @@ static void netStartClient(int fd)
     memset(&slot->conn, 0, sizeof(slot->conn));
     slot->conn.read = netSocketRead;
     slot->conn.write = netSocketWrite;
-    slot->conn.context = &slot->fd;
+    slot->conn.context = slot;
     slot->fd = fd;
     slot->active = true;
+
+    if (!slot->write_mutex_ready) {
+        mutexInit(&slot->write_mutex);
+        slot->write_mutex_ready = true;
+    }
 
     rc = threadCreate(&slot->thread, netClientThreadMain, (void*)(uintptr_t)index, NULL,
         NET_THREAD_STACK_SIZE, NET_THREAD_PRIORITY, -2);
@@ -375,6 +411,7 @@ static void netTickThreadMain(void* arg)
 // ---------------------------------------------------------------------------
 
 static PscPmModule g_pm_module;
+static bool g_pm_registered;
 static Thread g_pm_thread;
 
 static void netSleepStopServer(void)
@@ -414,6 +451,32 @@ static void netSleepResumeServer(void)
     dglabNetSocketStart(port);
 }
 
+// Seconds with nobody connected before the server closes itself. Holding the
+// listening socket across a sleep is what hangs the console, and there is no
+// reliable sleep notification, so a forgotten server is put away on its own.
+#define NET_IDLE_STOP_MS (5u * 60u * 1000u)
+
+static void netCheckIdleStop(void)
+{
+    bool stop = false;
+    uint64_t now = netNowMs(NULL);
+
+    mutexLock(&g_net.mutex);
+
+    if (g_net.running && g_net.server.status.clients == 0 &&
+        g_net.last_activity_ms != 0 &&
+        now - g_net.last_activity_ms >= NET_IDLE_STOP_MS)
+        stop = true;
+
+    mutexUnlock(&g_net.mutex);
+
+    if (stop) {
+        netLog("no client for %u minutes, stopping the server before it can be slept",
+            (unsigned)(NET_IDLE_STOP_MS / 60000u));
+        dglabNetSocketStop();
+    }
+}
+
 static void netSleepThreadMain(void* arg)
 {
     (void)arg;
@@ -422,10 +485,17 @@ static void netSleepThreadMain(void* arg)
         PscPmState state;
         u32 flags;
 
-        // The event is not autoclear, so a timeout just means "nothing yet".
-        eventWait(&g_pm_module.event, 1000000000ull);
+        if (g_pm_registered) {
+            // The event is not autoclear, so a timeout just means "nothing yet".
+            eventWait(&g_pm_module.event, 1000000000ull);
+        } else {
+            svcSleepThread(1000000000ull);
+        }
 
-        while (R_SUCCEEDED(pscPmModuleGetRequest(&g_pm_module, &state, &flags))) {
+        netCheckIdleStop();
+
+        while (g_pm_registered &&
+               R_SUCCEEDED(pscPmModuleGetRequest(&g_pm_module, &state, &flags))) {
             switch (state) {
                 case PscPmState_ReadySleep:
                 case PscPmState_ReadyShutdown:
@@ -449,7 +519,18 @@ static void netSleepThreadMain(void* arg)
 void dglabNetSocketStartSleepWatch(void)
 {
     static const u32 dependencies[] = { PscPmModuleId_WlanSockets };
+    // The system owns the WlanSockets id (hardware answered 0x0000108A for it),
+    // so a free id is tried afterwards. Registering with an id nothing else uses
+    // only means the system waits for our acknowledgement, which it gets; this
+    // is an experiment and the log names the id that worked.
+    static const PscPmModuleId kCandidateIds[] = {
+        PscPmModuleId_WlanSockets,
+        200,
+        201,
+    };
     Result rc;
+    Result last_rc = 0;
+    size_t candidate;
 
     dglabNetSocketInitialize();
 
@@ -461,17 +542,31 @@ void dglabNetSocketStartSleepWatch(void)
 
     rc = pscmInitialize();
 
-    if (R_FAILED(rc)) {
-        netLog("psc:m unavailable rc=0x%08X, the server cannot stop for sleep", (unsigned)rc);
-        return;
+    if (R_SUCCEEDED(rc)) {
+        for (candidate = 0; candidate < sizeof(kCandidateIds) / sizeof(kCandidateIds[0]);
+             candidate++) {
+            rc = pscmGetPmModule(&g_pm_module, kCandidateIds[candidate], dependencies, 1, false);
+
+            if (R_SUCCEEDED(rc)) {
+                netLog("sleep watch registered as module %u",
+                    (unsigned)kCandidateIds[candidate]);
+                break;
+            }
+
+            last_rc = rc;
+        }
+    } else {
+        last_rc = rc;
     }
 
-    rc = pscmGetPmModule(&g_pm_module, PscPmModuleId_WlanSockets, dependencies, 1, false);
-
-    if (R_FAILED(rc)) {
-        netLog("pm module rc=0x%08X, the server stays up across sleep", (unsigned)rc);
-        pscmExit();
-        return;
+    if (R_SUCCEEDED(rc)) {
+        g_pm_registered = true;
+    } else {
+        // The server still runs; it just cannot be told to step aside for sleep,
+        // which is why it stops itself when idle and why the NRO asks the user
+        // to stop it before sleeping.
+        netLog("sleep watch unavailable rc=0x%08X, the server cannot stop for sleep",
+            (unsigned)last_rc);
     }
 
     rc = threadCreate(&g_pm_thread, netSleepThreadMain, NULL, NULL, NET_THREAD_STACK_SIZE,
@@ -481,13 +576,12 @@ void dglabNetSocketStartSleepWatch(void)
         rc = threadStart(&g_pm_thread);
 
     if (R_FAILED(rc)) {
-        netLog("sleep thread rc=0x%08X, the server stays up across sleep", (unsigned)rc);
-        pscPmModuleClose(&g_pm_module);
-        pscmExit();
+        netLog("housekeeping thread rc=0x%08X", (unsigned)rc);
         return;
     }
 
-    netLog("registered with the power state coordinator");
+    if (g_pm_registered)
+        netLog("registered with the power state coordinator");
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +731,7 @@ Result dglabNetSocketStart(u16 port)
 
     g_net.listen_fd = fd;
     g_net.stopping = false;
+    g_net.last_activity_ms = netNowMs(NULL);
     dglabNetServerSetListening(&g_net.server, port);
 
     rc = threadCreate(&g_net.accept_thread, netAcceptThreadMain, NULL, NULL, NET_THREAD_STACK_SIZE,
@@ -724,6 +819,13 @@ Result dglabNetSocketStop(void)
     }
 
     listen_fd = g_net.listen_fd;
+
+    // Say goodbye properly before the sockets go: a plain shutdown leaves the
+    // App with a dead TCP connection it does not always notice.
+    for (size_t i = 0; i < DGLAB_NET_MAX_CLIENTS; i++) {
+        if (g_net.clients[i].active && g_net.clients[i].conn.handshake_done)
+            wsConnSend(&g_net.clients[i].conn, WsOpcode_Close, NULL, 0);
+    }
 
     mutexUnlock(&g_net.mutex);
 

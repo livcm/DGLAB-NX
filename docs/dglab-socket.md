@@ -188,11 +188,20 @@ sysmodule 内部直接扮演控制端：
 | `PscPmState_ReadyAwaken` | 如果睡眠前在运行就重新启动，然后确认 |
 
 实现是保守的：注册用的模块 id 是 `PscPmModuleId_WlanSockets`，若该 id 已被系统占用
-（`pscmGetPmModule` 返回失败），就只记一行日志并照常运行——此时睡眠时的网络收放由
-"不自动启动"这条策略兜底。**这一条尚未在实机上验证过**（devkitPro 的例子里没有
-`psc` 的用法可参考），需要看 `dglab-sys.log` 里是否出现
-`registered with the power state coordinator` 以及睡眠时的
-`sleep requested, stopping the socket server`。
+（`pscmGetPmModule` 返回失败），就只记一行日志并照常运行。
+
+**实机结果：注册被拒绝，返回 `0x0000108A`**（模块 8、描述 0x8A；`WlanSockets` 这个 id
+由系统自己持有）。因此又补了两条兜底，并且在注册失败后继续尝试两个自定义 id（200、
+201）——注册到"没人用的 id"只会让系统等我们的确认，而确认是会发的；日志会写明哪个 id
+生效。三条兜底合起来是：
+
+1. 服务端不自动启动（已验证：不启动就不会睡死）；
+2. **没有客户端连接满 5 分钟后自动停服务**（避免"忘了关"导致下次休眠卡死）；
+3. NRO 界面在服务运行时会显示 `do not sleep the console while the server runs: press Y first`。
+
+**现状是诚实的：只要服务端在跑，这台主机休眠就会卡死，因为没有可用的睡眠通知。** 想要
+真正修好，需要找到能可靠告知"即将休眠"的机制（`psc` 的模块 id 或其它信号），在那之前
+只能靠上面三条兜底。
 
 ### 日志文件（SD 卡）
 
@@ -244,6 +253,7 @@ WebSocket 握手方面还有一条兼容处理：如果客户端带了
 
 | 日志 | 含义 |
 | --- | --- |
+| `accept from <ip>` | 每接受一条 TCP 连接都会记（握手之前）——用来区分"对端根本没到"和"到了但握手没完成" |
 | `websocket from <ip>, target '<target>'` | 收到握手，含对端地址与请求路径 |
 | `client connected without a client id in the target` | 路径里没有 id |
 | `client id X does not match Y, pairing anyway` | 路径里的 id 与二维码里的不同 |
@@ -253,6 +263,14 @@ WebSocket 握手方面还有一条兼容处理：如果客户端带了
 
 如果手机停在"正在连接"，先看有没有 `websocket from ...`：没有就是 TCP 根本没到
 Switch（网络/端口问题），有就说明握手与配对已经完成，问题在配对之后的消息约定上。
+
+实机记录（2026-09-15）：手机（172.20.10.7）能稳定连上并配对，日志里是
+`websocket from ... target '/<controller id>'` → `app <uuid> bound`；电脑浏览器访问
+同一端口只会留下 `websocket handshake from 172.20.10.3 failed`（普通 HTTP，符合预期）。
+也就是说**协议层与配对流程本身是通的**。
+
+停止服务时会给已配对的连接发一个 WebSocket close 帧再关 socket，让 App 有机会显示
+断开（实机反馈：之前直接 shutdown，App 不会自动断开）。
 
 ### 已知的实现约定（需要实机验证）
 
