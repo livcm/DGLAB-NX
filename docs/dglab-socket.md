@@ -135,4 +135,86 @@ https://dungeon-lab.cn/s/?v=1&action=socket&url=<编码后的 ws://host:port?tid
    数字通道号）；
 2. ~~能否手输地址~~：**不能，必须扫码**，所以 NRO 必须显示二维码 —— 需要在本项目里
    实现一个 QR 编码器（devkitPro 里没有可用的 QR 库）；
-3. 心跳间隔与超时（V3 由服务端配置）——先按 30 秒实现。
+3. ~~心跳间隔与超时~~：按 30 秒实现（见下），但心跳报文的**内容**仍未与真实 App
+   验证过。
+
+---
+
+## 本项目的实现
+
+### 代码位置
+
+| 文件 | 作用 |
+| --- | --- |
+| `sysmodule/source/net/ws.c` | 平台无关的服务端 WebSocket（握手、帧、掩码） |
+| `sysmodule/source/net/dglab_socket.c` | 平台无关的 Socket 协议：消息外壳、指令构造、上报解析、二维码 |
+| `sysmodule/source/net/net_server.c` | 平台无关的服务端会话：绑定、心跳、转发、命令、状态与日志环 |
+| `sysmodule/source/transport/net_socket.c` | Switch 侧传输：监听 socket、每连接一个线程、定时线程、互斥锁 |
+| `common/include/dglab/ipc.h` | 对外的 `NET_*` IPC 命令与结构体，见 `docs/ipc.md` |
+
+`sysmodule/source/net` 全部是平台无关代码，主机测试在 `tests/net` 里跑。
+NRO 侧的界面与二维码渲染还没有实现（AGENTS.md 优先级 5.4），目前只能用 IPC
+命令读出地址与二维码内容。
+
+### 拓扑：Switch 同时是服务端和控制端
+
+参考实现里控制端也是一条 WebSocket 连接，但那对手机 App 不可见：App 能观察到的
+只是“服务端给了它一个绑定、并转发指令”。因此本项目不额外建立回环连接，而是由
+sysmodule 内部直接扮演控制端：
+
+- 控制器 uuid 在服务端启动时生成，二维码里携带的就是它；
+- App 按 `/ <controllerId>` 连接后，服务端回
+  `{"type":"bind","clientId":"<controllerId>","targetId":"<appId>","message":"200"}`；
+- App 的 uuid 由服务端分配（`targetId` 是 App 得知自己 id 的唯一途径）；
+- 指令由 sysmodule 直接写进 App 的那条连接，App 上报的强度/反馈直接进入 sysmodule。
+
+`controller_id` 在 stop/start 之间保持不变，所以二维码不用重新扫。
+
+### 连接与错误处理
+
+| 情况 | 行为 |
+| --- | --- |
+| 请求路径里没有 id（`/`、空） | 回 `210` 并断开 |
+| id 与二维码里的控制器 uuid 不一致 | 回 `210` 并断开，日志记录对方提供的 id |
+| 该控制器 id 已被绑定 | 回 `400` 并断开 |
+| 服务端不在监听状态 | 回 `500` 并断开 |
+| 收到超过 1950 字节的消息 | 回 `405` |
+| 内容不是 JSON 对象 | 回 `403` |
+| 收到 `break` | 解除绑定，回到 `Listening`，等 App 重连 |
+| 收到未知 `msg` 指令 | 记日志后忽略，不报错（App 版本比本实现新时不应断线） |
+
+同时最多接受 2 条连接（一条绑定 + 一条重连过渡），日志环 4KB。
+
+### 已知的实现约定（需要实机验证）
+
+1. **指令信封的路由字段**：本文假设 `clientId` 是收件人、`targetId` 是发件人
+   （与错误码 404 “收信人不在线”的语义一致）。这一点没有官方实现逐行比对过。
+2. **心跳内容**：每 30 秒发
+   `{"type":"heartbeat","clientId":"<appId>","targetId":"<controllerId>","message":"200"}`，
+   绑定成功时立刻补发一条。App 是否要求控制端先发心跳、心跳的期望内容都未验证。
+3. **pulse 的 JSON 转义**：`pulse-A:["0A…"]` 自带双引号，因此信封构造会转义
+   `"` 与 `\`（这一条有主机测试覆盖）。如果 App 实际接受的是未转义形式，需要改回。
+4. **没有空闲超时**：连接只靠 TCP 断开或 `shutdown()` 结束，App 静默 90 秒只记一条
+   日志。实机确认 App 的心跳行为后再决定是否主动断开。
+5. **V4 未实现**：`?tid=` 形式在解析里被接受（便于排查），但 V4 的消息外壳没有实现。
+
+### 如何验证
+
+主机侧：
+
+```
+make -C tests/net        # 内存级协议测试 + 真实回环 TCP 端到端测试
+```
+
+- `test_dglab_socket`：外壳解析/构造（含转义）、指令、上报、二维码；
+- `test_net_server`：绑定流程、错误码、指令、心跳、二维码、日志环；
+- `test_net_loopback`：真实 TCP + WebSocket 握手 + 掩码帧，模拟手机 App 走完
+  “扫码连接 → 绑定 → 上报强度 → 收到指令”。
+
+实机侧（需要用户的手机与 Switch）：
+
+1. Switch 与手机连同一个局域网；
+2. NRO 显示地址与二维码，用 DG-LAB App 扫码；
+3. 期望 `NET_STATUS.state` 变成 `Paired`、`peer_id` 非空、App 界面显示已连接；
+4. 用 `NET_SEND` 的测试按钮看强度/清空是否生效；
+5. 观察 `NET_LOG` 里的收发记录，据此修正上面 1、2、3 三条约定。
