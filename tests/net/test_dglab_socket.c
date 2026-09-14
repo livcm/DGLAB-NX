@@ -112,6 +112,23 @@ static void testBuildMessage(void)
     // A too small buffer must fail rather than truncate.
     char small[16];
     CHECK(dglabSocketBuildMessage(small, sizeof(small), "msg", "a", "b", "c") == 0);
+
+    // The pulse command contains double quotes, so the envelope has to escape
+    // them or the App receives broken JSON.
+    char escaped[256];
+    CHECK(dglabSocketBuildMessage(escaped, sizeof(escaped), "msg", "a", "b",
+              "pulse-A:[\"0A0A0A0A00000000\"]") > 0);
+    expectString("escaped envelope", escaped,
+        "{\"type\":\"msg\",\"clientId\":\"a\",\"targetId\":\"b\","
+        "\"message\":\"pulse-A:[\\\"0A0A0A0A00000000\\\"]\"}");
+
+    CHECK(dglabSocketBuildMessage(escaped, sizeof(escaped), "msg", "a", "b", "back\\slash") > 0);
+    expectString("escaped backslash", escaped,
+        "{\"type\":\"msg\",\"clientId\":\"a\",\"targetId\":\"b\","
+        "\"message\":\"back\\\\slash\"}");
+
+    // Control characters cannot be represented and must be rejected.
+    CHECK(dglabSocketBuildMessage(escaped, sizeof(escaped), "msg", "a", "b", "bad\nline") == 0);
 }
 
 // ---------------------------------------------------------------------------

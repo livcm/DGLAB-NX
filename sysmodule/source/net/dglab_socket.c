@@ -147,17 +147,73 @@ bool dglabSocketParseMessage(const char* text, size_t size, DglabSocketMessage* 
     return true;
 }
 
+static bool appendLiteral(char* out, size_t out_size, size_t* written, const char* text)
+{
+    size_t len = strlen(text);
+
+    if (*written + len + 1 > out_size)
+        return false;
+
+    memcpy(out + *written, text, len);
+    *written += len;
+
+    return true;
+}
+
+// The pulse command carries double quotes ("pulse-A:[\"0A0A...\"]"), so every
+// field has to be escaped before it is embedded in the envelope. Control
+// characters never appear in this protocol and are rejected instead of being
+// replaced, so a caller cannot silently send something the App cannot read.
+static bool appendEscaped(char* out, size_t out_size, size_t* written, const char* value)
+{
+    for (const char* cursor = value; *cursor; cursor++) {
+        char c = *cursor;
+
+        if (c == '"' || c == '\\') {
+            if (*written + 3 > out_size)
+                return false;
+
+            out[(*written)++] = '\\';
+            out[(*written)++] = c;
+        } else if ((unsigned char)c < 0x20) {
+            return false;
+        } else {
+            if (*written + 2 > out_size)
+                return false;
+
+            out[(*written)++] = c;
+        }
+    }
+
+    return true;
+}
+
 size_t dglabSocketBuildMessage(char* out, size_t out_size, const char* type, const char* client_id,
     const char* target_id, const char* message)
 {
-    int written = snprintf(out, out_size, "{\"type\":\"%s\",\"clientId\":\"%s\",\"targetId\":\"%s\","
-                                          "\"message\":\"%s\"}",
-        type, client_id ? client_id : "", target_id ? target_id : "", message ? message : "");
+    size_t written = 0;
 
-    if (written <= 0 || (size_t)written >= out_size)
+    if (!out || out_size == 0)
         return 0;
 
-    return (size_t)written;
+    out[0] = '\0';
+
+    if (!appendLiteral(out, out_size, &written, "{\"type\":\"") ||
+        !appendEscaped(out, out_size, &written, type) ||
+        !appendLiteral(out, out_size, &written, "\",\"clientId\":\"") ||
+        !appendEscaped(out, out_size, &written, client_id ? client_id : "") ||
+        !appendLiteral(out, out_size, &written, "\",\"targetId\":\"") ||
+        !appendEscaped(out, out_size, &written, target_id ? target_id : "") ||
+        !appendLiteral(out, out_size, &written, "\",\"message\":\"") ||
+        !appendEscaped(out, out_size, &written, message ? message : "") ||
+        !appendLiteral(out, out_size, &written, "\"}")) {
+        out[0] = '\0';
+        return 0;
+    }
+
+    out[written] = '\0';
+
+    return written;
 }
 
 // ---------------------------------------------------------------------------
