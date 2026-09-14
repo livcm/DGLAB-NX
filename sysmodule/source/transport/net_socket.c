@@ -41,7 +41,6 @@ static struct {
     DglabNetServer server;
     bool core_ready;
     bool bsd_ready;
-    bool nifm_ready;
     bool csprng_ready;
     bool running;
     u16 requested_port; // port to bring back up after a sleep
@@ -86,24 +85,62 @@ static bool netFillRandom(void* context, uint8_t* out, size_t size)
 
 static bool netGetIp(void* context, uint32_t* address, char* text, size_t text_size)
 {
+    // nifm is opened for the query and closed again: this sysmodule has no
+    // business holding a network session while the console is idle, and that is
+    // a candidate for what keeps a console from sleeping. The answer is cached
+    // for a couple of seconds because the NRO polls the status every frame.
+    static u32 cached_ip;
+    static char cached_text[16];
+    static bool cached_valid;
+    static uint64_t cached_at_ms;
     u32 ip = 0;
     Result rc;
+    uint64_t now_ms;
 
     (void)context;
 
-    if (!g_net.nifm_ready)
+    now_ms = netNowMs(NULL);
+
+    if (cached_valid && now_ms - cached_at_ms < 2000u) {
+        snprintf(text, text_size, "%s", cached_text);
+        *address = cached_ip;
+
+        return cached_ip != 0;
+    }
+
+    rc = nifmInitialize(NifmServiceType_User);
+
+    if (R_FAILED(rc)) {
+        cached_valid = true;
+        cached_at_ms = now_ms;
+        cached_ip = 0;
+        cached_text[0] = '\0';
+
         return false;
+    }
 
     rc = nifmGetCurrentIpAddress(&ip);
+    nifmExit();
 
-    if (R_FAILED(rc) || ip == 0)
+    if (R_FAILED(rc) || ip == 0) {
+        cached_valid = true;
+        cached_at_ms = now_ms;
+        cached_ip = 0;
+        cached_text[0] = '\0';
+
         return false;
+    }
 
     // nifm reports the address as struct in_addr, so the bytes are already in
     // the order a dotted quad needs.
     const u8* bytes = (const u8*)&ip;
 
     snprintf(text, text_size, "%u.%u.%u.%u", bytes[0], bytes[1], bytes[2], bytes[3]);
+    snprintf(cached_text, sizeof(cached_text), "%s", text);
+
+    cached_ip = ip;
+    cached_valid = true;
+    cached_at_ms = now_ms;
     *address = ip;
 
     return true;
@@ -499,7 +536,19 @@ static void netPmThreadMain(void* arg)
 static void netPmStart(void)
 {
     static const u32 dependencies[] = { PscPmModuleId_WlanSockets };
+    // The system owns the WlanSockets id (hardware answered 0x0000108A), so a
+    // free id is tried afterwards. Registering under an id nothing else uses
+    // only means the system waits for our acknowledgement, which it gets. The
+    // same attempt at boot stopped the console at the logo, which is why this
+    // entire function lives behind dglabNetSocketStart.
+    static const PscPmModuleId kCandidates[] = {
+        PscPmModuleId_WlanSockets,
+        200,
+        201,
+    };
     Result rc;
+    Result last_rc = 0;
+    size_t candidate;
 
     if (g_pm_attempted)
         return;
@@ -508,13 +557,23 @@ static void netPmStart(void)
 
     rc = pscmInitialize();
 
-    if (R_SUCCEEDED(rc))
-        rc = pscmGetPmModule(&g_pm_module, PscPmModuleId_WlanSockets, dependencies, 1, false);
+    if (R_SUCCEEDED(rc)) {
+        for (candidate = 0; candidate < sizeof(kCandidates) / sizeof(kCandidates[0]); candidate++) {
+            rc = pscmGetPmModule(&g_pm_module, kCandidates[candidate], dependencies, 1, false);
+
+            if (R_SUCCEEDED(rc))
+                break;
+
+            last_rc = rc;
+        }
+    } else {
+        last_rc = rc;
+    }
 
     if (R_FAILED(rc)) {
-        // Real hardware answers 0x0000108A here: the system owns that module id.
+        // The server still runs; it just cannot be told to step aside for sleep.
         netLog("sleep watch unavailable rc=0x%08X, the server cannot stop for sleep",
-            (unsigned)rc);
+            (unsigned)last_rc);
         return;
     }
 
@@ -533,7 +592,7 @@ static void netPmStart(void)
         return;
     }
 
-    netLog("sleep watch registered as module %u", (unsigned)PscPmModuleId_WlanSockets);
+    netLog("sleep watch registered as module %u", (unsigned)kCandidates[candidate]);
 }
 
 // A server nobody connected to for a while puts itself away: holding the
@@ -670,18 +729,6 @@ Result dglabNetSocketStart(u16 port)
     if (g_net.running) {
         mutexUnlock(&g_net.mutex);
         return 0;
-    }
-
-    // nifm is only needed once the server runs: it answers "what is our LAN
-    // address" for the QR code.
-    if (!g_net.nifm_ready) {
-        rc = nifmInitialize(NifmServiceType_User);
-
-        if (R_SUCCEEDED(rc))
-            g_net.nifm_ready = true;
-        else
-            dglabNetServerLog(&g_net.server,
-                "nifm unavailable rc=0x%08X, the QR code will have no address", (unsigned)rc);
     }
 
     if (!g_net.bsd_ready) {

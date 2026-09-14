@@ -199,8 +199,15 @@ sysmodule 内部直接扮演控制端：
 
 **现状是诚实的：只要服务端在跑，这台主机休眠就会卡死，因为没有可用的睡眠通知。** 想要
 真正修好，需要找到能可靠告知"即将休眠"的机制（`psc` 的模块 id 或其它信号），在那之前
-只能靠上面三条兜底。曾经试过用自定义模块 id（200/201）注册，**结果是主机卡在开机
-logo**，所以这个尝试已经撤掉，现在只试 `WlanSockets` 一个 id。
+只能靠上面三条兜底。
+
+注册流程现在按 `WlanSockets` → `200` → `201` 的顺序依次尝试，日志会写明哪个 id 生效。
+同样的尝试**放在开机路径里会让主机卡在开机 logo**，所以它只在用户按 `A` 启动服务之后
+执行——差别很可能在于开机早期 `psc` 尚未就绪，IPC 直接阻塞。
+
+同时 `nifm` 改成"用完即走"：查地址时 `nifmInitialize` → `nifmGetCurrentIpAddress` →
+`nifmExit`，结果缓存 2 秒（NRO 每帧轮询状态）。长期持有 nifm 会话是"网络占用"的另一
+个候选原因，先把它排除掉。
 
 ### 开机路径必须最小（血泪教训）
 
@@ -214,9 +221,9 @@ sysmodule 的开机路径只允许做三件事：
 - 不创建线程：多出来的常驻线程会和开机流程抢时间；
 - 不注册 PSC：`pscmGetPmModule` 的额外尝试会让主机停在开机 logo。
 
-线程、socket、`nifm`、PSC 注册全部放在 `dglabNetSocketStart()` 里，也就是用户按 `A`
-启动服务的时候。空闲自动停服务的检查放在 tick 线程里**只置标志位**，真正的停服务由下一
-次 IPC 调用执行——因为服务线程不能 join 自己。
+socket、服务线程、PSC 注册全部放在 `dglabNetSocketStart()` 里，也就是用户按 `A`
+启动服务的时候（`nifm` 连持久会话都不留，见上一节）。空闲自动停服务的检查放在 tick
+线程里**只置标志位**，真正的停服务由下一次 IPC 调用执行——因为服务线程不能 join 自己。
 
 ### 日志文件（SD 卡）
 
@@ -225,7 +232,10 @@ sysmodule 的开机路径只允许做三件事：
 | 文件 | 写入方 | 内容 |
 | --- | --- | --- |
 | `sdmc:/switch/DGLAB-NX/dglab-net.log` | NRO | `NET_LOG` 的增量副本（服务端日志的实际落盘处） |
-| `sdmc:/switch/DGLAB-NX/dglab-boot.log` | NRO | 启动到哪一步（黑屏时唯一的线索） |
+
+（曾经还有一个 `dglab-boot.log` 记录 NRO 的启动步骤，用来查"无 sysmodule 时黑屏"。
+经实机确认无 sysmodule 时 NRO 可以正常启动，该文件已按要求移除；黑屏那条留到以后完善
+前端体验时再处理。）
 
 **sysmodule 自己不写文件。** libnx 只在 applet 里挂载 `sdmc`，sysmodule 需要一个
 路径时不会干净地失败：`mkdir("sdmc:/switch")` 会走进 newlib 的 devoptab 兜底路径并解
