@@ -73,7 +73,12 @@ static bool glyphPixel(const DglabFont* font, int glyph, int row, int col)
     size_t glyph_bytes = (size_t)bytes_per_row * (size_t)font->tile_height;
     const uint8_t* data = font->glyphs + (size_t)glyph * glyph_bytes + (size_t)row * bytes_per_row;
 
-    return (data[col / 8] >> (col % 8)) & 1u;
+    // A row is a little endian value whose most significant bit is the leftmost
+    // pixel, so column c is bit (tile_width - 1 - c) of the row. This matches
+    // libnx's own console renderer, which walks the row's bits from the top.
+    int bit = font->tile_width - 1 - col;
+
+    return (data[bit / 8] >> (bit % 8)) & 1u;
 }
 
 void dglabCanvasText(DglabCanvas* canvas, const DglabFont* font, int x, int y, int scale,

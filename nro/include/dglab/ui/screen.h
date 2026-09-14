@@ -17,6 +17,7 @@
 typedef struct {
     DglabIpcVersion version;
     bool service_ready;
+    u32 service_result; // Result of smGetService, shown when the service is missing
     bool status_ok;
     DglabNetStatus status;
 

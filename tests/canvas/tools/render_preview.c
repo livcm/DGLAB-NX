@@ -11,7 +11,8 @@
 //
 //   cc -std=c11 -I nro/include -I common/include -I tests/net/hostshim \
 //       tests/canvas/tools/render_preview.c nro/source/ui/*.c -o /tmp/preview
-//   /tmp/preview /tmp/font.bin /tmp/preview.bmp
+//   /tmp/preview /tmp/font.bin /tmp/preview.bmp            (normal screen)
+//   /tmp/preview /tmp/font.bin /tmp/noservice.bmp noservice
 //   sips -s format png /tmp/preview.bmp --out /tmp/preview.png
 
 #include <dglab/ui/screen.h>
@@ -95,7 +96,7 @@ int main(int argc, char** argv)
     FILE* file;
 
     if (argc < 3) {
-        fprintf(stderr, "usage: render_preview <font.bin> <out.bmp>\n");
+        fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> [normal|noservice]\n");
         return 2;
     }
 
@@ -121,7 +122,8 @@ int main(int argc, char** argv)
     font.tile_height = 16;
 
     memset(&state, 0, sizeof(state));
-    state.service_ready = true;
+    state.service_ready = (argc < 4 || strcmp(argv[3], "noservice") != 0);
+    state.service_result = 0x00000202;
     state.status_ok = true;
     state.version.major = 0;
     state.version.minor = 2;
@@ -152,7 +154,7 @@ int main(int argc, char** argv)
         "https://www.dungeon-lab.com/app-download.php#DGLAB-SOCKET#"
         "ws://192.168.1.161:9999/8f2a4c1e-9b77-4d21-8c3a-5e6f7a9c0d");
     state.url = url;
-    state.url_ok = true;
+    state.url_ok = state.service_ready;
 
     dglabCanvasInit(&canvas, g_pixels, WIDTH, HEIGHT, WIDTH * 4);
     dglabScreenDraw(&canvas, &font, &state);

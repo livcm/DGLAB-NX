@@ -159,7 +159,8 @@ static void handleButtons(Service* dglab, u64 down)
 // The view
 // ---------------------------------------------------------------------------
 
-static DglabViewResult runSocketView(Service* dglab, bool service_ready, PadState* pad)
+static DglabViewResult runSocketView(Service* dglab, bool service_ready, u32 service_result,
+    PadState* pad)
 {
     const DglabFont* font = dglabFramebufferFont();
     DglabIpcVersion version = { 0 };
@@ -184,6 +185,7 @@ static DglabViewResult runSocketView(Service* dglab, bool service_ready, PadStat
 
         state.version = version;
         state.service_ready = service_ready;
+        state.service_result = service_result;
         state.test_strength = g_test_strength;
         state.log_lines = g_log_pointers;
         state.log_count = g_log_filled;
@@ -244,9 +246,30 @@ int main(int argc, char* argv[])
     padInitializeDefault(&pad);
 
     Service dglab;
-    bool service_ready = R_SUCCEEDED(smGetService(&dglab, DGLAB_IPC_SERVICE_NAME));
+    Result service_result = smGetService(&dglab, DGLAB_IPC_SERVICE_NAME);
+    bool service_ready = R_SUCCEEDED(service_result);
 
     if (!dglabFramebufferOpen()) {
+        // Without a framebuffer the console is the only way to explain what
+        // went wrong, instead of leaving the user with an empty screen.
+        consoleInit(NULL);
+        printf("DGLAB-NX: could not create the framebuffer\n\n");
+        printf("sysmodule service: 0x%08X\n", (unsigned)service_result);
+        printf("framebuffer: failed\n\n");
+        printf("Press + to exit.\n");
+        consoleUpdate(NULL);
+
+        while (appletMainLoop()) {
+            padUpdate(&pad);
+
+            if (padGetButtonsDown(&pad) & HidNpadButton_Plus)
+                break;
+
+            consoleUpdate(NULL);
+        }
+
+        consoleExit(NULL);
+
         if (service_ready)
             serviceClose(&dglab);
 
@@ -254,7 +277,7 @@ int main(int argc, char* argv[])
     }
 
     while (true) {
-        DglabViewResult result = runSocketView(&dglab, service_ready, &pad);
+        DglabViewResult result = runSocketView(&dglab, service_ready, service_result, &pad);
 
         if (result == DglabView_Exit)
             break;

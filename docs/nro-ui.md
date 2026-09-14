@@ -195,8 +195,15 @@ freetype 之类的依赖：
 
 - 该符号没有公开声明，只在 `console.h` 的注释里出现，因此代码里显式 `extern`；
   `nm libnx.a` 显示它是 0x2000 字节（256 个字形 × 32 字节），与 16×16 一致；
-- 位序（每行 2 字节、行内 LSB 优先）是把字体数据从 `libnx.a` 里抽出来逐个字形
-  渲染确认的，并在 `nro/source/platform/framebuffer.c` 里注明。
+- 位序：每行 2 字节，**一行是一个小端 16 位值，最高位是最左边的像素**，也就是
+  列 `c` 取该行的第 `tile_width - 1 - c` 位。这与 libnx 自己的 console 渲染器
+  （`ConsoleSwRenderer_drawChar` 从 `0x8000` 开始逐位右移）一致。
+
+  这一条踩过坑：第一版按"行内 LSB 优先"实现，结果**整个界面的字形左右镜像**
+  （排版正常、只有字反了），是实机测试才发现的。当时我抽字体数据渲染字形时把
+  镜像的 `L`/`r` 误读成了正常字形——字形是逐像素画出来的，判断方向必须真的看图
+  （`tests/canvas/tools/render_preview.c` 现在就是干这个用的），不能只看符号。
+  `tests/canvas` 里有一个合成字体的回归测试，字形画反会直接失败。
 
 ### 界面内容与按键
 
@@ -230,3 +237,7 @@ tests/canvas/tools/render_preview.c   # 用法见文件头部注释
 2. 二维码在真实屏幕上以 8~10 像素/模块渲染时的扫码成功率；
 3. 手柄按键提示是否符合实际使用习惯；
 4. 1080p dock 模式下 `nwindowGetDefault()` 的分辨率（当前按 720p 固定布局）。
+
+如果没有 sysmodule，界面会画一整屏说明（服务名、`smGetService` 的返回值、安装路径），
+不会再出现"空白屏幕"。万一连 framebuffer 都建不起来，NRO 会退回到 console 打印
+同样的信息。

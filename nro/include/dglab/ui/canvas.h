@@ -24,9 +24,9 @@ typedef struct {
 } DglabCanvas;
 
 // Bitmap font. The glyph data is one bit per pixel, tile_width must be a
-// multiple of 8, and a row's bits run from the least significant bit of its
-// first byte. That is the layout of libnx's default font (16x16 tiles, 32 bytes
-// per glyph), verified by dumping the font data and reading glyphs out of it.
+// multiple of 8, and a row is a little endian value whose most significant bit
+// is the leftmost pixel. That is the layout of libnx's default font (16x16
+// tiles, 32 bytes per glyph, as read by libnx's own console renderer).
 typedef struct {
     const uint8_t* glyphs;
     int ascii_offset;

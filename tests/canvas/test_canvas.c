@@ -28,9 +28,9 @@ static int g_failures;
 #define TEST_HEIGHT 32
 
 // An 8x8 font with one glyph ('A' at index 65) that has single pixels at (0,0)
-// and (3,3). Rows are stored least significant bit first, which is the layout
-// libnx's font uses.
-static const uint8_t kGlyph[8] = { 0x01, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00 };
+// and (3,3). A row's most significant bit is its leftmost pixel, which is the
+// layout libnx's font uses, so column 0 is bit 7 and column 3 is bit 4.
+static const uint8_t kGlyph[8] = { 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00 };
 
 static const DglabFont kFont = {
     .glyphs = kGlyph,
@@ -122,6 +122,9 @@ static void testText(void)
     CHECK(pixelAt(1, 1) == white);
     CHECK(pixelAt(4, 4) == white);
     CHECK(pixelAt(2, 2) == blue);
+    // A glyph must not come out mirrored: the pixel that belongs to column 0
+    // has to land on the left edge, and the right edge stays empty.
+    CHECK(pixelAt(8, 1) == blue);
 
     // Scaled text covers a block of pixels per font pixel.
     clear(blue);

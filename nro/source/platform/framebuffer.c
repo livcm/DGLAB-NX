@@ -18,9 +18,14 @@ static DglabFont g_font;
 
 bool dglabFramebufferOpen(void)
 {
-    framebufferCreate(&g_framebuffer, nwindowGetDefault(), DGLAB_FB_WIDTH, DGLAB_FB_HEIGHT,
-        PIXEL_FORMAT_RGBA_8888, 2);
-    framebufferMakeLinear(&g_framebuffer);
+    if (R_FAILED(framebufferCreate(&g_framebuffer, nwindowGetDefault(), DGLAB_FB_WIDTH,
+            DGLAB_FB_HEIGHT, PIXEL_FORMAT_RGBA_8888, 2)))
+        return false;
+
+    if (R_FAILED(framebufferMakeLinear(&g_framebuffer))) {
+        framebufferClose(&g_framebuffer);
+        return false;
+    }
 
     g_font.glyphs = default_font_bin;
     g_font.ascii_offset = 0;

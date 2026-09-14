@@ -65,7 +65,9 @@ static void drawLine(DglabCanvas* canvas, const DglabFont* font, int x, int y, c
     const char* value, uint32_t value_color)
 {
     dglabCanvasText(canvas, font, x, y, 1, label, kMuted);
-    dglabCanvasText(canvas, font, x + 12 * 16, y, 1, value, value_color);
+    // The longest label ("app strength") is 12 characters, so the values line up
+    // two characters further right.
+    dglabCanvasText(canvas, font, x + 14 * 16, y, 1, value, value_color);
 }
 
 static void drawWrapped(DglabCanvas* canvas, const DglabFont* font, int x, int y, int columns,
@@ -298,6 +300,37 @@ static void drawFooter(DglabCanvas* canvas, const DglabFont* font)
         kText);
 }
 
+// Without the service there is nothing to show, so the screen says what is
+// missing instead of leaving an empty window.
+static void drawNoService(DglabCanvas* canvas, const DglabFont* font, u32 result)
+{
+    int x = MARGIN;
+    int y = TITLE_HEIGHT + GAP;
+    int width = SCREEN_WIDTH - MARGIN * 2;
+    int height = SCREEN_HEIGHT - y - TITLE_HEIGHT;
+    char buffer[128];
+    int text_y = y + 24 + LINE_HEIGHT * 2;
+
+    drawPanel(canvas, font, x, y, width, height, "sysmodule");
+
+    dglabCanvasText(canvas, font, x + 20, text_y, 1, "the DGLAB sysmodule is not running", kError);
+    text_y += LINE_HEIGHT * 2;
+
+    snprintf(buffer, sizeof(buffer), "smGetService(\"%s\") = 0x%08X", DGLAB_IPC_SERVICE_NAME,
+        (unsigned)result);
+    dglabCanvasText(canvas, font, x + 20, text_y, 1, buffer, kMuted);
+    text_y += LINE_HEIGHT * 2;
+
+    dglabCanvasText(canvas, font, x + 20, text_y, 1,
+        "Install the sysmodule and reboot the console:", kText);
+    text_y += LINE_HEIGHT;
+    dglabCanvasText(canvas, font, x + 20, text_y, 1,
+        "  release/00FF072107210721/  ->  SD:/atmosphere/contents/00FF072107210721/", kMuted);
+    text_y += LINE_HEIGHT;
+    dglabCanvasText(canvas, font, x + 20, text_y, 1,
+        "then start this homebrew again: the socket server lives in that process.", kMuted);
+}
+
 void dglabScreenDraw(DglabCanvas* canvas, const DglabFont* font, const DglabScreenState* state)
 {
     dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, kBackground);
@@ -305,10 +338,7 @@ void dglabScreenDraw(DglabCanvas* canvas, const DglabFont* font, const DglabScre
     drawTitle(canvas, font, state);
 
     if (!state->service_ready) {
-        dglabCanvasText(canvas, font, MARGIN, TITLE_HEIGHT + GAP + 40, 1,
-            "DGLAB sysmodule not found.", kError);
-        dglabCanvasText(canvas, font, MARGIN, TITLE_HEIGHT + GAP + 40 + LINE_HEIGHT, 1,
-            "Install it and reboot the console.", kMuted);
+        drawNoService(canvas, font, state->service_result);
     } else {
         drawStatus(canvas, font, state);
         drawQr(canvas, font, state);
