@@ -1,114 +1,58 @@
 // DGLAB-NX front end.
 //
-// Two roles:
-//   - the minimal IPC check that the sysmodule is reachable (GET_VERSION);
-//   - a viewer and remote control for the BLE transport PoC running inside the
-//     sysmodule, so the whole Bluetooth experiment is observable on the console
-//     without a debugger.
+// Polls the sysmodule over IPC, feeds the result into the screen layout, and
+// turns button presses into IPC commands. The drawing itself lives in
+// dglab/ui/screen.c, which stays free of libnx so it can be rendered and
+// checked on a PC.
 //
-// The NRO never talks to the Bluetooth stack itself: the sysmodule is the only
-// owner of the DG-LAB connection.
+// The NRO never owns a DG-LAB connection: the sysmodule is the only owner, and
+// everything here goes through the IPC surface in dglab/ipc.h.
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #include <switch.h>
 
 #include <dglab/ipc.h>
-#include <dglab/ipc_poc.h>
+#include <dglab/nro/ble_poc_view.h>
+#include <dglab/platform/framebuffer.h>
+#include <dglab/ui/screen.h>
 
-// The on screen ring keeps short lines for layout, but the file gets the whole
-// line: the sysmodule log lines carry filter patterns and UUIDs at the end, and
-// truncating them to the display width hid exactly that information.
-#define LOG_LINES 12
-#define LOG_LINE_LEN 72
-#define LOG_LINE_MAX 192
-#define LOG_POLL_ROUNDS 8
+#define LOG_POLL_ROUNDS 2
 
-// Everything the NRO writes lives in one directory, created on startup.
-#define DATA_DIR "sdmc:/switch/DGLAB-NX"
-#define LOG_FILE_PATH DATA_DIR "/dglab-ble-poc.log"
-// Optional: connect straight to this address instead of scanning, for the case
-// where the console's scan filters cannot report the device.
-#define ADDRESS_FILE_PATH DATA_DIR "/dglab-ble-address.txt"
+typedef enum {
+    DglabView_Exit = 0,
+    DglabView_BlePoc,
+} DglabViewResult;
 
-static char g_log_lines[LOG_LINES][LOG_LINE_LEN];
+static char g_log_lines[DGLAB_SCREEN_LOG_LINES][DGLAB_SCREEN_LOG_LINE_LEN];
+static const char* g_log_pointers[DGLAB_SCREEN_LOG_LINES];
 static int g_log_filled;
 static u32 g_log_cursor;
-static char g_partial[LOG_LINE_MAX];
+static char g_partial[256];
 static size_t g_partial_len;
-static FILE* g_log_file;
-static u8 g_target_address[6];
-static bool g_target_address_valid;
+static u32 g_test_strength = 10;
 
-static const char* pocStateName(u32 state)
-{
-    switch (state) {
-        case DglabPocState_Idle: return "idle";
-        case DglabPocState_Initializing: return "initializing";
-        case DglabPocState_Scanning: return "scanning";
-        case DglabPocState_Registering: return "registering";
-        case DglabPocState_Connecting: return "connecting";
-        case DglabPocState_Discovering: return "discovering";
-        case DglabPocState_Ready: return "ready";
-        case DglabPocState_Failed: return "FAILED";
-        case DglabPocState_Stopped: return "stopped";
-        default: return "?";
-    }
-}
+// ---------------------------------------------------------------------------
+// Log ring
+// ---------------------------------------------------------------------------
 
 static void logPushLine(const char* line)
 {
     size_t len = strlen(line);
 
-    if (LOG_LINES > 1)
-        memmove(g_log_lines[0], g_log_lines[1], sizeof(g_log_lines[0]) * (LOG_LINES - 1));
+    if (DGLAB_SCREEN_LOG_LINES > 1)
+        memmove(g_log_lines[0], g_log_lines[1],
+            sizeof(g_log_lines[0]) * (DGLAB_SCREEN_LOG_LINES - 1));
 
-    if (len >= LOG_LINE_LEN)
-        len = LOG_LINE_LEN - 1;
+    if (len >= DGLAB_SCREEN_LOG_LINE_LEN)
+        len = DGLAB_SCREEN_LOG_LINE_LEN - 1;
 
-    memcpy(g_log_lines[LOG_LINES - 1], line, len);
-    g_log_lines[LOG_LINES - 1][len] = '\0';
+    memcpy(g_log_lines[DGLAB_SCREEN_LOG_LINES - 1], line, len);
+    g_log_lines[DGLAB_SCREEN_LOG_LINES - 1][len] = '\0';
 
-    if (g_log_filled < LOG_LINES)
+    if (g_log_filled < DGLAB_SCREEN_LOG_LINES)
         g_log_filled++;
-
-    // Mirror the sysmodule log to the SD card so a test run can be reported
-    // back without photographing the console.
-    if (g_log_file != NULL) {
-        fprintf(g_log_file, "%s\n", line);
-        fflush(g_log_file);
-    }
-}
-
-// Creates sdmc:/switch/DGLAB-NX if it is not there yet. A failure here is not
-// fatal: the directory is usually already present, and if the card really is
-// unusable the fopen below reports it.
-static void ensureDataDir(void)
-{
-    mkdir("sdmc:/switch", 0777);
-    mkdir(DATA_DIR, 0777);
-}
-
-// libnx's default init already mounts sdmc, so mounting again must never be
-// treated as a hard failure: that would silently drop the whole log. Just try
-// to open the file and report what actually happened.
-static bool logFileOpen(void)
-{
-    ensureDataDir();
-    g_log_file = fopen(LOG_FILE_PATH, "w");
-
-    if (g_log_file == NULL) {
-        fsdevMountSdmc();
-        ensureDataDir();
-        g_log_file = fopen(LOG_FILE_PATH, "w");
-    }
-
-    if (g_log_file == NULL)
-        g_log_file = fopen("sdmc:/dglab-ble-poc.log", "w");
-
-    return g_log_file != NULL;
 }
 
 static void logAppend(const char* text, size_t size)
@@ -123,7 +67,6 @@ static void logAppend(const char* text, size_t size)
             continue;
         }
 
-        // Skip padding left over from a cleared sysmodule log ring.
         if (c == '\r' || c == '\0')
             continue;
 
@@ -132,19 +75,20 @@ static void logAppend(const char* text, size_t size)
     }
 }
 
-static Result pocPollLog(Service* dglab)
+static void logPoll(Service* dglab)
 {
     for (int i = 0; i < LOG_POLL_ROUNDS; i++) {
-        DglabPocLogRequest request = { 0 };
-        DglabPocLogChunk chunk;
+        DglabNetLogRequest request = { 0 };
+        DglabNetLogChunk chunk;
         Result rc;
 
         request.cursor = g_log_cursor;
         memset(&chunk, 0, sizeof(chunk));
 
-        rc = serviceDispatchInOut(dglab, DGLAB_IPC_POC_CMD_LOG, request, chunk);
+        rc = serviceDispatchInOut(dglab, DGLAB_IPC_CMD_NET_LOG, request, chunk);
+
         if (R_FAILED(rc))
-            return rc;
+            return;
 
         if (chunk.size) {
             u32 size = chunk.size;
@@ -155,166 +99,138 @@ static Result pocPollLog(Service* dglab)
             logAppend(chunk.text, size);
         }
 
-        if (chunk.next_cursor == g_log_cursor)
-            break;
+        if (chunk.next_cursor == g_log_cursor || chunk.size == 0)
+            return;
 
         g_log_cursor = chunk.next_cursor;
-
-        if (chunk.size == 0)
-            break;
-    }
-
-    return 0;
-}
-
-static void printMilestones(u32 milestone)
-{
-    static const struct {
-        u32 bit;
-        const char* name;
-    } kItems[] = {
-        { DGLAB_POC_MILESTONE_BLE_READY, "ble" },
-        { DGLAB_POC_MILESTONE_SCAN_STARTED, "scan" },
-        { DGLAB_POC_MILESTONE_DEVICE_FOUND, "found" },
-        { DGLAB_POC_MILESTONE_CLIENT_READY, "client" },
-        { DGLAB_POC_MILESTONE_CONNECTED, "conn" },
-        { DGLAB_POC_MILESTONE_SERVICE_FOUND, "svc" },
-        { DGLAB_POC_MILESTONE_CHARS_FOUND, "char" },
-        { DGLAB_POC_MILESTONE_NOTIFY_ON, "notify" },
-        { DGLAB_POC_MILESTONE_B0_WRITTEN, "b0" },
-        { DGLAB_POC_MILESTONE_B1_RECEIVED, "b1" },
-        { DGLAB_POC_MILESTONE_BATTERY_READ, "bat" },
-    };
-
-    for (size_t i = 0; i < sizeof(kItems) / sizeof(kItems[0]); i++)
-        printf("%s%s ", (milestone & kItems[i].bit) ? "+" : ".", kItems[i].name);
-}
-
-static void printStatus(const DglabPocStatus* status)
-{
-    printf("state: %-12s  aruid: 0x%08X\n", pocStateName(status->state), status->aruid_low);
-    printf("last result: 0x%08X\n", status->last_result);
-
-    printf("milestones: ");
-    printMilestones(status->milestone);
-    printf("\n");
-
-    if (status->address_valid) {
-        printf("device: %02X:%02X:%02X:%02X:%02X:%02X type=%u matched=%u\n", status->address[0],
-            status->address[1], status->address[2], status->address[3], status->address[4],
-            status->address[5], status->ble_addr_type, status->scan_matched);
-    } else {
-        printf("device: none  scan results: %u\n", status->scan_results);
-    }
-
-    printf("client_if: %u  conn_id: %u  mtu: %u\n", status->client_if, status->conn_id,
-        status->mtu);
-
-    printf("char props: write=0x%02X notify=0x%02X battery=0x%02X\n", status->char_write_prop,
-        status->char_notify_prop, status->char_battery_prop);
-
-    printf("b0 writes: %u (failed %u)  auto=%u\n", status->b0_write_count,
-        status->b0_write_failures, status->auto_write);
-
-    printf("ble events: %u (last type %u)  scan results: %u\n", status->event_count,
-        status->last_event_type, status->scan_results);
-
-    printf("notifications: %u  battery: ", status->notify_count);
-
-    if (status->battery_valid)
-        printf("%u\n", status->battery_value);
-    else
-        printf("none\n");
-
-    printf("last notify: ");
-
-    if (status->last_notify_size) {
-        u32 size = status->last_notify_size;
-
-        if (size > sizeof(status->last_notify))
-            size = sizeof(status->last_notify);
-
-        for (u32 i = 0; i < size; i++)
-            printf("%02X", status->last_notify[i]);
-
-        printf("\n");
-    } else {
-        printf("none\n");
     }
 }
 
-static void printLog(void)
+// The screen takes a plain array of lines, in the order they should be drawn.
+static void buildLogPointers(void)
 {
-    printf("------------------------ log -------------------------\n");
-
     for (int i = 0; i < g_log_filled; i++)
-        printf("%s\n", g_log_lines[LOG_LINES - g_log_filled + i]);
+        g_log_pointers[i] = g_log_lines[DGLAB_SCREEN_LOG_LINES - g_log_filled + i];
 }
 
-// Reads an optional "XX:XX:XX:XX:XX:XX" file so the PoC can skip the console's
-// scan filters and connect straight to a known address.
-static bool loadTargetAddress(u8 out[6])
+// ---------------------------------------------------------------------------
+// IPC
+// ---------------------------------------------------------------------------
+
+static void sendTestCommand(Service* dglab, u32 command, u32 channel, u32 value)
 {
-    FILE* file = fopen(ADDRESS_FILE_PATH, "r");
-    char line[64];
-    unsigned int bytes[6];
+    DglabNetSendRequest request = { 0 };
 
-    if (file == NULL)
-        return false;
+    request.command = command;
+    request.channel = channel;
+    request.value = value;
 
-    if (fgets(line, sizeof(line), file) == NULL) {
-        fclose(file);
-        return false;
+    serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_SEND, request);
+}
+
+static void handleButtons(Service* dglab, u64 down)
+{
+    if (down & HidNpadButton_A) {
+        DglabNetStartRequest request = { 0 };
+
+        serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_START, request);
     }
 
-    fclose(file);
+    if (down & HidNpadButton_Y)
+        serviceDispatch(dglab, DGLAB_IPC_CMD_NET_STOP);
 
-    if (sscanf(line, "%x:%x:%x:%x:%x:%x", &bytes[0], &bytes[1], &bytes[2], &bytes[3],
-            &bytes[4], &bytes[5]) != 6)
-        return false;
+    if (down & HidNpadButton_X)
+        sendTestCommand(dglab, DglabNetCommand_SetStrength, 0, g_test_strength);
 
-    for (int i = 0; i < 6; i++)
-        out[i] = (u8)bytes[i];
+    if (down & HidNpadButton_B)
+        sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0);
 
-    return true;
+    if (down & HidNpadButton_ZL)
+        sendTestCommand(dglab, DglabNetCommand_TestPulse, 0, g_test_strength);
+
+    if (down & HidNpadButton_L)
+        g_test_strength = (g_test_strength > 5) ? g_test_strength - 5 : 100;
+
+    if (down & HidNpadButton_R)
+        g_test_strength = (g_test_strength < 100) ? g_test_strength + 5 : 5;
 }
 
-// Idle, failed and stopped all mean the sysmodule has no worker running, so a
-// new run has to be started before an action can be accepted.
-static bool pocStateIsActive(u32 state)
+// ---------------------------------------------------------------------------
+// The view
+// ---------------------------------------------------------------------------
+
+static DglabViewResult runSocketView(Service* dglab, bool service_ready, PadState* pad)
 {
-    switch (state) {
-        case DglabPocState_Idle:
-        case DglabPocState_Failed:
-        case DglabPocState_Stopped:
-            return false;
-        default:
-            return true;
+    const DglabFont* font = dglabFramebufferFont();
+    DglabIpcVersion version = { 0 };
+    char url[DGLAB_NET_QR_MAX];
+    bool url_ok = false;
+
+    url[0] = '\0';
+
+    if (service_ready)
+        serviceDispatchOut(dglab, DGLAB_IPC_CMD_GET_VERSION, version);
+
+    while (appletMainLoop()) {
+        DglabScreenState state;
+        DglabNetQrChunk chunk;
+        u64 down;
+
+        padUpdate(pad);
+        down = padGetButtonsDown(pad);
+
+        memset(&state, 0, sizeof(state));
+        memset(&chunk, 0, sizeof(chunk));
+
+        state.version = version;
+        state.service_ready = service_ready;
+        state.test_strength = g_test_strength;
+        state.log_lines = g_log_pointers;
+        state.log_count = g_log_filled;
+        state.url = url;
+        state.url_ok = url_ok;
+
+        if (service_ready) {
+            state.status_ok =
+                R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, state.status));
+
+            logPoll(dglab);
+            buildLogPointers();
+
+            state.log_count = g_log_filled;
+
+            if (R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_QR, chunk))) {
+                url_ok = true;
+                snprintf(url, sizeof(url), "%s", chunk.text);
+            } else {
+                // Without a LAN address there is no QR code to show.
+                url_ok = false;
+                url[0] = '\0';
+            }
+
+            state.url_ok = url_ok;
+        }
+
+        if (down & HidNpadButton_Plus)
+            return DglabView_Exit;
+
+        if (down & HidNpadButton_Minus)
+            return DglabView_BlePoc;
+
+        if (service_ready)
+            handleButtons(dglab, down);
+
+        {
+            DglabCanvas canvas;
+
+            if (dglabFramebufferBegin(&canvas)) {
+                dglabScreenDraw(&canvas, font, &state);
+                dglabFramebufferEnd();
+            }
+        }
     }
-}
 
-static Result pocSendStart(Service* dglab)
-{
-    DglabPocStartRequest request = { 0 };
-
-    request.applet_resource_user_id = appletGetAppletResourceUserId();
-
-    g_target_address_valid = loadTargetAddress(request.target_address);
-
-    if (g_target_address_valid) {
-        request.flags |= DGLAB_POC_START_FLAG_TARGET_ADDRESS;
-        memcpy(g_target_address, request.target_address, sizeof(g_target_address));
-    }
-
-    return serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_START, request);
-}
-
-static Result pocSendAction(Service* dglab, u32 action)
-{
-    DglabPocActionRequest request = { 0 };
-
-    request.action = action;
-    return serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_ACTION, request);
+    return DglabView_Exit;
 }
 
 int main(int argc, char* argv[])
@@ -322,149 +238,40 @@ int main(int argc, char* argv[])
     (void)argc;
     (void)argv;
 
-    consoleInit(NULL);
-
-    // Print something before touching the filesystem or IPC, so that a stall
-    // shows up on screen instead of looking like a dead NRO.
-    printf("DGLAB-NX BLE PoC\n\n");
-    printf("console ready\n");
-    consoleUpdate(NULL);
-
-    if (logFileOpen())
-        printf("log: %s\n", LOG_FILE_PATH);
-    else
-        printf("log: unavailable, nothing will be saved\n");
-
-    consoleUpdate(NULL);
-
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+
     PadState pad;
     padInitializeDefault(&pad);
 
-    printf("querying sysmodule...\n");
-    consoleUpdate(NULL);
-
     Service dglab;
-    Result rc = smGetService(&dglab, DGLAB_IPC_SERVICE_NAME);
+    bool service_ready = R_SUCCEEDED(smGetService(&dglab, DGLAB_IPC_SERVICE_NAME));
 
-    if (R_FAILED(rc)) {
-        printf("\nDGLAB sysmodule not found (0x%08X)\n", rc);
-        printf("Install the sysmodule and reboot the console.\n");
-        printf("If it is installed, check that it is running.\n");
-        printf("\nPress + to exit.\n");
-        consoleUpdate(NULL);
+    if (!dglabFramebufferOpen()) {
+        if (service_ready)
+            serviceClose(&dglab);
 
-        while (appletMainLoop()) {
-            padUpdate(&pad);
-            if (padGetButtonsDown(&pad) & HidNpadButton_Plus)
-                break;
-            consoleUpdate(NULL);
-        }
-
-        consoleExit(NULL);
         return 0;
     }
 
-    DglabIpcVersion version = { 0 };
-    rc = serviceDispatchOut(&dglab, DGLAB_IPC_CMD_GET_VERSION, version);
-    if (R_FAILED(rc)) {
-        printf("GetVersion failed (0x%08X)\n", rc);
-        serviceClose(&dglab);
-        consoleExit(NULL);
-        return 0;
-    }
+    while (true) {
+        DglabViewResult result = runSocketView(&dglab, service_ready, &pad);
 
-    DglabPocStatus status;
-    Result status_rc = 0;
-
-    while (appletMainLoop()) {
-        padUpdate(&pad);
-        u64 down = padGetButtonsDown(&pad);
-
-        // Refresh the status before handling buttons: the action handling needs
-        // to know whether a run is active, because the sysmodule drops actions
-        // when no worker is running.
-        memset(&status, 0, sizeof(status));
-        status_rc = serviceDispatchOut(&dglab, DGLAB_IPC_POC_CMD_STATUS, status);
-
-        if (R_SUCCEEDED(status_rc))
-            pocPollLog(&dglab);
-
-        bool run_active = R_SUCCEEDED(status_rc) && pocStateIsActive(status.state);
-
-        if (down & HidNpadButton_Plus)
+        if (result == DglabView_Exit)
             break;
 
-        if (down & HidNpadButton_A)
-            pocSendStart(&dglab);
+        // The BLE PoC view takes the console and the screen over, so the
+        // framebuffer is released while it runs and created again afterwards.
+        dglabFramebufferClose();
+        dglabBlePocViewRun();
 
-        if (down & HidNpadButton_Minus)
-            serviceDispatch(&dglab, DGLAB_IPC_POC_CMD_STOP);
-
-        u32 action = 0;
-
-        if (down & HidNpadButton_X)
-            action = DglabPocAction_WriteZeroB0;
-        else if (down & HidNpadButton_B)
-            action = DglabPocAction_ReadBattery;
-        else if (down & HidNpadButton_Y)
-            action = DglabPocAction_Disconnect;
-        else if (down & HidNpadButton_R)
-            action = DglabPocAction_RestartSession;
-        else if (down & HidNpadButton_L)
-            action = DglabPocAction_ToggleAutoWrite;
-        else if (down & HidNpadButton_ZL)
-            action = DglabPocAction_Rescan;
-        else if (down & HidNpadButton_ZR)
-            action = DglabPocAction_ScanWithProtocolUuid;
-        else if (down & HidNpadButton_Up)
-            action = DglabPocAction_ScanWithAdvertisedUuid;
-        else if (down & HidNpadButton_Down)
-            action = DglabPocAction_ScanWithGeneralFilter;
-        else if (down & HidNpadButton_Left)
-            action = DglabPocAction_ProbeBtdrvScan;
-
-        if (action != 0) {
-            // Start a run first when idle so a single button press works from
-            // the idle screen.
-            if (!run_active)
-                pocSendStart(&dglab);
-
-            pocSendAction(&dglab, action);
-        }
-
-        consoleClear();
-        printf("DGLAB-NX BLE PoC   (IPC %u.%u.%u)\n\n", version.major, version.minor,
-            version.patch);
-
-        if (R_SUCCEEDED(status_rc))
-            printStatus(&status);
-        else
-            printf("PoC status failed (0x%08X)\n", status_rc);
-
-        printf("\n");
-        printLog();
-
-        if (g_target_address_valid) {
-            printf("target: %02X:%02X:%02X:%02X:%02X:%02X (from %s)\n", g_target_address[0],
-                g_target_address[1], g_target_address[2], g_target_address[3],
-                g_target_address[4], g_target_address[5], ADDRESS_FILE_PATH);
-        } else {
-            printf("target: none, scanning (see %s)\n", ADDRESS_FILE_PATH);
-        }
-
-        printf("A start  X zero-B0  B battery  R aruid0  L auto  Y disconn  - stop  + exit\n");
-        printf("ZL rescan(0x1812->0x180C)  ZR scan 0x180C  Up scan 0x1812  Down general filter\n");
-        printf("Left btdrv scan probe (sets scan parameters, polls the queue)\n");
-
-        consoleUpdate(NULL);
+        if (!dglabFramebufferOpen())
+            break;
     }
 
-    serviceClose(&dglab);
+    dglabFramebufferClose();
 
-    if (g_log_file != NULL)
-        fclose(g_log_file);
+    if (service_ready)
+        serviceClose(&dglab);
 
-    consoleExit(NULL);
     return 0;
 }
