@@ -42,9 +42,6 @@ typedef struct {
     // Writes the Switch LAN address as both struct in_addr and a dotted quad;
     // the QR url needs the text. Returns false while the Switch has no address.
     bool (*get_ip)(void* context, uint32_t* address, char* text, size_t text_size);
-    // Optional: receives every log line as it is written (no trailing newline).
-    // The sysmodule transport mirrors them to the SD card with it.
-    void (*log_sink)(void* context, const char* line);
     void* context;
 } DglabNetServerConfig;
 

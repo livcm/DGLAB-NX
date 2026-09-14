@@ -26,11 +26,6 @@ void dglabNetServerLog(DglabNetServer* server, const char* fmt, ...)
     if ((size_t)len > sizeof(line) - 2)
         len = (int)(sizeof(line) - 2);
 
-    line[len] = '\0';
-
-    if (server->config.log_sink)
-        server->config.log_sink(server->config.context, line);
-
     line[len++] = '\n';
 
     for (int i = 0; i < len; i++) {

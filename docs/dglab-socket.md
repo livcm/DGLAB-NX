@@ -200,9 +200,20 @@ sysmodule 内部直接扮演控制端：
 
 | 文件 | 写入方 | 内容 |
 | --- | --- | --- |
-| `sdmc:/switch/DGLAB-NX/dglab-sys.log` | sysmodule | 服务端自身的日志（含睡眠请求、PS 注册结果） |
-| `sdmc:/switch/DGLAB-NX/dglab-net.log` | NRO | 界面读到的 `NET_LOG` 增量副本 |
+| `sdmc:/switch/DGLAB-NX/dglab-net.log` | NRO | `NET_LOG` 的增量副本（服务端日志的实际落盘处） |
 | `sdmc:/switch/DGLAB-NX/dglab-boot.log` | NRO | 启动到哪一步（黑屏时唯一的线索） |
+
+**sysmodule 自己不写文件。** libnx 只在 applet 里挂载 `sdmc`，sysmodule 需要一个
+路径时不会干净地失败：`mkdir("sdmc:/switch")` 会走进 newlib 的 devoptab 兜底路径并解
+引用空指针。这不是推测——安装 5.x 那版 sysmodule 后开机 logo 处直接报错，崩溃报告
+（`01789399881_00ff072107210721.log`）的调用链是：
+
+    mkdir  <-  netFileLog(net_socket.c:82)  <-  dglabNetServerLog  <-  generateId
+           <-  dglabNetServerInit  <-  netCoreEnsureReady  <-  main
+
+因此 sysmodule 侧只保留内存日志环，由 NRO 读出来写盘。真正需要在 sysmodule 里读写
+文件时，必须先 `fsInitialize()` + `fsdevMountSdmc()`，并且在 sysmodule 启动早期还要
+考虑文件系统可能尚未就绪。
 
 ### 连接与错误处理
 

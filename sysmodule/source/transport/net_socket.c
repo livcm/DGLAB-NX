@@ -10,7 +10,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -59,37 +58,6 @@ static struct {
         { .fd = -1, .active = false, .thread_valid = false },
     },
 };
-
-// The sysmodule log is mirrored to the SD card: when the console hangs on sleep,
-// this file is the only record of what the sysmodule was doing at the time.
-#define NET_LOG_DIR "sdmc:/switch/DGLAB-NX"
-#define NET_LOG_PATH NET_LOG_DIR "/dglab-sys.log"
-
-static FILE* g_log_file;
-static u32 g_log_tick;
-
-static void netFileLog(void* context, const char* line)
-{
-    (void)context;
-
-    if (g_log_file == NULL) {
-        // Opening early in boot can fail while the filesystem comes up, so this
-        // is retried now and then instead of only once.
-        if (g_log_tick++ % 64u != 0u)
-            return;
-
-        mkdir("sdmc:/switch", 0777);
-        mkdir(NET_LOG_DIR, 0777);
-
-        g_log_file = fopen(NET_LOG_PATH, "a");
-
-        if (g_log_file == NULL)
-            return;
-    }
-
-    fprintf(g_log_file, "%s\n", line);
-    fflush(g_log_file);
-}
 
 // ---------------------------------------------------------------------------
 // Platform callbacks for the platform independent core
@@ -564,23 +532,39 @@ static Result netOpenListenSocket(u16 port, int* out_fd)
     return 0;
 }
 
-// Creates the server core on first use. Must be called with the lock held.
+// Creates the server core on first use, with the services it needs. Must be
+// called with the lock held.
+//
+// Note for anything added here: a sysmodule has no filesystem mounted (libnx
+// only mounts sdmc for applets), and touching a path without mounting it first
+// does not fail cleanly - the 1.7 crash report for this sysmodule was a data
+// abort inside mkdir called from exactly this spot.
 static void netCoreEnsureReady(u16 port)
 {
     DglabNetServerConfig config;
+    Result rc;
 
     if (g_net.core_ready)
         return;
+
+    // The core generates its controller id from the random source, so csrng has
+    // to be up first; without it the id falls back to a fixed one.
+    if (!g_net.csprng_ready)
+        g_net.csprng_ready = R_SUCCEEDED(csrngInitialize());
 
     memset(&config, 0, sizeof(config));
     config.port = port;
     config.now_ms = netNowMs;
     config.fill_random = netFillRandom;
     config.get_ip = netGetIp;
-    config.log_sink = netFileLog;
 
     dglabNetServerInit(&g_net.server, &config);
     g_net.core_ready = true;
+
+    rc = g_net.csprng_ready ? 0 : MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
+
+    if (R_FAILED(rc))
+        dglabNetServerLog(&g_net.server, "csrng unavailable, the id is a fallback");
 }
 
 Result dglabNetSocketStart(u16 port)
@@ -600,11 +584,8 @@ Result dglabNetSocketStart(u16 port)
         return 0;
     }
 
-    // The services come first: the core generates its controller id from the
-    // random source and reports the LAN address through nifm.
-    if (!g_net.csprng_ready)
-        g_net.csprng_ready = R_SUCCEEDED(csrngInitialize());
-
+    // nifm is only needed once the server runs: it answers "what is our LAN
+    // address" for the QR code.
     if (!g_net.nifm_ready) {
         rc = nifmInitialize(NifmServiceType_User);
 
