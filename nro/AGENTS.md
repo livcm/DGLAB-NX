@@ -69,6 +69,22 @@ UI 风格可以模仿 HOS，但实现应与 HOS 系统 UI 解耦。
     Button
     Modal
 
+## NRO Identity
+
+普通 NRO 不需要像 NSP/NCA 那样分配 Nintendo Title ID，
+也不使用 Atmosphère `contents/<titleid>/` 安装结构。
+
+但是 NRO 可以包含 NACP metadata，其中的
+PresenceGroupId / SaveDataOwnerId 等字段可能被 loader 或模拟器
+用作 ProgramId。
+
+因此：
+
+- 不要将 NRO 的 metadata identity 与 Sysmodule Title ID 混淆；
+- 如果项目包含多个 NRO，它们应使用独立且稳定的 metadata identity；
+- 不要让多个需要被独立识别的 NRO 无意中共享同一个 ProgramId；
+- 如果需要兼容 Ryujinx，应验证多个 NRO 能否同时被正确识别。
+
 ## 构建
 
 修改 NRO 源代码、headers、IPC 定义、Makefile 或 linker 配置后，应至少执行：

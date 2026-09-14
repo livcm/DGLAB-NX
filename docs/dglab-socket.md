@@ -174,8 +174,8 @@ sysmodule 内部直接扮演控制端：
 
 | 情况 | 行为 |
 | --- | --- |
-| 请求路径里没有 id（`/`、空） | 回 `210` 并断开 |
-| id 与二维码里的控制器 uuid 不一致 | 回 `210` 并断开，日志记录对方提供的 id |
+| 请求路径里没有 id（`/`、空） | **仍然配对**，日志写 `client connected without a client id in the target` |
+| id 与二维码里的控制器 uuid 不一致 | **仍然配对**，日志写两个 id 并注明 `does not match ... pairing anyway` |
 | 该控制器 id 已被绑定 | 回 `400` 并断开 |
 | 服务端不在监听状态 | 回 `500` 并断开 |
 | 收到超过 1950 字节的消息 | 回 `405` |
@@ -184,6 +184,30 @@ sysmodule 内部直接扮演控制端：
 | 收到未知 `msg` 指令 | 记日志后忽略，不报错（App 版本比本实现新时不应断线） |
 
 同时最多接受 2 条连接（一条绑定 + 一条重连过渡），日志环 4KB。
+
+宽容配对是实机反馈的结果：按参考实现用 `210` 拒绝"id 不对"的连接，会让手机 App
+一直停在"正在连接"上转圈。现在的做法是先配对、把对方的 target 原样记进日志，
+等实机日志确认 App 到底发什么（路径里带 id、不带 id、还是 `?tid=`）之后再收紧。
+
+WebSocket 握手方面还有一条兼容处理：如果客户端带了
+`Sec-WebSocket-Protocol`，服务端必须回选其中一个协议，否则客户端必须判定连接失败。
+服务端现在回显列表里的第一个 token；如果客户端没带这个头，就不回。
+
+### 排查连接问题看什么
+
+每次握手都会记一行：
+
+| 日志 | 含义 |
+| --- | --- |
+| `websocket from <ip>, target '<target>'` | 收到握手，含对端地址与请求路径 |
+| `client connected without a client id in the target` | 路径里没有 id |
+| `client id X does not match Y, pairing anyway` | 路径里的 id 与二维码里的不同 |
+| `app <uuid> bound (target '<target>')` | 已配对，bind 已发出 |
+| `websocket handshake from <ip> failed` | 握手失败（不是 WebSocket 请求等） |
+| `app <uuid> disconnected` | 对端断开 |
+
+如果手机停在"正在连接"，先看有没有 `websocket from ...`：没有就是 TCP 根本没到
+Switch（网络/端口问题），有就说明握手与配对已经完成，问题在配对之后的消息约定上。
 
 ### 已知的实现约定（需要实机验证）
 
@@ -218,3 +242,6 @@ make -C tests/net        # 内存级协议测试 + 真实回环 TCP 端到端测
 3. 期望 `NET_STATUS.state` 变成 `Paired`、`peer_id` 非空、App 界面显示已连接；
 4. 用 `NET_SEND` 的测试按钮看强度/清空是否生效；
 5. 观察 `NET_LOG` 里的收发记录，据此修正上面 1、2、3 三条约定。
+
+NRO 会把 `NET_LOG` 同步写到 `sdmc:/switch/DGLAB-NX/dglab-net.log`（打不开时退到
+`sdmc:/dglab-net.log`），实机测试后直接把这个文件发回来即可。

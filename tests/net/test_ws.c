@@ -198,6 +198,7 @@ static void testHandshake(void)
     CHECK(wsParseHandshake((const uint8_t*)kRequest, strlen(kRequest), &handshake));
     CHECK(strcmp(handshake.target, "/1a2b3c") == 0);
     CHECK(strcmp(handshake.key, "dGhlIHNhbXBsZSBub25jZQ==") == 0);
+    CHECK(handshake.protocol[0] == '\0');
 
     length = wsBuildHandshakeResponse(&handshake, response, sizeof(response));
     CHECK(length > 0);
@@ -206,6 +207,23 @@ static void testHandshake(void)
     CHECK(strstr(response, "Connection: Upgrade\r\n") != NULL);
     // RFC 6455 section 1.3 known answer.
     CHECK(strstr(response, "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n") != NULL);
+    // No subprotocol was offered, so none is selected.
+    CHECK(strstr(response, "Sec-WebSocket-Protocol") == NULL);
+
+    // A client that offers subprotocols has to be answered with one of them, or
+    // it must fail the connection; the first offered token is picked.
+    {
+        const char* offer = "GET /x HTTP/1.1\r\nHost: x\r\n"
+                            "Sec-WebSocket-Protocol: chat, superchat\r\n"
+                            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+
+        CHECK(wsParseHandshake((const uint8_t*)offer, strlen(offer), &handshake));
+        CHECK(strcmp(handshake.protocol, "chat, superchat") == 0);
+
+        length = wsBuildHandshakeResponse(&handshake, response, sizeof(response));
+        CHECK(length > 0);
+        CHECK(strstr(response, "Sec-WebSocket-Protocol: chat\r\n") != NULL);
+    }
 
     const char* broken = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
     CHECK(!wsParseHandshake((const uint8_t*)broken, strlen(broken), &handshake));
@@ -405,6 +423,8 @@ static void testLoopback(void)
         response[got] = '\0';
         CHECK(strstr(response, "101 Switching Protocols") != NULL);
         CHECK(strstr(response, "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != NULL);
+        // The test client offers no subprotocol, so none is selected.
+        CHECK(strstr(response, "Sec-WebSocket-Protocol") == NULL);
     }
 
     uint8_t payload[64];

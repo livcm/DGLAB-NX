@@ -131,6 +131,22 @@ static void netSetTimeout(int fd, int option, int seconds)
     setsockopt(fd, SOL_SOCKET, option, &timeout, sizeof(timeout));
 }
 
+// Dotted quad of the peer, for the log. Logs show which address actually
+// reached the console, which is the first thing to check when the App hangs.
+static void netPeerText(int fd, char* out, size_t out_size)
+{
+    struct sockaddr_in peer;
+    socklen_t length = sizeof(peer);
+
+    snprintf(out, out_size, "?");
+
+    if (getpeername(fd, (struct sockaddr*)&peer, &length) != 0)
+        return;
+
+    if (inet_ntop(AF_INET, &peer.sin_addr, out, (socklen_t)out_size) == NULL)
+        snprintf(out, out_size, "?");
+}
+
 static int netSocketRead(void* context, uint8_t* buffer, size_t size)
 {
     int fd = *(const int*)context;
@@ -175,16 +191,20 @@ static void netClientThreadMain(void* arg)
     NetSocketClient* slot = &g_net.clients[(size_t)(uintptr_t)arg];
     WsConn* conn = &slot->conn;
     bool attached = false;
+    char peer[32];
 
     netSetTimeout(slot->fd, SO_RCVTIMEO, NET_HANDSHAKE_TIMEOUT_S);
     netSetTimeout(slot->fd, SO_SNDTIMEO, NET_TRANSFER_TIMEOUT_S);
 
+    netPeerText(slot->fd, peer, sizeof(peer));
+
     if (wsConnHandshake(conn)) {
         mutexLock(&g_net.mutex);
+        dglabNetServerLog(&g_net.server, "websocket from %s, target '%s'", peer, conn->target);
         attached = dglabNetServerAttach(&g_net.server, conn);
         mutexUnlock(&g_net.mutex);
     } else {
-        netLog("websocket handshake failed");
+        netLog("websocket handshake from %s failed", peer);
     }
 
     if (attached) {

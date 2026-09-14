@@ -246,6 +246,12 @@ bool wsParseHandshake(const uint8_t* request, size_t size, WsHandshake* out)
             copyHeaderValue((const char*)request + cursor + 18, line_len - 18, out->key,
                 sizeof(out->key));
 
+        // "Sec-WebSocket-Protocol" is 22 characters.
+        if (line_len > 23 &&
+            isHeaderName((const char*)request + cursor, line_len, "sec-websocket-protocol"))
+            copyHeaderValue((const char*)request + cursor + 23, line_len - 23, out->protocol,
+                sizeof(out->protocol));
+
         cursor = line_end + 2;
     }
 
@@ -257,6 +263,7 @@ size_t wsBuildHandshakeResponse(const WsHandshake* handshake, char* out, size_t 
     uint8_t digest[20];
     char accept[32];
     char source[128];
+    char protocol[96];
     int source_len;
     int written;
 
@@ -270,13 +277,32 @@ size_t wsBuildHandshakeResponse(const WsHandshake* handshake, char* out, size_t 
     if (wsBase64Encode(digest, sizeof(digest), accept, sizeof(accept)) == 0)
         return 0;
 
+    // A client that offers subprotocols requires the server to pick one, so the
+    // first offered token is echoed back. The App is not known to need this, but
+    // a client that does would otherwise sit in "connecting" forever.
+    protocol[0] = '\0';
+
+    if (handshake->protocol[0] != '\0') {
+        size_t len = 0;
+
+        // Only the first token of the comma separated list.
+        while (handshake->protocol[len] != '\0' && handshake->protocol[len] != ',' &&
+               handshake->protocol[len] != ' ' && len < sizeof(protocol) - 24)
+            len++;
+
+        if (len != 0)
+            snprintf(protocol, sizeof(protocol), "Sec-WebSocket-Protocol: %.*s\r\n", (int)len,
+                handshake->protocol);
+    }
+
     written = snprintf(out, out_size,
         "HTTP/1.1 101 Switching Protocols\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Accept: %s\r\n"
+        "%s"
         "\r\n",
-        accept);
+        accept, protocol);
 
     if (written <= 0 || (size_t)written >= out_size)
         return 0;

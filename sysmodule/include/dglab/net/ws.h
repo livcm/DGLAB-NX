@@ -32,6 +32,7 @@ typedef enum {
 typedef struct {
     char target[192]; // request target, e.g. "/<clientId>" or "/?tid=<clientId>"
     char key[48];     // Sec-WebSocket-Key, base64
+    char protocol[64]; // Sec-WebSocket-Protocol, empty when the client sent none
 } WsHandshake;
 
 // Returns > 0 for the byte count read, 0 on EOF, < 0 on error.

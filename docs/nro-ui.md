@@ -208,9 +208,14 @@ freetype 之类的依赖：
 ### 界面内容与按键
 
 - 服务器状态：状态、局域网地址、控制器 uuid、App uuid、连接/指令/上报计数、
-  App 上报的强度与上限、最近一次协议错误；
+  App 上报的强度与上限、最近一次协议错误；端口号显示在标题栏（值那一列只有 21 个
+  字符宽，`192.168.1.161:9999` 正好占满）；
 - 右侧：二维码 + 其内容（自动换行，模块大小按剩余高度自适应）；
-- 下方：sysmodule 日志（`NET_LOG` 增量读取）；
+- 下方：sysmodule 日志（`NET_LOG` 增量读取），同时写入
+  `sdmc:/switch/DGLAB-NX/dglab-net.log`，方便测试后把文件发回来；
+- 按键提示分两行（`A start`/`Y stop`/`X strength`/`B clear` 一行，`ZL pulse`/
+  `L/R value`/`- BLE poc`/`+ exit` 一行）：一行放不下，之前会把最后的 `+ exit`
+  挤出屏幕；
 - 按键：`A` 启动服务端、`Y` 停止、`X` 测试强度、`B` 清空波形、`ZL` 测试波形、
   `L`/`R` 调整测试强度、`-` 打开 BLE PoC 控制台视图、`+` 退出。
 
@@ -238,6 +243,8 @@ tests/canvas/tools/render_preview.c   # 用法见文件头部注释
 3. 手柄按键提示是否符合实际使用习惯；
 4. 1080p dock 模式下 `nwindowGetDefault()` 的分辨率（当前按 720p 固定布局）。
 
-如果没有 sysmodule，界面会画一整屏说明（服务名、`smGetService` 的返回值、安装路径），
-不会再出现"空白屏幕"。万一连 framebuffer 都建不起来，NRO 会退回到 console 打印
-同样的信息。
+如果没有 sysmodule，或者 framebuffer 建不起来，NRO **不使用 framebuffer**，而是走
+console（`consoleInit` + `printf` + 等 `+` 退出）打印服务名、`smGetService` 的返回值
+与安装路径。这样做的原因来自实机反馈：console 是本项目里**已验证能在真机上正常显示**
+的渲染路径（`-` 键那个视图），而 framebuffer 路径曾经给出过黑屏；错误信息再重要也
+不能依赖一条还没被实机确认过的路径。

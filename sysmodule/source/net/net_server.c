@@ -322,17 +322,16 @@ bool dglabNetServerAttach(DglabNetServer* server, WsConn* conn)
         return false;
     }
 
-    if (!dglabNetParseTargetId(conn->target, requested, sizeof(requested))) {
-        // 210: the QR code did not carry a usable client id.
-        sendError(server, conn, "210");
-        return false;
-    }
-
-    if (strcmp(requested, server->controller_id) != 0) {
-        sendError(server, conn, "210");
-        dglabNetServerLog(server, "rejected a client for unknown id %s", requested);
-        return false;
-    }
+    // The reference server rejects a target that does not carry the controller
+    // id with 210. Real devices turned out not to be trusted on that point: the
+    // connection is paired anyway and the mismatch is logged, because rejecting
+    // leaves the App spinning in "connecting" with nothing to go on. Tighten
+    // this once the log shows what the App actually sends.
+    if (!dglabNetParseTargetId(conn->target, requested, sizeof(requested)))
+        dglabNetServerLog(server, "client connected without a client id in the target");
+    else if (strcmp(requested, server->controller_id) != 0)
+        dglabNetServerLog(server, "client id %s does not match %s, pairing anyway", requested,
+            server->controller_id);
 
     if (findBoundClient(server)) {
         // 400: the id is already bound by another client.
@@ -353,7 +352,7 @@ bool dglabNetServerAttach(DglabNetServer* server, WsConn* conn)
     server->status.state = DglabNetState_Paired;
     snprintf((char*)server->status.peer_id, sizeof(server->status.peer_id), "%s", client->id);
 
-    dglabNetServerLog(server, "app %s bound", client->id);
+    dglabNetServerLog(server, "app %s bound (target '%s')", client->id, conn->target);
 
     // Bind reply to the App: clientId is the controller, targetId is the App's
     // own id, which is how the App learns its id (docs/dglab-socket.md).

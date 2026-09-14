@@ -9,7 +9,9 @@
 // everything here goes through the IPC surface in dglab/ipc.h.
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <switch.h>
 
@@ -19,6 +21,11 @@
 #include <dglab/ui/screen.h>
 
 #define LOG_POLL_ROUNDS 2
+
+// The sysmodule log is mirrored to the SD card, so a test run can be reported
+// back as a file instead of as a photo of the screen.
+#define DATA_DIR "sdmc:/switch/DGLAB-NX"
+#define LOG_FILE_PATH DATA_DIR "/dglab-net.log"
 
 typedef enum {
     DglabView_Exit = 0,
@@ -32,6 +39,7 @@ static u32 g_log_cursor;
 static char g_partial[256];
 static size_t g_partial_len;
 static u32 g_test_strength = 10;
+static FILE* g_log_file;
 
 // ---------------------------------------------------------------------------
 // Log ring
@@ -53,6 +61,24 @@ static void logPushLine(const char* line)
 
     if (g_log_filled < DGLAB_SCREEN_LOG_LINES)
         g_log_filled++;
+
+    if (g_log_file != NULL) {
+        fprintf(g_log_file, "%s\n", line);
+        fflush(g_log_file);
+    }
+}
+
+// libnx's default init already mounts sdmc, so a failure to open the file is
+// reported on screen rather than treated as fatal.
+static void logFileOpen(void)
+{
+    mkdir("sdmc:/switch", 0777);
+    mkdir(DATA_DIR, 0777);
+
+    g_log_file = fopen(LOG_FILE_PATH, "w");
+
+    if (g_log_file == NULL)
+        g_log_file = fopen("sdmc:/dglab-net.log", "w");
 }
 
 static void logAppend(const char* text, size_t size)
@@ -159,8 +185,7 @@ static void handleButtons(Service* dglab, u64 down)
 // The view
 // ---------------------------------------------------------------------------
 
-static DglabViewResult runSocketView(Service* dglab, bool service_ready, u32 service_result,
-    PadState* pad)
+static DglabViewResult runSocketView(Service* dglab, PadState* pad)
 {
     const DglabFont* font = dglabFramebufferFont();
     DglabIpcVersion version = { 0 };
@@ -169,8 +194,7 @@ static DglabViewResult runSocketView(Service* dglab, bool service_ready, u32 ser
 
     url[0] = '\0';
 
-    if (service_ready)
-        serviceDispatchOut(dglab, DGLAB_IPC_CMD_GET_VERSION, version);
+    serviceDispatchOut(dglab, DGLAB_IPC_CMD_GET_VERSION, version);
 
     while (appletMainLoop()) {
         DglabScreenState state;
@@ -184,34 +208,30 @@ static DglabViewResult runSocketView(Service* dglab, bool service_ready, u32 ser
         memset(&chunk, 0, sizeof(chunk));
 
         state.version = version;
-        state.service_ready = service_ready;
-        state.service_result = service_result;
         state.test_strength = g_test_strength;
         state.log_lines = g_log_pointers;
         state.log_count = g_log_filled;
         state.url = url;
         state.url_ok = url_ok;
 
-        if (service_ready) {
-            state.status_ok =
-                R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, state.status));
+        state.status_ok =
+            R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, state.status));
 
-            logPoll(dglab);
-            buildLogPointers();
+        logPoll(dglab);
+        buildLogPointers();
 
-            state.log_count = g_log_filled;
+        state.log_count = g_log_filled;
 
-            if (R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_QR, chunk))) {
-                url_ok = true;
-                snprintf(url, sizeof(url), "%s", chunk.text);
-            } else {
-                // Without a LAN address there is no QR code to show.
-                url_ok = false;
-                url[0] = '\0';
-            }
-
-            state.url_ok = url_ok;
+        if (R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_QR, chunk))) {
+            url_ok = true;
+            snprintf(url, sizeof(url), "%s", chunk.text);
+        } else {
+            // Without a LAN address there is no QR code to show.
+            url_ok = false;
+            url[0] = '\0';
         }
+
+        state.url_ok = url_ok;
 
         if (down & HidNpadButton_Plus)
             return DglabView_Exit;
@@ -219,8 +239,7 @@ static DglabViewResult runSocketView(Service* dglab, bool service_ready, u32 ser
         if (down & HidNpadButton_Minus)
             return DglabView_BlePoc;
 
-        if (service_ready)
-            handleButtons(dglab, down);
+        handleButtons(dglab, down);
 
         {
             DglabCanvas canvas;
@@ -235,6 +254,41 @@ static DglabViewResult runSocketView(Service* dglab, bool service_ready, u32 ser
     return DglabView_Exit;
 }
 
+// Error path: the console is used instead of the framebuffer, because it is the
+// rendering path that is known to work on real hardware. Without the sysmodule
+// there is nothing to draw anyway, and an empty window tells the user nothing.
+static void showNotice(PadState* pad, const char* headline, ...)
+{
+    va_list args;
+
+    consoleInit(NULL);
+
+    printf("DGLAB-NX\n\n");
+
+    va_start(args, headline);
+    vprintf(headline, args);
+    va_end(args);
+
+    printf("\n\n");
+    printf("The socket server lives in the sysmodule, so the front end has nothing\n");
+    printf("to show without it. Install it and reboot the console:\n\n");
+    printf("    release/00FF072107210721/  ->  SD:/atmosphere/contents/00FF072107210721/\n");
+    printf("\nThen start this homebrew again.\n");
+    printf("\nPress + to exit.\n");
+    consoleUpdate(NULL);
+
+    while (appletMainLoop()) {
+        padUpdate(pad);
+
+        if (padGetButtonsDown(pad) & HidNpadButton_Plus)
+            break;
+
+        consoleUpdate(NULL);
+    }
+
+    consoleExit(NULL);
+}
+
 int main(int argc, char* argv[])
 {
     (void)argc;
@@ -247,37 +301,22 @@ int main(int argc, char* argv[])
 
     Service dglab;
     Result service_result = smGetService(&dglab, DGLAB_IPC_SERVICE_NAME);
-    bool service_ready = R_SUCCEEDED(service_result);
 
-    if (!dglabFramebufferOpen()) {
-        // Without a framebuffer the console is the only way to explain what
-        // went wrong, instead of leaving the user with an empty screen.
-        consoleInit(NULL);
-        printf("DGLAB-NX: could not create the framebuffer\n\n");
-        printf("sysmodule service: 0x%08X\n", (unsigned)service_result);
-        printf("framebuffer: failed\n\n");
-        printf("Press + to exit.\n");
-        consoleUpdate(NULL);
-
-        while (appletMainLoop()) {
-            padUpdate(&pad);
-
-            if (padGetButtonsDown(&pad) & HidNpadButton_Plus)
-                break;
-
-            consoleUpdate(NULL);
-        }
-
-        consoleExit(NULL);
-
-        if (service_ready)
-            serviceClose(&dglab);
-
+    if (R_FAILED(service_result)) {
+        showNotice(&pad, "DGLAB-NX: the sysmodule is not running (0x%08X)", service_result);
         return 0;
     }
 
+    if (!dglabFramebufferOpen()) {
+        showNotice(&pad, "DGLAB-NX: the framebuffer could not be created");
+        serviceClose(&dglab);
+        return 0;
+    }
+
+    logFileOpen();
+
     while (true) {
-        DglabViewResult result = runSocketView(&dglab, service_ready, service_result, &pad);
+        DglabViewResult result = runSocketView(&dglab, &pad);
 
         if (result == DglabView_Exit)
             break;
@@ -293,8 +332,10 @@ int main(int argc, char* argv[])
 
     dglabFramebufferClose();
 
-    if (service_ready)
-        serviceClose(&dglab);
+    if (g_log_file != NULL)
+        fclose(g_log_file);
+
+    serviceClose(&dglab);
 
     return 0;
 }

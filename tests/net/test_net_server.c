@@ -255,24 +255,49 @@ static void testPairing(void)
     CHECK(harness.server.status.state == DglabNetState_Listening);
     CHECK(harness.server.status.port == 9999);
 
-    // An id that is not ours is rejected with 210 and nothing is paired.
+    // A target carrying a foreign id is paired anyway: real devices turned out
+    // not to send the id the reference implementation expects, and rejecting
+    // leaves the App spinning in "connecting". The mismatch has to be logged,
+    // because that log is what the pairing rule gets tightened against.
     linkInit(&conn, &link, "/11111111-1111-4111-8111-111111111111");
-    CHECK(!dglabNetServerAttach(&harness.server, &conn));
-    CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
-    CHECK(contains(frame, "\"type\":\"error\""));
-    CHECK(contains(frame, "\"message\":\"210\""));
-    CHECK(harness.server.status.last_error == 210);
-    CHECK(harness.server.status.paired == 0);
-    CHECK(harness.server.status.clients == 0);
-    CHECK(harness.server.status.state == DglabNetState_Listening);
+    CHECK(dglabNetServerAttach(&harness.server, &conn));
+    CHECK(harness.server.status.paired == 1);
 
-    // A connection without an id in the target is rejected too.
-    linkInit(&conn, &link, "/");
-    CHECK(!dglabNetServerAttach(&harness.server, &conn));
     CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
-    CHECK(contains(frame, "\"message\":\"210\""));
+    CHECK(contains(frame, "\"type\":\"bind\""));
+    CHECK(contains(frame, "\"message\":\"200\""));
+
+    {
+        char log[1024];
+
+        dglabNetServerReadLog(&harness.server, 0, log, sizeof(log));
+        CHECK(contains(log, "11111111-1111-4111-8111-111111111111"));
+        CHECK(contains(log, "does not match"));
+    }
+
+    dglabNetServerDetach(&harness.server, &conn);
+    CHECK(harness.server.status.paired == 0);
+
+    // A connection without any id in the target is paired as well, and logged.
+    linkInit(&conn, &link, "/");
+    CHECK(dglabNetServerAttach(&harness.server, &conn));
+    CHECK(harness.server.status.paired == 1);
+    CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"200\""));
+
+    {
+        char log[1024];
+
+        dglabNetServerReadLog(&harness.server, 0, log, sizeof(log));
+        CHECK(contains(log, "without a client id"));
+    }
+
+    dglabNetServerDetach(&harness.server, &conn);
 
     // The QR code carries the controller id, and that is what the App sends.
+    {
+        u32 beats_before = harness.server.status.heartbeats_sent;
+
     CHECK(attachApp(&harness, &conn, &link));
     CHECK(harness.server.status.state == DglabNetState_Paired);
     CHECK(harness.server.status.clients == 1);
@@ -291,9 +316,10 @@ static void testPairing(void)
     // Frame 1 is the heartbeat that goes out right after binding.
     CHECK(payloadAt(&link, 1, frame, sizeof(frame)));
     CHECK(contains(frame, "\"type\":\"heartbeat\""));
-    CHECK(harness.server.status.heartbeats_sent == 1);
+        CHECK(harness.server.status.heartbeats_sent == beats_before + 1);
+    }
 
-    // The same controller id cannot be bound twice (400).
+    // Only one client can be bound at a time (400 for the second one).
     {
         WsConn second;
         MockLink second_link;
@@ -307,17 +333,8 @@ static void testPairing(void)
         CHECK(harness.server.status.clients == 1);
     }
 
-    // A connection without a free slot is refused.
-    {
-        WsConn extra;
-        MockLink extra_link;
-
-        linkInit(&extra, &extra_link, "/whatever");
-        CHECK(!dglabNetServerAttach(&harness.server, &extra));
-    }
-
     // Every handshaked connection is counted, accepted or not.
-    CHECK(harness.server.status.sessions == 5);
+    CHECK(harness.server.status.sessions == 4);
 
     dglabNetServerDetach(&harness.server, &conn);
     CHECK(harness.server.status.paired == 0);

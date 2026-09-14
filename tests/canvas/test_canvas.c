@@ -186,7 +186,6 @@ static void testScreen(void)
     dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
 
     memset(&state, 0, sizeof(state));
-    state.service_ready = true;
     state.status_ok = true;
     state.version.minor = 2;
     state.status.state = DglabNetState_Paired;
