@@ -596,18 +596,29 @@ static void netPmStart(void)
 
 // A server nobody connected to for a while puts itself away: holding the
 // listening socket across a sleep is what hangs the console, and there is no
-// working sleep notification. The tick thread only marks the request; the stop
+// working sleep notification. The window is shorter than the shortest auto-sleep
+// the console offers (60s), so a console left alone always loses the socket
+// before it can try to sleep. The tick thread only marks the request; the stop
 // itself happens on the next IPC call, because a server thread must not join
 // itself.
-#define NET_IDLE_STOP_MS (5u * 60u * 1000u)
+#define NET_IDLE_STOP_MS (55u * 1000u)
 
 static void netCheckIdle(void)
 {
+    uint64_t now_ms = netNowMs(NULL);
+
     mutexLock(&g_net.mutex);
 
-    if (g_net.running && g_net.server.status.clients == 0 && g_net.last_activity_ms != 0 &&
-        netNowMs(NULL) - g_net.last_activity_ms >= NET_IDLE_STOP_MS)
-        g_net.idle_stop_pending = true;
+    if (g_net.running) {
+        if (g_net.server.status.clients > 0) {
+            // A live connection is a sign of life, so the timer only runs from
+            // the moment the last client went away.
+            g_net.last_activity_ms = now_ms;
+        } else if (g_net.last_activity_ms != 0 &&
+                   now_ms - g_net.last_activity_ms >= NET_IDLE_STOP_MS) {
+            g_net.idle_stop_pending = true;
+        }
+    }
 
     mutexUnlock(&g_net.mutex);
 }
@@ -624,8 +635,8 @@ static void netApplyPendingStop(void)
     if (!pending)
         return;
 
-    netLog("no client for %u minutes, stopping the server before it can be slept",
-        (unsigned)(NET_IDLE_STOP_MS / 60000u));
+    netLog("no client for %u s, stopping the server before the console can sleep",
+        (unsigned)(NET_IDLE_STOP_MS / 1000u));
     dglabNetSocketStop();
 }
 
