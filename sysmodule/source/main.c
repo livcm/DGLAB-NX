@@ -7,11 +7,18 @@
 #include <dglab/ipc_cmif.h>
 #include <dglab/ipc_poc.h>
 #include <dglab/transport/ble_poc.h>
+#include <dglab/transport/net_socket.h>
 
 _Static_assert(sizeof(DglabPocStatus) <= DGLAB_IPC_INLINE_PAYLOAD_MAX,
     "DglabPocStatus does not fit the inline IPC payload");
 _Static_assert(sizeof(DglabPocLogChunk) <= DGLAB_IPC_INLINE_PAYLOAD_MAX,
     "DglabPocLogChunk does not fit the inline IPC payload");
+_Static_assert(sizeof(DglabNetStatus) <= DGLAB_IPC_INLINE_PAYLOAD_MAX,
+    "DglabNetStatus does not fit the inline IPC payload");
+_Static_assert(sizeof(DglabNetQrChunk) <= DGLAB_IPC_INLINE_PAYLOAD_MAX,
+    "DglabNetQrChunk does not fit the inline IPC payload");
+_Static_assert(sizeof(DglabNetLogChunk) <= DGLAB_IPC_INLINE_PAYLOAD_MAX,
+    "DglabNetLogChunk does not fit the inline IPC payload");
 
 #define INNER_HEAP_SIZE 0x80000
 
@@ -146,7 +153,7 @@ static bool dglabHandleRequest(void)
         case DGLAB_IPC_CMD_GET_VERSION: {
             const DglabIpcVersion version = {
                 .major = 0,
-                .minor = 1,
+                .minor = 2,
                 .patch = 0,
             };
             dglabMakeResponse(CmifCommandType_Request, token, 0, &version, sizeof(version));
@@ -157,6 +164,77 @@ static bool dglabHandleRequest(void)
             dglabMakeResponse(CmifCommandType_Request, token, 0, &pong, sizeof(pong));
             break;
         }
+        // Wi-Fi + WebSocket transport (DG-LAB Socket V3).
+        case DGLAB_IPC_CMD_NET_START: {
+            DglabNetStartRequest request = { 0 };
+
+            if (!dglabRequestHasPayload(parsed.meta.num_data_words, sizeof(request))) {
+                dglabMakeResponse(CmifCommandType_Request, token,
+                    MAKERESULT(Module_Libnx, LibnxError_BadInput), NULL, 0);
+                break;
+            }
+
+            memcpy(&request, dglabRequestPayload(in), sizeof(request));
+            dglabMakeResponse(CmifCommandType_Request, token,
+                dglabNetSocketStart((u16)request.port), NULL, 0);
+            break;
+        }
+        case DGLAB_IPC_CMD_NET_STOP: {
+            dglabMakeResponse(CmifCommandType_Request, token, dglabNetSocketStop(), NULL, 0);
+            break;
+        }
+        case DGLAB_IPC_CMD_NET_STATUS: {
+            DglabNetStatus status;
+            Result rc = dglabNetSocketGetStatus(&status);
+
+            dglabMakeResponse(CmifCommandType_Request, token, rc,
+                R_SUCCEEDED(rc) ? &status : NULL, R_SUCCEEDED(rc) ? sizeof(status) : 0);
+            break;
+        }
+        case DGLAB_IPC_CMD_NET_QR: {
+            DglabNetQrChunk chunk;
+            size_t size = 0;
+            Result rc;
+
+            memset(&chunk, 0, sizeof(chunk));
+            rc = dglabNetSocketGetQr(chunk.text, sizeof(chunk.text), &size);
+
+            if (R_SUCCEEDED(rc))
+                chunk.size = (u32)size;
+
+            dglabMakeResponse(CmifCommandType_Request, token, rc,
+                R_SUCCEEDED(rc) ? &chunk : NULL, R_SUCCEEDED(rc) ? sizeof(chunk) : 0);
+            break;
+        }
+        case DGLAB_IPC_CMD_NET_SEND: {
+            DglabNetSendRequest request = { 0 };
+
+            if (!dglabRequestHasPayload(parsed.meta.num_data_words, sizeof(request))) {
+                dglabMakeResponse(CmifCommandType_Request, token,
+                    MAKERESULT(Module_Libnx, LibnxError_BadInput), NULL, 0);
+                break;
+            }
+
+            memcpy(&request, dglabRequestPayload(in), sizeof(request));
+            dglabMakeResponse(CmifCommandType_Request, token, dglabNetSocketSend(&request), NULL, 0);
+            break;
+        }
+        case DGLAB_IPC_CMD_NET_LOG: {
+            DglabNetLogRequest request = { 0 };
+            DglabNetLogChunk chunk;
+
+            if (dglabRequestHasPayload(parsed.meta.num_data_words, sizeof(request)))
+                memcpy(&request, dglabRequestPayload(in), sizeof(request));
+
+            memset(&chunk, 0, sizeof(chunk));
+            chunk.next_cursor = dglabNetSocketReadLog(request.cursor, chunk.text,
+                sizeof(chunk.text));
+            chunk.size = (u32)strlen(chunk.text);
+
+            dglabMakeResponse(CmifCommandType_Request, token, 0, &chunk, sizeof(chunk));
+            break;
+        }
+
         // Temporary BLE transport PoC commands, see common/include/dglab/ipc_poc.h.
         case DGLAB_IPC_POC_CMD_START: {
             DglabPocStartRequest request = { 0 };
@@ -229,6 +307,12 @@ int main(int argc, char* argv[])
         return rc;
 
     blePocInitialize();
+
+    // The socket server is started at boot: the NRO only reads its state and
+    // displays the QR code. A failed start stays visible through NET_STATUS, and
+    // NET_START retries it.
+    dglabNetSocketInitialize();
+    dglabNetSocketStart((u16)DGLAB_NET_DEFAULT_PORT);
 
     while (true) {
         Handle session = INVALID_HANDLE;
