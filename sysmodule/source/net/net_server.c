@@ -612,10 +612,13 @@ static bool waveformSendBatch(DglabNetServer* server, DglabNetClient* client,
     DglabSocketChannel channel, uint64_t now_ms)
 {
     DglabNetWaveformQueue* queue = waveformQueue(server, channel);
+    // .bss, like the frame buffer in sendCommand: this runs on the sysmodule's
+    // IPC thread, which only has a 16KB stack. Every caller holds the transport
+    // lock, so one buffer is enough.
+    static char command[DGLAB_SOCKET_MAX_MESSAGE];
     char storage[DGLAB_NET_WAVEFORM_BATCH_SLOTS / DGLAB_COYOTE_V3_WAVEFORM_SLOTS][17];
     const char* hex[DGLAB_NET_WAVEFORM_BATCH_SLOTS / DGLAB_COYOTE_V3_WAVEFORM_SLOTS];
     DglabCoyoteV3WaveformSlot group[DGLAB_COYOTE_V3_WAVEFORM_SLOTS];
-    char command[DGLAB_SOCKET_MAX_MESSAGE];
     size_t elements = queue->count / DGLAB_COYOTE_V3_WAVEFORM_SLOTS;
     size_t slots;
     size_t len;
@@ -656,6 +659,14 @@ static bool waveformSendBatch(DglabNetServer* server, DglabNetClient* client,
 
     waveformDrop(queue, slots);
     server->status.commands_sent++;
+
+    // A stream logs at most one line a second: enough to see that it is alive
+    // (and where it stopped) without pushing everything else out of the ring.
+    if (server->waveform_logged_ms == 0 || now_ms - server->waveform_logged_ms >= 1000u) {
+        server->waveform_logged_ms = now_ms;
+        dglabNetServerLog(server, "tx waveform ch %c, %u slots",
+            (channel == DglabSocketChannel_A) ? 'A' : 'B', (unsigned)slots);
+    }
 
     // Next batch when the App is down to the lead time, so playback never runs
     // dry but the queue stays short enough to react to a new event.
@@ -722,6 +733,15 @@ DglabNetSendResult dglabNetServerUploadWaveform(DglabNetServer* server,
     if (!client)
         return DglabNetSend_NotPaired;
 
+    // Logged before anything is sent: a discrete upload is one line and the log
+    // is what a hardware run gets read back from when something dies. Append is
+    // a stream, so it stays quiet and only the batch line above reports it.
+    if (request->mode == DglabNetWaveform_Replace) {
+        dglabNetServerLog(server, "waveform %s, %u slots",
+            (request->channel == 1) ? "ch A" : ((request->channel == 2) ? "ch B" : "ch A+B"),
+            (unsigned)request->slot_count);
+    }
+
     for (size_t i = 0; i < channel_count; i++) {
         DglabNetWaveformQueue* queue = waveformQueue(server, channels[i]);
         DglabNetSendResult result;
@@ -729,7 +749,8 @@ DglabNetSendResult dglabNetServerUploadWaveform(DglabNetServer* server,
         if (request->mode == DglabNetWaveform_Replace) {
             // An event replaces the gesture that is playing, so both our queue
             // and the App's have to be dropped before the new slots go out.
-            char command[DGLAB_SOCKET_MAX_MESSAGE];
+            // .bss for the same reason as in waveformSendBatch.
+            static char command[DGLAB_SOCKET_MAX_MESSAGE];
 
             waveformClearQueue(queue);
 

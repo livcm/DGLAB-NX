@@ -89,6 +89,7 @@ typedef struct {
     DglabNetClient clients[DGLAB_NET_MAX_CLIENTS];
     DglabNetWaveformQueue waveform[2]; // A and B
     uint64_t last_heartbeat_ms;
+    uint64_t waveform_logged_ms; ///< when the waveform stream last logged a batch
     uint32_t fallback_counter; ///< keeps generated ids distinct when there is no random source
     uint32_t messages_logged;
     char log[DGLAB_NET_LOG_CAPACITY];

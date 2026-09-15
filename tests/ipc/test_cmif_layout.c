@@ -205,9 +205,57 @@ static void testReplySizes(void)
     CHECK(sizeof(DglabPocLogChunk) <= DGLAB_IPC_INLINE_PAYLOAD_MAX);
 }
 
+// The waveform upload is the largest request on this IPC surface, and the only
+// one that comes close to the buffer: 16 bytes of alignment, the 16 byte
+// CmifInHeader and 208 bytes of payload fill the 0x100 byte IPC buffer exactly.
+// An off by one in the accounting would show up here and nowhere else, so it is
+// checked on its own instead of through the small payloads above.
+static void testWaveformRequest(void)
+{
+    static DglabNetWaveformRequest request;
+    static u8 received[sizeof(DglabNetWaveformRequest)];
+    HipcParsedRequest parsed;
+    const CmifInHeader* in;
+    CmifRequest req;
+
+    CHECK(DGLAB_CMIF_DATA_ALIGN + sizeof(CmifInHeader) + sizeof(request) <= DGLAB_IPC_BUFFER_SIZE);
+
+    memset(&request, 0, sizeof(request));
+    request.channel = 1;
+    request.mode = DglabNetWaveform_Replace;
+    request.slot_count = DGLAB_NET_WAVEFORM_MAX_SLOTS;
+
+    for (u32 i = 0; i < request.slot_count; i++) {
+        request.slots[i].frequency_ms = 100;
+        request.slots[i].strength = 100;
+    }
+
+    memset(g_ipc_buffer, 0, sizeof(g_ipc_buffer));
+
+    req = cmifMakeRequest(g_ipc_buffer, (CmifRequestFormat){
+        .request_id = DGLAB_IPC_CMD_NET_WAVEFORM,
+        .data_size  = sizeof(request),
+    });
+
+    memcpy(req.data, &request, sizeof(request));
+
+    parsed = hipcParseRequest(g_ipc_buffer);
+    in = (const CmifInHeader*)cmifGetAlignedDataStart(parsed.data.data_words, g_ipc_buffer);
+
+    CHECK(parsed.meta.type == CmifCommandType_Request);
+    CHECK(in->magic == CMIF_IN_HEADER_MAGIC);
+    CHECK(in->command_id == DGLAB_IPC_CMD_NET_WAVEFORM);
+    CHECK(dglabRequestHasPayload(parsed.meta.num_data_words, sizeof(request)));
+
+    memset(received, 0, sizeof(received));
+    memcpy(received, dglabRequestPayload(in), sizeof(received));
+    CHECK(memcmp(received, &request, sizeof(request)) == 0);
+}
+
 int main(void)
 {
     testRequestPayloads();
+    testWaveformRequest();
     testMissingPayloadIsRejected();
     testReplySizes();
 
