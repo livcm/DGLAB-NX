@@ -32,4 +32,4 @@ Overlay 与 NRO 可以共享业务逻辑和 IPC 定义，但不要假设两者�
 
 输出文件名应为：
 
-    DGLAB-NX-ovl.ovl
+    DGLAB-NX-Ovl.ovl

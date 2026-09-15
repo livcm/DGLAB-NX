@@ -227,7 +227,7 @@ DG-LAB Bluetooth Protocol 的官方参考仓库为：
     │   ├── toolbox.json
     │   └── flags/boot2.flag
     ├── DGLAB-NX.nro       前端 NRO
-    └── DGLAB-NX-ovl.ovl   Overlay
+    └── DGLAB-NX-Ovl.ovl   Overlay
 
 规则：
 

@@ -85,7 +85,7 @@ release/DGLAB-NX.nro       →  SD:/switch/DGLAB-NX.nro
 ```
 
 sysmodule 带 `flags/boot2.flag`（`toolbox.json` 里也是 `requires_reboot: true`），
-随系统启动加载，复制完要重启主机。overlay 还没实现，所以现在没有 `DGLAB-NX-ovl.ovl`。
+随系统启动加载，复制完要重启主机。overlay 还没实现，所以现在没有 `DGLAB-NX-Ovl.ovl`。
 
 需要 Atmosphère。当前实机验证环境是 HOS 22.5.0 + AMS 1.11.2。
 

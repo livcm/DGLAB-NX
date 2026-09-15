@@ -76,13 +76,13 @@ libnx 提供两套 BLE 接口：
     │   ├── toolbox.json
     │   └── flags/boot2.flag
     ├── DGLAB-NX.nro
-    └── DGLAB-NX-ovl.ovl       （尚未实现，见 overlay/AGENTS.md）
+    └── DGLAB-NX-Ovl.ovl       （尚未实现，见 overlay/AGENTS.md）
 
 对应到 SD 卡：
 
     release/00FF072107210721/  →  SD:/atmosphere/contents/00FF072107210721/
     release/DGLAB-NX.nro       →  SD:/switch/DGLAB-NX.nro
-    release/DGLAB-NX-ovl.ovl   →  SD:/switch/.overlays/DGLAB-NX-ovl.ovl
+    release/DGLAB-NX-Ovl.ovl   →  SD:/switch/.overlays/DGLAB-NX-Ovl.ovl
 
 `boot2.flag` 表示随系统启动加载，需要重启生效。也可以单独构建某个组件：
 `make -C sysmodule package`、`make -C nro package`。
