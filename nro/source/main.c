@@ -73,11 +73,17 @@ static u32 g_last_command_tone;
 #define TEST_CHANNEL_A 1u
 #define TEST_CHANNEL_B 2u
 
-// Held buttons repeat at a usable rate; the UI loop runs at the display refresh.
-#define TEST_STRENGTH_REPEAT_FRAMES 6
+// Holding a direction starts walking the value only after a deliberate hold, and
+// then at a usable rate. The first version repeated after six frames (~100ms at
+// the display refresh), which is exactly how long a normal press lasts: a firm
+// tap was read as a hold and stepped twice. 400ms is past any tap, and the walk
+// then runs at 10 steps/s.
+#define TEST_STRENGTH_HOLD_NS (400ull * 1000000ull)
+#define TEST_STRENGTH_REPEAT_NS (100ull * 1000000ull)
 static u32 g_test_strength_a = TEST_STRENGTH_MIN;
 static u32 g_test_strength_b = TEST_STRENGTH_MIN;
-static int g_test_strength_held_frames;
+static u64 g_strength_hold_started_ns; // 0 while no direction is held
+static u64 g_strength_last_repeat_ns;
 static FILE* g_log_file;
 // ---------------------------------------------------------------------------
 // Log ring
@@ -309,7 +315,37 @@ static void adjustStrengthFromDirections(Service* dglab, u64 buttons)
         noteCommand("B down", rc, NULL);
 }
 
-static void handleButtons(Service* dglab, u64 down, u64 held)
+// Repeats a held direction: nothing for the first TEST_STRENGTH_HOLD_NS, then one
+// step every TEST_STRENGTH_REPEAT_NS. The press itself is handled from `down`, so
+// a short tap always changes the value exactly once.
+static void repeatStrengthFromDirections(Service* dglab, u64 held, u64 now_ns)
+{
+    if (!(held & (HidNpadButton_Up | HidNpadButton_Down | HidNpadButton_Right |
+            HidNpadButton_Left))) {
+        g_strength_hold_started_ns = 0;
+        return;
+    }
+
+    if (g_strength_hold_started_ns == 0) {
+        // 0 doubles as "not held", so a clock that reads 0 still starts a hold.
+        g_strength_hold_started_ns = now_ns ? now_ns : 1u;
+        g_strength_last_repeat_ns = 0;
+        return;
+    }
+
+    if (now_ns - g_strength_hold_started_ns < TEST_STRENGTH_HOLD_NS)
+        return;
+
+    if (g_strength_last_repeat_ns != 0 &&
+        now_ns - g_strength_last_repeat_ns < TEST_STRENGTH_REPEAT_NS)
+        return;
+
+    g_strength_last_repeat_ns = now_ns;
+
+    adjustStrengthFromDirections(dglab, held);
+}
+
+static void handleButtons(Service* dglab, u64 down, u64 held, u64 now_ns)
 {
     if (down & HidNpadButton_A) {
         DglabNetStartRequest request = { 0 };
@@ -336,21 +372,7 @@ static void handleButtons(Service* dglab, u64 down, u64 held)
             g_test_strength_b ? NULL : "B is 0");
 
     adjustStrengthFromDirections(dglab, down);
-
-    // Holding a direction walks the value at a usable speed instead of repeating
-    // at the display refresh rate.
-    if (held & (HidNpadButton_Up | HidNpadButton_Down | HidNpadButton_Right |
-            HidNpadButton_Left)) {
-        g_test_strength_held_frames++;
-
-        if (g_test_strength_held_frames >= TEST_STRENGTH_REPEAT_FRAMES) {
-            g_test_strength_held_frames = 0;
-
-            adjustStrengthFromDirections(dglab, held);
-        }
-    } else {
-        g_test_strength_held_frames = 0;
-    }
+    repeatStrengthFromDirections(dglab, held, now_ns);
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +475,7 @@ static void runSocketView(Service* dglab, PadState* pad)
         if (down & HidNpadButton_Plus)
             return;
 
-        handleButtons(dglab, down, padGetButtons(pad));
+        handleButtons(dglab, down, padGetButtons(pad), armTicksToNs(armGetSystemTick()));
 
         // Read after the buttons are handled, so a press shows up in the same
         // frame it happened.
