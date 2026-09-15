@@ -243,8 +243,10 @@ static void sendHeartbeat(DglabNetServer* server, DglabNetClient* client, uint64
     char frame[WS_MAX_MESSAGE];
     // The reference server keeps the link alive with a heartbeat; the exact
     // payload is unverified, see docs/dglab-socket.md.
-    size_t len = dglabSocketBuildMessage(frame, sizeof(frame), "heartbeat", client->id,
-        server->controller_id, "200");
+    // Addressed the way the App accepts: clientId is the sender (us, the
+    // controller), targetId is the recipient (the App).
+    size_t len = dglabSocketBuildMessage(frame, sizeof(frame), "heartbeat",
+        server->controller_id, client->id, "200");
 
     if (len && sendText(server, client->conn, frame, len))
         server->status.heartbeats_sent++;
@@ -552,18 +554,18 @@ static bool channelList(uint32_t channel, DglabSocketChannel out[2], size_t* cou
 }
 
 static DglabNetSendResult sendCommand(DglabNetServer* server, DglabNetClient* client,
-    const char* command, bool swap_envelope)
+    const char* command)
 {
     // The command and the frame are big (the pulse command with its eight
     // elements is the largest message this build ever sends) and the sysmodule's
     // main thread only has a 16KB stack, so both buffers live in .bss. All sends
     // happen under the transport lock, so one set of buffers is enough.
     static char frame[WS_MAX_MESSAGE];
-    // swap_envelope is a temporary diagnostic: the routing fields are the one
-    // thing about a message the App could reject while still logging it.
-    size_t len = dglabSocketBuildMessage(frame, sizeof(frame), "msg",
-        swap_envelope ? server->controller_id : client->id,
-        swap_envelope ? client->id : server->controller_id, command);
+    // clientId is the sender and targetId the recipient, which is what the App
+    // acts on: with the two swapped it logged the message and ignored it, which
+    // is how this was found (see docs/dglab-socket.md).
+    size_t len = dglabSocketBuildMessage(frame, sizeof(frame), "msg", server->controller_id,
+        client->id, command);
 
     if (len == 0 || len > DGLAB_SOCKET_MAX_MESSAGE)
         return DglabNetSend_TooLong;
@@ -607,60 +609,6 @@ static bool buildTestPulse(char* out, size_t out_size, DglabSocketChannel channe
     return dglabSocketBuildPulse(out, out_size, channel, hex, DGLAB_NET_TEST_PULSE_ELEMENTS) != 0;
 }
 
-// Temporary: the App accepts the binding but ignores the commands this build
-// sends, and there are only a few plausible shapes for them. The variant comes
-// from DglabNetSendRequest::pad so a client can sweep them without a rebuild;
-// see docs/dglab-socket.md. Variant 0 is the reference format and the default.
-//
-//   0  strength-1+2+N     pulse-A        (reference: digits for strength, letters for pulse)
-//   1  strength-0+2+N     pulse-1        (channels counted from zero)
-//   2  strength-A+2+N     pulse-A        (letters for both)
-//   3  strength-A+1+N     pulse-A        (letters, relative increase)
-//   4  strength-1+1+N     pulse-1        (digits, relative increase)
-//   5  variant 0 text, but the envelope's clientId/targetId are swapped
-static bool buildStrengthVariant(char* out, size_t out_size, uint32_t variant,
-    DglabSocketChannel channel, uint32_t value)
-{
-    const char* digit = (channel == DglabSocketChannel_A) ? "1" : "2";
-    const char* zero_based = (channel == DglabSocketChannel_A) ? "0" : "1";
-    const char* letter = (channel == DglabSocketChannel_A) ? "A" : "B";
-    const char* name = digit;
-    const char* mode = "2";
-
-    if (variant == 1) {
-        name = zero_based;
-    } else if (variant == 2) {
-        name = letter;
-    } else if (variant == 3) {
-        name = letter;
-        mode = "1";
-    } else if (variant == 4) {
-        mode = "1";
-    }
-
-    return (size_t)snprintf(out, out_size, "strength-%s+%s+%u", name, mode, (unsigned)value) <
-           out_size;
-}
-
-// Pulse commands only differ in how the channel is named.
-static bool buildTestPulseVariant(char* out, size_t out_size, uint32_t variant,
-    DglabSocketChannel channel, uint32_t strength)
-{
-    size_t len;
-
-    if (!buildTestPulse(out, out_size, channel, strength))
-        return false;
-
-    len = strlen(out);
-
-    if ((variant == 1 || variant == 4) && len > 6 && out[6] != '\0') {
-        // "pulse-A:[...]" -> "pulse-1:[...]"
-        out[6] = (channel == DglabSocketChannel_A) ? '1' : '2';
-    }
-
-    return true;
-}
-
 DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSendRequest* request)
 {
     DglabNetClient* client = findBoundClient(server);
@@ -668,16 +616,6 @@ DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSend
     size_t channel_count = 0;
     static char command[DGLAB_SOCKET_MAX_MESSAGE];
     DglabNetSendResult result = DglabNetSend_Ok;
-    uint32_t variant = request->pad;
-    bool swap_envelope = false;
-
-    if (variant > 5)
-        variant = 0;
-
-    if (variant == 5) {
-        swap_envelope = true;
-        variant = 0;
-    }
 
     if (!client)
         return DglabNetSend_NotPaired;
@@ -691,13 +629,15 @@ DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSend
                 return DglabNetSend_BadRequest;
 
             for (size_t i = 0; i < channel_count && result == DglabNetSend_Ok; i++) {
-                if (!buildStrengthVariant(command, sizeof(command), variant, channels[i],
-                        request->value)) {
+                size_t len = dglabSocketBuildStrength(command, sizeof(command), channels[i],
+                    DglabSocketStrength_SetTo, (int)request->value);
+
+                if (len == 0) {
                     result = DglabNetSend_TooLong;
                     break;
                 }
 
-                result = sendCommand(server, client, command, swap_envelope);
+                result = sendCommand(server, client, command);
             }
             break;
 
@@ -710,7 +650,7 @@ DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSend
                     break;
                 }
 
-                result = sendCommand(server, client, command, false);
+                result = sendCommand(server, client, command);
             }
             break;
 
@@ -719,13 +659,12 @@ DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSend
                 return DglabNetSend_BadRequest;
 
             for (size_t i = 0; i < channel_count && result == DglabNetSend_Ok; i++) {
-                if (!buildTestPulseVariant(command, sizeof(command), variant, channels[i],
-                        request->value)) {
+                if (!buildTestPulse(command, sizeof(command), channels[i], request->value)) {
                     result = DglabNetSend_TooLong;
                     break;
                 }
 
-                result = sendCommand(server, client, command, swap_envelope);
+                result = sendCommand(server, client, command);
             }
             break;
 
@@ -735,9 +674,8 @@ DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSend
 
     if (result == DglabNetSend_Ok) {
         server->status.commands_sent++;
-        dglabNetServerLog(server, "tx command %u channel %u value %u variant %u%s",
-            (unsigned)request->command, (unsigned)request->channel, (unsigned)request->value,
-            (unsigned)request->pad, swap_envelope ? " (swapped)" : "");
+        dglabNetServerLog(server, "tx command %u channel %u value %u",
+            (unsigned)request->command, (unsigned)request->channel, (unsigned)request->value);
     }
 
     return result;

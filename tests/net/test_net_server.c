@@ -448,9 +448,11 @@ static void testCommands(void)
 
     CHECK(dglabNetServerSend(&harness.server, &request) == DglabNetSend_Ok);
     CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
+    // clientId is the sender (us) and targetId the recipient (the App): the App
+    // ignores a message addressed the other way round.
     snprintf(expected, sizeof(expected),
         "{\"type\":\"msg\",\"clientId\":\"%s\",\"targetId\":\"%s\",\"message\":\"strength-1+2+50\"}",
-        (const char*)harness.server.status.peer_id, harness.server.controller_id);
+        harness.server.controller_id, (const char*)harness.server.status.peer_id);
     CHECK(strcmp(frame, expected) == 0);
     CHECK(harness.server.status.commands_sent == 1);
 

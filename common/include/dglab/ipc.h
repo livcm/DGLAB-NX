@@ -73,7 +73,7 @@ typedef struct {
     u32 command; ///< DglabNetCommand
     u32 channel; ///< 1 = A, 2 = B, 0 = both channels
     u32 value;
-    u32 pad;
+    u32 reserved; ///< unused, kept so the payload layout stays stable
 } DglabNetSendRequest;
 
 /// Enough for the longest QR payload, see docs/dglab-socket.md.

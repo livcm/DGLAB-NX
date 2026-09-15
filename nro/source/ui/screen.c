@@ -340,21 +340,14 @@ static void drawLog(DglabCanvas* canvas, const DglabFont* font, const DglabScree
     }
 }
 
-static void drawFooter(DglabCanvas* canvas, const DglabFont* font, u32 variant)
+static void drawFooter(DglabCanvas* canvas, const DglabFont* font)
 {
     // Two lines: one line of hints is wider than the screen at 16 pixels per
     // character, which used to push the trailing "+ exit" off the edge.
     dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 56, 1,
         "A start    Y stop    X strength    B clear", kText);
-    {
-        char second[96];
-
-        // The format selector is temporary: it exists to find out which command
-        // shape the app accepts, see docs/dglab-socket.md.
-        snprintf(second, sizeof(second), "ZL test    L/R value    ZR format %u    - poc    + exit",
-            (unsigned)variant);
-        dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 32, 1, second, kText);
-    }
+    dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 32, 1,
+        "ZL test    L/R value    - BLE poc    + exit", kText);
 }
 
 void dglabScreenDraw(DglabCanvas* canvas, const DglabFont* font, const DglabScreenState* state)
@@ -365,5 +358,5 @@ void dglabScreenDraw(DglabCanvas* canvas, const DglabFont* font, const DglabScre
     drawStatus(canvas, font, state);
     drawQr(canvas, font, state);
     drawLog(canvas, font, state);
-    drawFooter(canvas, font, state->variant);
+    drawFooter(canvas, font);
 }

@@ -23,7 +23,6 @@ typedef struct {
     const char* url;  // QR payload, see docs/dglab-socket.md
 
     u32 test_strength; // channel strength used by X and ZL, raw device value (0..100)
-    u32 variant;       // temporary: which command shape X and ZL send, see docs
 
     const char* const* log_lines;
     int log_count;

@@ -140,7 +140,6 @@ int main(int argc, char** argv)
     state.status.app_limit_b = 80;
     state.status.app_feedback = DGLAB_NET_FEEDBACK_NONE;
     state.test_strength = 20;
-    state.variant = 0;
     state.log_lines = log_lines;
     state.log_count = 6;
 
