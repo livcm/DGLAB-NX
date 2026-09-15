@@ -192,9 +192,15 @@ static void drawStatus(DglabCanvas* canvas, const DglabFont* font, const DglabSc
     dglabCanvasText(canvas, font, x, y, 1, buffer, kText);
     y += LINE_HEIGHT;
 
-    snprintf(buffer, sizeof(buffer), "%u/%u (limit %u/%u)", (unsigned)status->app_strength_a,
-        (unsigned)status->app_strength_b, (unsigned)status->app_limit_a,
-        (unsigned)status->app_limit_b);
+    // The 3.0 App never sends anything back, so this stays empty there; say so
+    // instead of showing a misleading 0/0.
+    if (status->reports_received == 0)
+        snprintf(buffer, sizeof(buffer), "no report from the app");
+    else
+        snprintf(buffer, sizeof(buffer), "%u/%u (limit %u/%u)", (unsigned)status->app_strength_a,
+            (unsigned)status->app_strength_b, (unsigned)status->app_limit_a,
+            (unsigned)status->app_limit_b);
+
     drawLine(canvas, font, x, y, "strength", buffer, kText);
     y += LINE_HEIGHT;
 
