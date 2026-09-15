@@ -159,6 +159,7 @@ make -C tests/canvas     # canvas 裁剪、字体位序、整屏排版
 | `docs/dglab-protocol.md` | Coyote V3 协议移植范围与验证状态 |
 | `docs/ipc.md` | IPC 服务名、版本与命令表 |
 | `docs/nro-ui.md` | NRO 界面方案调研与实现记录 |
+| `docs/joycon-input.md` | Joy-Con 六轴资料，以及"动作越大波形值越大"这个可选玩法的设计 |
 | `docs/ble-poc.md` | 主机侧 BLE 直连的实测记录（已搁置） |
 
 贡献者与 agent 的工作规则在 `AGENTS.md` 以及各组件目录下的 `AGENTS.md`。
