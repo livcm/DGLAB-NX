@@ -9,6 +9,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -47,6 +48,7 @@ static struct {
     bool restart_after_sleep;
     uint64_t last_activity_ms;
     bool idle_stop_pending; // set by the tick thread, applied by the IPC thread
+    bool sd_log_enabled;    // only ever true while the server runs
     volatile bool stopping;
     int listen_fd;
     Thread accept_thread;
@@ -61,6 +63,44 @@ static struct {
         { .fd = -1, .active = false, .thread_valid = false },
     },
 };
+
+// The in-memory log ring dies with the process, and a hang takes the NRO with
+// it, so once the server runs the sysmodule also writes its log to the SD card.
+// Nothing here may run at boot: a sysmodule has no filesystem mounted then, and
+// touching a path crashed the console at the logo once already.
+#define NET_SD_LOG_DIR "sdmc:/switch/DGLAB-NX"
+#define NET_SD_LOG_PATH NET_SD_LOG_DIR "/dglab-sys.log"
+
+static FILE* g_sd_log;
+static bool g_sd_log_failed;
+
+static void netSdLog(void* context, const char* line)
+{
+    (void)context;
+
+    if (!g_net.sd_log_enabled || g_sd_log_failed)
+        return;
+
+    if (g_sd_log == NULL) {
+        // Both calls are ignored on purpose: whichever part is already up (fs or
+        // the sdmc mount) simply reports "already initialised", and the fopen
+        // below is the real test of whether the path is usable.
+        fsInitialize();
+        fsdevMountSdmc();
+
+        mkdir("sdmc:/switch", 0777);
+        mkdir(NET_SD_LOG_DIR, 0777);
+        g_sd_log = fopen(NET_SD_LOG_PATH, "w");
+
+        if (g_sd_log == NULL) {
+            g_sd_log_failed = true;
+            return;
+        }
+    }
+
+    fprintf(g_sd_log, "%s\n", line);
+    fflush(g_sd_log);
+}
 
 // ---------------------------------------------------------------------------
 // Platform callbacks for the platform independent core
@@ -726,6 +766,7 @@ static void netCoreEnsureReady(u16 port)
     config.now_ms = netNowMs;
     config.fill_random = netFillRandom;
     config.get_ip = netGetIp;
+    config.log_sink = netSdLog;
 
     dglabNetServerInit(&g_net.server, &config);
     g_net.core_ready = true;
@@ -797,6 +838,7 @@ Result dglabNetSocketStart(u16 port)
     g_net.listen_fd = fd;
     g_net.stopping = false;
     g_net.last_activity_ms = netNowMs(NULL);
+    g_net.sd_log_enabled = true; // from here on the log also lands on the SD card
     dglabNetServerSetListening(&g_net.server, port);
 
     rc = threadCreate(&g_net.accept_thread, netAcceptThreadMain, NULL, NULL, NET_THREAD_STACK_SIZE,
@@ -942,6 +984,12 @@ Result dglabNetSocketStop(void)
 
     dglabNetServerSetStopped(&g_net.server);
 
+    if (g_sd_log != NULL) {
+        fclose(g_sd_log);
+        g_sd_log = NULL;
+    }
+
+    g_net.sd_log_enabled = false;
     g_net.running = false;
     g_net.stopping = false;
 
