@@ -45,9 +45,6 @@
 // the App is down to this much, so playback never runs dry.
 #define DGLAB_NET_WAVEFORM_LEAD_MS 200u
 
-// One slot covers this much output.
-#define DGLAB_NET_WAVEFORM_SLOT_MS 25u
-
 typedef struct {
     uint32_t port;
     // Milliseconds; only differences are used (heartbeat schedule, log stamps).

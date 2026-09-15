@@ -143,6 +143,10 @@ typedef struct {
 /// inside the inline IPC payload (208 of 232 usable bytes).
 #define DGLAB_NET_WAVEFORM_MAX_SLOTS 48u
 
+/// Output one slot covers. The server paces its feeding by this, so a producer
+/// has to emit slots at this rate to keep the stream continuous.
+#define DGLAB_NET_WAVEFORM_SLOT_MS 25u
+
 typedef struct {
     u16 frequency_ms; ///< 10..1000, the app side value; compressed before sending
     u8 strength;      ///< 0..100 waveform strength, multiplied by the channel strength
