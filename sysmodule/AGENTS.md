@@ -211,6 +211,33 @@ V3 文档明确说明其数据处理方式与 V2 存在差异，应以 V3 文档
 
     https://github.com/dungeonlab-open/dglab-bluetooth-protocol
 
+## 线程与栈
+
+sysmodule 的线程栈都是 16KB：主线程由 NPDM 的 `main_thread_stack_size` 决定，
+网络线程在 `sysmodule/source/transport/net_socket.c` 里由 `NET_THREAD_STACK_SIZE`
+指定。栈很小，而这条路径上叠着 libnx 的 IPC/服务调用、newlib 的 `printf` 和 fs 写入，
+**不要在这些函数里放大缓冲区**。
+
+已经踩过两次的坑：一条 `char command[1950]`（`DGLAB_SOCKET_MAX_MESSAGE`）或
+`char frame[WS_MAX_MESSAGE]` 放在栈上时，加上已有的调用链会把主线程栈压爆。症状是
+**整个 sysmodule 直接死掉**（进程消失、IPC 全部无响应），不是返回一个错误——所以从
+客户端看不到任何 `Result`，只能靠日志和实机表现判断。实机复现记录见
+`docs/dglab-socket.md` 的"栈上不要放 KB 级缓冲区（血泪教训）"。
+
+规则：
+
+- `net_server.c` 这类被 IPC 线程、tick 线程、客户端线程共用的代码里，KB 级缓冲区放
+  `.bss`（`static`），并在注释里写明"调用方持有 transport 锁"，因为一份缓冲区就够；
+- 每个连接自己的缓冲区（`netClientThreadMain` 的接收缓冲、`wsConnRecv` 的重组缓冲）
+  必须留在那个线程的栈上，不能共享——两个客户端同时在线时共享会互相踩；
+- 新增或改动网络/IPC 路径后，用 aarch64 编译器量一遍栈帧：
+
+      aarch64-none-elf-gcc -std=gnu11 -O2 -fstack-usage -D__SWITCH__ \
+          -I$(DEVKITPRO)/libnx/include -Isysmodule/include -Icommon/include \
+          -c sysmodule/source/net/net_server.c -o /tmp/net_server.o
+
+  然后看 `/tmp/net_server.su`：核心代码里不该再出现接近 2KB 的栈帧。
+
 ## Sysmodule Title ID
 
 本项目的 Sysmodule 必须使用项目专属的 64-bit Title ID，指定为：

@@ -240,6 +240,24 @@ socket、服务线程、PSC 注册全部放在 `dglabNetSocketStart()` 里，也
 启动服务的时候（`nifm` 连持久会话都不留，见上一节）。空闲自动停服务的检查放在 tick
 线程里**只置标志位**，真正的停服务由下一次 IPC 调用执行——因为服务线程不能 join 自己。
 
+### 栈上不要放 KB 级缓冲区（血泪教训）
+
+sysmodule 的线程栈只有 16KB（主线程来自 NPDM 的 `main_thread_stack_size`，网络线程来自
+`NET_THREAD_STACK_SIZE`），而这条路径上还叠着 libnx 的 IPC/服务调用、newlib 的
+`printf` 和 SD 卡写入。实机记录（2026-09-15）：
+
+- 按 `ZL`/`ZR` 会让整个 sysmodule 死掉：`NET_WAVEFORM` 的处理链上，`clear` 和 `pulse`
+  各有一个 1950 字节的栈上缓冲区（`char command[DGLAB_SOCKET_MAX_MESSAGE]`），加上
+  `dglabHandleRequest` 与 WebSocket/socket 写入的调用链就把主线程栈压爆了；
+- 症状是**进程直接消失、所有 IPC 无响应**，客户端拿不到任何 `Result`，所以一开始被当成
+  发送路径的问题查；
+- 把这两个缓冲区挪到 `.bss` 之后，怎么按都不再复现（同一台主机、同一支手机）。
+
+同一类缓冲区（`sendError`、`sendHeartbeat`、绑定回复帧、`dglabNetServerOnMessage` 的解析
+结构）也一并挪到了 `.bss`，核心代码现在没有接近 2KB 的栈帧。量栈的方法写在
+`sysmodule/AGENTS.md` 的"线程与栈"一节。**每个连接自己的缓冲区不在此列**：那两个必须
+留在对应线程的栈上，因为两个客户端可能同时在线。
+
 ### 日志文件（SD 卡）
 
 排查实机问题全靠这三个文件：

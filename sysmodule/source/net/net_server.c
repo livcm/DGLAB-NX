@@ -234,7 +234,11 @@ static uint32_t parseCode(const char* code)
 
 static void sendError(DglabNetServer* server, WsConn* conn, const char* code)
 {
-    char frame[WS_MAX_MESSAGE];
+    // .bss, like every other frame in this file. It matters here because the
+    // client thread also holds its 2KB receive buffer further up the same stack,
+    // and the sysmodule's threads only have 16KB. Callers hold the transport
+    // lock, so one buffer per function is enough.
+    static char frame[WS_MAX_MESSAGE];
     size_t len = dglabSocketBuildMessage(frame, sizeof(frame), "error", server->controller_id, "",
         code);
 
@@ -248,7 +252,9 @@ static void sendError(DglabNetServer* server, WsConn* conn, const char* code)
 
 static void sendHeartbeat(DglabNetServer* server, DglabNetClient* client, uint64_t now_ms)
 {
-    char frame[WS_MAX_MESSAGE];
+    // .bss for the same reason as in sendError. This one runs from the poll
+    // (tick thread) and from attach (client thread), both under the lock.
+    static char frame[WS_MAX_MESSAGE];
     // The reference server keeps the link alive with a heartbeat; the exact
     // payload is unverified, see docs/dglab-socket.md.
     // Addressed the way the App accepts: clientId is the sender (us, the
@@ -375,7 +381,9 @@ bool dglabNetServerAttach(DglabNetServer* server, WsConn* conn)
     // Bind reply to the App: clientId is the controller, targetId is the App's
     // own id, which is how the App learns its id (docs/dglab-socket.md).
     {
-        char frame[WS_MAX_MESSAGE];
+        // .bss for the same reason as the other frames: this is the deepest
+        // point of the client thread that accepted the connection.
+        static char frame[WS_MAX_MESSAGE];
         size_t len = dglabSocketBuildMessage(frame, sizeof(frame), "bind",
             server->controller_id, client->id, "200");
 
@@ -458,7 +466,9 @@ static void handleAppMessage(DglabNetServer* server, const DglabSocketMessage* m
 void dglabNetServerOnMessage(DglabNetServer* server, WsConn* conn, const char* text, size_t size)
 {
     DglabNetClient* client = findClient(server, conn);
-    DglabSocketMessage message;
+    // ~2KB (the parsed message carries the raw text), so .bss like the frames
+    // above: onMessage sits below nothing but the client thread's receive buffer.
+    static DglabSocketMessage message;
 
     if (!client)
         return;
