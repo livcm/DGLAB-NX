@@ -19,7 +19,7 @@ BUILD    := build
 
 TESTS    := $(wildcard test_*.c)
 BINS     := $(patsubst test_%.c,$(BUILD)/test_%,$(TESTS))
-SOURCES  := $(NRO)/source/motion/motion_feed.c
+SOURCES  := $(NRO)/source/motion/motion_feed.c $(NRO)/source/motion/motion_settings.c
 HEADERS  := $(wildcard $(NRO)/include/dglab/nro/*.h) $(wildcard $(COMMON)/dglab/*.h)
 
 .PHONY: all test clean

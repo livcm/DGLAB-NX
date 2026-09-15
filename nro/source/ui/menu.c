@@ -30,6 +30,7 @@ const char* dglabMenuItemName(unsigned item)
     switch (item) {
         case DglabMenu_ItemSocket: return "Socket test";
         case DglabMenu_ItemMotion: return "Motion (Joy-Con)";
+        case DglabMenu_ItemAdvanced: return "Advanced (motion)";
         case DglabMenu_ItemBlePoc: return "BLE PoC console";
         default: return "?";
     }
@@ -45,6 +46,10 @@ const char* dglabMenuItemDescription(unsigned item)
             return "Drive the waveform with the Joy-Cons: the more one moves, the stronger and "
                    "denser its channel gets. Left Joy-Con is channel A, right is B. Start the "
                    "socket server in Socket test first.";
+        case DglabMenu_ItemAdvanced:
+            return "Every motion parameter on one page - dead zone, sensitivity, envelope, "
+                   "frequency and the waveform strength - edited one step at a time and saved "
+                   "to the SD card, so a tuning session survives a restart.";
         case DglabMenu_ItemBlePoc:
             return "Console view from the abandoned host side BLE experiments. Kept because it is "
                    "the rendering path that is known to work on real hardware.";

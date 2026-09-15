@@ -18,8 +18,10 @@
 #include <dglab/ipc.h>
 #include <dglab/nro/joycon.h>
 #include <dglab/nro/motion_feed.h>
+#include <dglab/nro/motion_settings.h>
 #include <dglab/nro/ble_poc_view.h>
 #include <dglab/platform/framebuffer.h>
+#include <dglab/ui/advanced.h>
 #include <dglab/ui/menu.h>
 #include <dglab/ui/motion.h>
 #include <dglab/ui/screen.h>
@@ -35,11 +37,14 @@
 // back as a file instead of as a photo of the screen.
 #define DATA_DIR "sdmc:/switch/DGLAB-NX"
 #define LOG_FILE_PATH DATA_DIR "/dglab-net.log"
+// The motion parameters, so a tuning session does not start over every reboot.
+#define MOTION_CONFIG_PATH DATA_DIR "/motion.cfg"
 
 typedef enum {
     DglabMenuResult_Exit = 0,
     DglabMenuResult_Socket,
     DglabMenuResult_Motion,
+    DglabMenuResult_Advanced,
     DglabMenuResult_BlePoc,
 } DglabMenuResult;
 
@@ -545,6 +550,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
         if (down & HidNpadButton_A) {
             switch (g_menu_selected) {
                 case DglabMenu_ItemMotion: return DglabMenuResult_Motion;
+                case DglabMenu_ItemAdvanced: return DglabMenuResult_Advanced;
                 case DglabMenu_ItemBlePoc: return DglabMenuResult_BlePoc;
                 default: return DglabMenuResult_Socket;
             }
@@ -580,6 +586,48 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
 // ---------------------------------------------------------------------------
 // The motion mode
 // ---------------------------------------------------------------------------
+
+// The defaults plus whatever the advanced screen last saved. Any missing or
+// unreadable file simply leaves the defaults in place.
+static void motionSettingsLoad(DglabMotionFeedConfig* config)
+{
+    char text[512];
+    size_t size;
+    FILE* file;
+
+    dglabMotionSettingsDefault(config);
+
+    file = fopen(MOTION_CONFIG_PATH, "r");
+
+    if (file == NULL)
+        return;
+
+    size = fread(text, 1, sizeof(text) - 1, file);
+    text[size] = '\0';
+    fclose(file);
+
+    dglabMotionSettingsParse(config, text);
+}
+
+// Written on every change: a few hundred bytes, and losing a tuning session to a
+// crash or a power off would be worse.
+static bool motionSettingsSave(const DglabMotionFeedConfig* config)
+{
+    char text[512];
+    FILE* file;
+
+    dglabMotionSettingsSerialize(config, text, sizeof(text));
+
+    file = fopen(MOTION_CONFIG_PATH, "w");
+
+    if (file == NULL)
+        return false;
+
+    fputs(text, file);
+    fclose(file);
+
+    return true;
+}
 
 // The live values are throttled to about 5Hz: at 60Hz every frame would change
 // the screen and undo the socket screen's redraw-only-on-change policy. Sampling
@@ -640,7 +688,7 @@ static void runMotionView(Service* dglab, PadState* pad)
     u64 last_ticks;
     u32 frame = 0;
 
-    dglabMotionFeedDefaultConfig(&config);
+    motionSettingsLoad(&config);
     dglabMotionFeedInit(&feed_a, &config);
     dglabMotionFeedInit(&feed_b, &config);
 
@@ -752,6 +800,119 @@ static void runMotionView(Service* dglab, PadState* pad)
 // Error path: the console is used instead of the framebuffer, because it is the
 // rendering path that is known to work on real hardware. Without the sysmodule
 // there is nothing to draw anyway, and an empty window tells the user nothing.
+
+// ---------------------------------------------------------------------------
+// The advanced screen
+// ---------------------------------------------------------------------------
+
+// One press is worth exactly one step. A repeat only starts after a deliberate
+// hold, and slower than the strength keys: a parameter that jumped by accident
+// cannot be undone by tapping the other way once.
+#define ADVANCED_HOLD_NS (500ull * 1000000ull)
+#define ADVANCED_REPEAT_NS (200ull * 1000000ull)
+
+static int horizontalDirection(u64 buttons)
+{
+    int direction = 0;
+
+    if (buttons & HidNpadButton_Left)
+        direction -= 1;
+
+    if (buttons & HidNpadButton_Right)
+        direction += 1;
+
+    return direction;
+}
+
+static void runAdvancedView(Service* dglab, PadState* pad)
+{
+    const DglabFont* font = dglabFramebufferFont();
+    DglabMotionFeedConfig config;
+    DglabAdvancedState state;
+    u64 hold_started_ns = 0;
+    u64 last_repeat_ns = 0;
+    unsigned drawn_selected = ~0u;
+    u32 revision = 0;
+    u32 drawn_revision = ~0u;
+    bool drawn_saved = false;
+
+    (void)dglab;
+
+    motionSettingsLoad(&config);
+
+    memset(&state, 0, sizeof(state));
+    state.config = &config;
+    state.saved = true;
+
+    while (appletMainLoop()) {
+        DglabCanvas canvas;
+        u64 now_ns = armTicksToNs(armGetSystemTick());
+        u64 down;
+        u64 held;
+        int press;
+        int hold_direction;
+
+        padUpdate(pad);
+        down = padGetButtonsDown(pad);
+        held = padGetButtons(pad);
+
+        if (down & HidNpadButton_Plus) {
+            motionSettingsSave(&config);
+            return;
+        }
+
+        if (down & HidNpadButton_Up && state.selected > 0) {
+            state.selected--;
+            hold_started_ns = 0; // a held direction must not keep editing the new row
+        }
+
+        if (down & HidNpadButton_Down && state.selected + 1 < (unsigned)DglabMotionSetting_Count) {
+            state.selected++;
+            hold_started_ns = 0;
+        }
+
+        if (down & HidNpadButton_Y) {
+            dglabMotionSettingsDefault(&config);
+            state.saved = motionSettingsSave(&config);
+            revision++;
+            hold_started_ns = 0;
+        }
+
+        press = horizontalDirection(down);
+        hold_direction = horizontalDirection(held);
+
+        if (press != 0) {
+            dglabMotionSettingsStep(&config, state.selected, press);
+            state.saved = motionSettingsSave(&config);
+            revision++;
+            hold_started_ns = now_ns ? now_ns : 1u;
+            last_repeat_ns = 0;
+        } else if (hold_direction == 0) {
+            hold_started_ns = 0;
+        } else if (hold_started_ns == 0) {
+            hold_started_ns = now_ns ? now_ns : 1u;
+        } else if (now_ns - hold_started_ns >= ADVANCED_HOLD_NS &&
+                   (last_repeat_ns == 0 || now_ns - last_repeat_ns >= ADVANCED_REPEAT_NS)) {
+            dglabMotionSettingsStep(&config, state.selected, hold_direction);
+            state.saved = motionSettingsSave(&config);
+            revision++;
+            last_repeat_ns = now_ns;
+        }
+
+        if (state.selected == drawn_selected && revision == drawn_revision &&
+            state.saved == drawn_saved)
+            continue;
+
+        if (dglabFramebufferBegin(&canvas)) {
+            dglabAdvancedDraw(&canvas, font, &state);
+            dglabFramebufferEnd();
+
+            drawn_selected = state.selected;
+            drawn_revision = revision;
+            drawn_saved = state.saved;
+        }
+    }
+}
 static void showNotice(PadState* pad, const char* headline, ...)
 {
     va_list args;
@@ -824,6 +985,11 @@ int main(int argc, char* argv[])
 
         if (selection == DglabMenuResult_Motion) {
             runMotionView(&dglab, &pad);
+            continue;
+        }
+
+        if (selection == DglabMenuResult_Advanced) {
+            runAdvancedView(&dglab, &pad);
             continue;
         }
 

@@ -100,6 +100,9 @@ sysmodule 带 `flags/boot2.flag`（`toolbox.json` 里也是 `requires_reboot: tr
 波形值越大、脉冲越密；通道强度仍然是上面的"音量"。做法与参数见
 `docs/joycon-input.md`。
 
+同一菜单里的 `Advanced (motion)` 是体感玩法的参数页（死区、灵敏度、包络、频率、波形
+强度上限），改完自动存到 `sdmc:/switch/DGLAB-NX/motion.cfg`。
+
 按了没反应先看界面上的 `last cmd` 行：它显示最近一次按键的结果（`ok` / `no app bound`
 / `socket error`），红色是失败、黄色是"命令发出去了但听不到"（那一路强度还是 0）。
 

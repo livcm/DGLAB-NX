@@ -244,10 +244,15 @@ freetype 之类的依赖：
 ### 界面内容与按键
 
 - 启动后先进入**菜单**（`nro/source/ui/menu.c`）：三行玩法（`Socket test`、`Motion
-  (Joy-Con)`、`BLE PoC console`）+ 选中项的说明；标题栏右侧显示 sysmodule 是否还答
+  (Joy-Con)`、`Advanced (motion)`、`BLE PoC console`）+ 选中项的说明；标题栏右侧显示 sysmodule 是否还答
   `PING`（每个玩法都依赖它，进去才发现要失败就白跑一趟）。`D-pad` 上下选择、`A` 进入、
   `+` 退出；进入玩法后 `+` 返回菜单。**`B` 不做返回键**：测试屏里它是"清空波形"；
   原先绑在 `-` 上的 BLE PoC 视图挪成了菜单项；
+- `Advanced (motion)`（`nro/source/ui/advanced.c`）把体感玩法的全部参数放在一页上：
+  `D-pad` 上下选参数、左右改值（**按一下只走一格**，按住 0.5 秒后才开始连发、每 0.2 秒
+  一格——参数改飞了没法靠反向点一下找回来）、`Y` 恢复默认、`+` 保存返回。每次改动都写进
+  `sdmc:/switch/DGLAB-NX/motion.cfg`，体感玩法进入时读取；参数清单见
+  `docs/joycon-input.md`；
 - `Motion (Joy-Con)` 玩法（`nro/source/ui/motion.c`）见 `docs/joycon-input.md`：显示
   左右通道的连接状态、实时强度与频率、作为"音量"的通道强度、链路状态与最近一次上传
   结果；

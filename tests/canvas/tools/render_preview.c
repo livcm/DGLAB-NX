@@ -14,17 +14,21 @@
 // Then:
 //
 //   cc -std=c11 -I nro/include -I common/include -I tests/net/hostshim \
-//       tests/canvas/tools/render_preview.c nro/source/ui/*.c -o /tmp/preview
+//       tests/canvas/tools/render_preview.c nro/source/ui/*.c nro/source/motion/*.c \
+//       -o /tmp/preview -lm
 //   /tmp/preview /tmp/font.bin /tmp/preview.bmp
 //   /tmp/preview /tmp/font.bin /tmp/nowifi.bmp nowifi   (no LAN address yet)
 //   /tmp/preview /tmp/font.bin /tmp/stopped.bmp stopped (server not started)
 //   /tmp/preview /tmp/font.bin /tmp/menu.bmp menu       (the mode menu)
 //   /tmp/preview /tmp/font.bin /tmp/motion.bmp motion   (the Joy-Con mode)
+//   /tmp/preview /tmp/font.bin /tmp/advanced.bmp advanced  (the motion parameters)
 //   sips -s format png /tmp/preview.bmp --out /tmp/preview.png
 
 #include <dglab/ui/screen.h>
+#include <dglab/ui/advanced.h>
 #include <dglab/ui/menu.h>
 #include <dglab/ui/motion.h>
+#include <dglab/nro/motion_settings.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,8 +109,8 @@ int main(int argc, char** argv)
     FILE* file;
 
     if (argc < 3) {
-        fprintf(stderr,
-            "usage: render_preview <font.bin> <out.bmp> [normal|nowifi|stopped|menu|motion]\n");
+        fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> "
+                        "[normal|nowifi|stopped|menu|motion|advanced]\n");
         return 2;
     }
 
@@ -215,6 +219,22 @@ int main(int argc, char** argv)
         motion.server_running = true;
 
         dglabMotionScreenDraw(&canvas, &font, &motion);
+    } else if (argc >= 4 && strcmp(argv[3], "advanced") == 0) {
+        DglabMotionFeedConfig motion_config;
+        DglabAdvancedState advanced;
+
+        // A couple of values moved off the defaults, so the preview does not
+        // just repeat the numbers from the source.
+        dglabMotionSettingsDefault(&motion_config);
+        dglabMotionSettingsStep(&motion_config, DglabMotionSetting_FrequencyFast, -4);
+        dglabMotionSettingsStep(&motion_config, DglabMotionSetting_DeadzoneEnter, 3);
+
+        memset(&advanced, 0, sizeof(advanced));
+        advanced.config = &motion_config;
+        advanced.selected = DglabMotionSetting_FrequencyFast;
+        advanced.saved = true;
+
+        dglabAdvancedDraw(&canvas, &font, &advanced);
     } else {
         dglabScreenDraw(&canvas, &font, &state);
     }

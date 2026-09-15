@@ -8,6 +8,8 @@
 CC       ?= cc
 CFLAGS   ?= -std=c11 -O2 -g
 CFLAGS   += -Wall -Wextra -Werror
+# The advanced screen reads the motion settings, which use libm.
+LDLIBS   ?= -lm
 
 ROOT     := ../..
 NRO      := $(ROOT)/nro
@@ -18,8 +20,11 @@ BUILD    := build
 
 TESTS  := $(wildcard test_*.c)
 BINS   := $(patsubst test_%.c,$(BUILD)/test_%,$(TESTS))
-SOURCES := $(wildcard $(NRO)/source/ui/*.c)
-HEADERS := $(wildcard $(NRO)/include/dglab/ui/*.h) $(wildcard $(COMMON)/dglab/*.h)
+# joycon.c is left out on purpose: it is the one motion file that needs libnx.
+SOURCES := $(wildcard $(NRO)/source/ui/*.c) $(NRO)/source/motion/motion_feed.c \
+	$(NRO)/source/motion/motion_settings.c
+HEADERS := $(wildcard $(NRO)/include/dglab/ui/*.h) $(wildcard $(NRO)/include/dglab/nro/*.h) \
+	$(wildcard $(COMMON)/dglab/*.h)
 
 .PHONY: all test clean
 
@@ -33,7 +38,7 @@ test: $(BINS)
 
 $(BUILD)/test_%: test_%.c $(SOURCES) $(HEADERS)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) $(INCLUDES) $< $(SOURCES) -o $@
+	$(CC) $(CFLAGS) $(INCLUDES) $< $(SOURCES) -o $@ $(LDLIBS)
 
 clean:
 	@rm -rf $(BUILD)

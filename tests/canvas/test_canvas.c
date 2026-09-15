@@ -7,9 +7,11 @@
 // Run with: make -C tests/canvas
 
 #include <dglab/ui/canvas.h>
+#include <dglab/ui/advanced.h>
 #include <dglab/ui/menu.h>
 #include <dglab/ui/motion.h>
 #include <dglab/ui/screen.h>
+#include <dglab/nro/motion_settings.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -319,6 +321,41 @@ static void testMotionScreen(void)
     CHECK(changed > 1280 * 720 / 2);
 }
 
+// The advanced screen: the panel is sized for the longest description, so that
+// assumption is checked here rather than discovered as text spilling over the
+// border on a console.
+static void testAdvancedScreen(void)
+{
+    static uint8_t screen_pixels[1280 * 720 * 4];
+    const uint32_t blue = DGLAB_RGBA(0, 0, 0xFF, 0xFF);
+    DglabMotionFeedConfig config;
+    DglabAdvancedState state;
+    DglabCanvas canvas;
+    int changed;
+
+    // 5 lines of 40 characters is what the panel leaves for the description;
+    // the drawing code wraps at 42 columns and the rest is margin.
+    for (unsigned setting = 0; setting < (unsigned)DglabMotionSetting_Count; setting++) {
+        CHECK(dglabMotionSettingName(setting)[0] != '\0');
+        CHECK(strlen(dglabMotionSettingDescription(setting)) <= 5 * 40);
+    }
+
+    dglabMotionSettingsDefault(&config);
+    dglabMotionSettingsStep(&config, DglabMotionSetting_FrequencyFast, -4);
+
+    memset(&state, 0, sizeof(state));
+    state.config = &config;
+    state.selected = DglabMotionSetting_FrequencyFast;
+    state.saved = true;
+
+    dglabCanvasInit(&canvas, screen_pixels, 1280, 720, 1280 * 4);
+    dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
+    dglabAdvancedDraw(&canvas, &kFont, &state);
+
+    changed = countChangedPixels(screen_pixels, sizeof(screen_pixels), blue);
+    CHECK(changed > 1280 * 720 / 2);
+}
+
 int main(void)
 {
     testFillAndClip();
@@ -328,6 +365,7 @@ int main(void)
     testScreen();
     testMenu();
     testMotionScreen();
+    testAdvancedScreen();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
 
