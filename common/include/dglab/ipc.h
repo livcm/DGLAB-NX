@@ -20,6 +20,7 @@ enum {
     DGLAB_IPC_CMD_NET_QR      = 5,
     DGLAB_IPC_CMD_NET_SEND    = 6,
     DGLAB_IPC_CMD_NET_LOG     = 7,
+    DGLAB_IPC_CMD_NET_WAVEFORM = 8,
 };
 
 // Value returned by DGLAB_IPC_CMD_PING. Keeping this stable gives clients a
@@ -125,3 +126,42 @@ typedef struct {
     u32 size;
     char text[DGLAB_NET_QR_MAX];
 } DglabNetQrChunk;
+
+// ---------------------------------------------------------------------------
+// Waveform upload (event sources)
+//
+// The App plays a pulse segment once and then stops, so anything continuous has
+// to be fed. Slots are the unit the protocol uses: one slot is 25ms of output
+// and carries the waveform's frequency and its strength; the channel strength
+// stays whatever the user set.
+//
+// A slot is exactly the shape the protocol layer already works with
+// (DglabCoyoteV3WaveformEntry), which is what makes the packing reusable.
+// ---------------------------------------------------------------------------
+
+/// Slots one upload can carry. 48 slots are 1.2s of output and keep the request
+/// inside the inline IPC payload (208 of 232 usable bytes).
+#define DGLAB_NET_WAVEFORM_MAX_SLOTS 48u
+
+typedef struct {
+    u16 frequency_ms; ///< 10..1000, the app side value; compressed before sending
+    u8 strength;      ///< 0..100 waveform strength, multiplied by the channel strength
+    u8 pad;
+} DglabNetWaveformSlot;
+
+typedef enum {
+    /// Queue these slots behind whatever is already playing: the way a sensor
+    /// stream keeps a waveform going.
+    DglabNetWaveform_Append = 0,
+    /// Drop what is playing and start these slots now: the way an event ("the
+    /// character was hit") replaces the current gesture.
+    DglabNetWaveform_Replace = 1,
+} DglabNetWaveformMode;
+
+typedef struct {
+    u32 channel; ///< 1 = A, 2 = B, 0 = both channels
+    u32 mode;    ///< DglabNetWaveformMode
+    u32 slot_count;
+    u32 pad;
+    DglabNetWaveformSlot slots[DGLAB_NET_WAVEFORM_MAX_SLOTS];
+} DglabNetWaveformRequest;

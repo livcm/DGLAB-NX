@@ -541,6 +541,152 @@ static void testCommands(void)
 // Heartbeat and address
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Waveform streaming
+// ---------------------------------------------------------------------------
+
+static void fillSlots(DglabNetWaveformRequest* request, size_t count, uint16_t frequency_ms,
+    uint8_t strength)
+{
+    memset(request, 0, sizeof(*request));
+    request->channel = 1;
+    request->mode = DglabNetWaveform_Append;
+    request->slot_count = (u32)count;
+
+    for (size_t i = 0; i < count; i++) {
+        request->slots[i].frequency_ms = frequency_ms;
+        request->slots[i].strength = strength;
+    }
+}
+
+static int countOccurrences(const char* text, const char* needle)
+{
+    int count = 0;
+    size_t length = strlen(needle);
+
+    for (const char* cursor = text; (cursor = strstr(cursor, needle)) != NULL; cursor += length)
+        count++;
+
+    return count;
+}
+
+static void testWaveformStream(void)
+{
+    Harness harness;
+    WsConn conn;
+    MockLink link;
+    char frame[4096];
+    DglabNetWaveformRequest request;
+
+    harnessInit(&harness);
+    dglabNetServerSetListening(&harness.server, 9999);
+
+    // Without a client there is nowhere to send it.
+    fillSlots(&request, 8, 100, 50);
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_NotPaired);
+
+    CHECK(attachApp(&harness, &conn, &link));
+    link.tx_size = 0;
+
+    // Appending sends right away when the App has nothing left to play: two
+    // elements for eight slots, each element being four slots.
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_Ok);
+    CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"pulse-A:["));
+    CHECK(countOccurrences(frame, "\\\"") == 4);
+    CHECK(harness.server.status.commands_sent == 1);
+
+    // Pacing: 48 slots are one full batch (32 slots) plus a remainder. The batch
+    // goes out immediately, the remainder only once the App is close to running
+    // dry.
+    link.tx_size = 0;
+    fillSlots(&request, DGLAB_NET_WAVEFORM_MAX_SLOTS, 100, 50);
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_Ok);
+    CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
+    CHECK(countOccurrences(frame, "\\\"") == 16); // 8 elements
+
+    link.tx_size = 0;
+    harness.now += 300;
+    dglabNetServerPoll(&harness.server, harness.now);
+    CHECK(link.tx_size == 0);
+
+    harness.now += 400; // past the 600ms the first batch bought
+    dglabNetServerPoll(&harness.server, harness.now);
+    CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"pulse-A:["));
+
+    // A replacement drops what is playing first, then starts the new slots now.
+    link.tx_size = 0;
+    fillSlots(&request, 8, 200, 80);
+    request.mode = DglabNetWaveform_Replace;
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_Ok);
+    CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"clear-1\""));
+    CHECK(payloadAt(&link, 1, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"pulse-A:["));
+
+    // Both channels at once.
+    link.tx_size = 0;
+    fillSlots(&request, 4, 100, 20);
+    request.channel = 0;
+    request.mode = DglabNetWaveform_Replace;
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_Ok);
+    CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"clear-1\""));
+    CHECK(payloadAt(&link, 1, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"pulse-A:["));
+    CHECK(payloadAt(&link, 2, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"clear-2\""));
+    CHECK(payloadAt(&link, 3, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"pulse-B:["));
+
+    // Clear stops the stream: nothing queued means nothing to feed.
+    link.tx_size = 0;
+    fillSlots(&request, DGLAB_NET_WAVEFORM_MAX_SLOTS, 100, 50);
+    request.channel = 2;
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_Ok);
+
+    {
+        DglabNetSendRequest clear;
+
+        link.tx_size = 0;
+        memset(&clear, 0, sizeof(clear));
+        clear.command = DglabNetCommand_Clear;
+        clear.channel = 2;
+        CHECK(dglabNetServerSend(&harness.server, &clear) == DglabNetSend_Ok);
+        CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
+        CHECK(contains(frame, "\"message\":\"clear-2\""));
+
+        link.tx_size = 0;
+        harness.now += 5000;
+        dglabNetServerPoll(&harness.server, harness.now);
+        CHECK(link.tx_size == 0);
+    }
+
+    // Out of range input is refused rather than sent.
+    fillSlots(&request, 8, 100, 50);
+    request.slot_count = 0;
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_BadRequest);
+
+    fillSlots(&request, 8, 100, 50);
+    request.slot_count = DGLAB_NET_WAVEFORM_MAX_SLOTS + 1;
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_BadRequest);
+
+    fillSlots(&request, 8, 5, 50); // below 10ms
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_BadRequest);
+
+    fillSlots(&request, 8, 100, 101); // above 100
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_BadRequest);
+
+    fillSlots(&request, 8, 100, 50);
+    request.mode = 7;
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_BadRequest);
+
+    fillSlots(&request, 8, 100, 50);
+    request.channel = 3;
+    CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_BadRequest);
+}
+
 static void testHeartbeatAndQr(void)
 {
     Harness harness;
@@ -676,6 +822,7 @@ int main(void)
     testTargetId();
     testPairing();
     testAppMessages();
+    testWaveformStream();
     testCommands();
     testHeartbeatAndQr();
     testLogAndLifecycle();

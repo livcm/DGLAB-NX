@@ -48,6 +48,7 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 | `NET_QR` | 5 | — | `DglabNetQrChunk` | 二维码内容；没有局域网地址时返回错误 |
 | `NET_SEND` | 6 | `DglabNetSendRequest` | — | 向已绑定的 App 发测试指令 |
 | `NET_LOG` | 7 | `DglabNetLogRequest` | `DglabNetLogChunk` | 增量读取服务端日志 |
+| `NET_WAVEFORM` | 8 | `DglabNetWaveformRequest` | — | 上传（或替换）一批波形槽位，服务端按节奏补流给 App |
 
 ## NET_STATUS
 
@@ -133,6 +134,30 @@ cursor = chunk.next_cursor;
 报错。每块最多 `DGLAB_NET_LOG_CHUNK_SIZE` 字节，读到 `size == 0` 说明已经追平。
 
 ## 临时命令
+
+## NET_WAVEFORM（事件源上传波形）
+
+App 收到一段 `pulse` 后**播完就停**，所以连续波形必须由我们持续供给。事件源（游戏
+Mod、手柄传感器）用这个命令把波形槽位交给 sysmodule，由 sysmodule 负责排队和补流：
+
+| 字段 | 含义 |
+| --- | --- |
+| `channel` | `1` = A、`2` = B、`0` = 两个通道 |
+| `mode` | `DglabNetWaveform_Append`：接在当前波形之后；`DglabNetWaveform_Replace`：先 `clear` 再立刻播放这一段 |
+| `slot_count` | 1~`DGLAB_NET_WAVEFORM_MAX_SLOTS`（48），每槽位 25ms，一次最多 1.2 秒 |
+| `slots[i].frequency_ms` | 10~1000，App 侧频率（服务端压缩成设备值） |
+| `slots[i].strength` | 0~100 波形强度，与用户设定的通道强度相乘 |
+
+两种模式对应两种用法：
+
+- **Replace**：一次性事件（受击、结算音效）——每次都是一个独立"动作"，先清空再播放；
+- **Append**：连续流（手柄传感器）——事件源按 100~200ms 一批持续上传，服务端保持 App
+  队列不空（提前约 200ms 补下一批，每批最多 8 个元素 = 800ms）。
+
+槽位请按 **4 的倍数** 上传（4 个槽位 = 一个协议元素）；不足 4 个的余量会留在队列里等
+下一次上传补齐。队列每通道 128 个槽位（3.2 秒），溢出时丢弃最旧的并记一行日志。
+
+`NET_SEND` 的 `Clear` 会同时清空这两个队列，所以"停止"按钮能把流停干净。
 
 BLE 直连 PoC 的命令（`DGLAB_IPC_POC_*`）保留在 `common/include/dglab/ipc_poc.h`，
 用于 `docs/ble-poc.md` 里描述的实机诊断。BLE 路线已经搁置，这些命令不是稳定契约，

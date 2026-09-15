@@ -1055,6 +1055,33 @@ Result dglabNetSocketSend(const DglabNetSendRequest* request)
     }
 }
 
+Result dglabNetSocketUploadWaveform(const DglabNetWaveformRequest* request)
+{
+    DglabNetSendResult result;
+
+    if (!request)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    netApplyPendingStop();
+
+    mutexLock(&g_net.mutex);
+    result = dglabNetServerUploadWaveform(&g_net.server, request);
+    mutexUnlock(&g_net.mutex);
+
+    switch (result) {
+        case DglabNetSend_Ok:
+            return 0;
+        case DglabNetSend_NotPaired:
+            return MAKERESULT(Module_Libnx, LibnxError_NotFound);
+        case DglabNetSend_IoError:
+            return MAKERESULT(Module_Libnx, LibnxError_IoError);
+        case DglabNetSend_BadRequest:
+        case DglabNetSend_TooLong:
+        default:
+            return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    }
+}
+
 u32 dglabNetSocketReadLog(u32 cursor, char* out, size_t out_size)
 {
     u32 next;

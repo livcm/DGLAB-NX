@@ -19,6 +19,8 @@ _Static_assert(sizeof(DglabNetQrChunk) <= DGLAB_IPC_INLINE_PAYLOAD_MAX,
     "DglabNetQrChunk does not fit the inline IPC payload");
 _Static_assert(sizeof(DglabNetLogChunk) <= DGLAB_IPC_INLINE_PAYLOAD_MAX,
     "DglabNetLogChunk does not fit the inline IPC payload");
+_Static_assert(sizeof(DglabNetWaveformRequest) <= DGLAB_IPC_INLINE_PAYLOAD_MAX,
+    "DglabNetWaveformRequest does not fit the inline IPC payload");
 
 #define INNER_HEAP_SIZE 0x80000
 
@@ -232,6 +234,20 @@ static bool dglabHandleRequest(void)
             chunk.size = (u32)strlen(chunk.text);
 
             dglabMakeResponse(CmifCommandType_Request, token, 0, &chunk, sizeof(chunk));
+            break;
+        }
+        case DGLAB_IPC_CMD_NET_WAVEFORM: {
+            DglabNetWaveformRequest request;
+
+            if (!dglabRequestHasPayload(parsed.meta.num_data_words, sizeof(request))) {
+                dglabMakeResponse(CmifCommandType_Request, token,
+                    MAKERESULT(Module_Libnx, LibnxError_BadInput), NULL, 0);
+                break;
+            }
+
+            memcpy(&request, dglabRequestPayload(in), sizeof(request));
+            dglabMakeResponse(CmifCommandType_Request, token,
+                dglabNetSocketUploadWaveform(&request), NULL, 0);
             break;
         }
 

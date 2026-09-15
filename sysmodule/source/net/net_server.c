@@ -1,10 +1,18 @@
 #include <dglab/net/net_server.h>
 
 #include <dglab/net/dglab_socket.h>
+#include <dglab/protocol/coyote_v3_session.h>
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+
+// Defined with the command and waveform helpers further down.
+static DglabNetSendResult sendCommand(DglabNetServer* server, DglabNetClient* client,
+    const char* command, bool log);
+static bool channelList(uint32_t channel, DglabSocketChannel out[2], size_t* count);
+static void waveformPump(DglabNetServer* server, uint64_t now_ms);
+static void waveformClearQueue(DglabNetWaveformQueue* queue);
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -296,6 +304,9 @@ void dglabNetServerSetStopped(DglabNetServer* server)
     for (size_t i = 0; i < DGLAB_NET_MAX_CLIENTS; i++)
         server->clients[i].active = false;
 
+    for (size_t i = 0; i < 2; i++)
+        waveformClearQueue(&server->waveform[i]);
+
     dglabNetServerLog(server, "stopped");
 }
 
@@ -394,6 +405,10 @@ void dglabNetServerDetach(DglabNetServer* server, WsConn* conn)
     bool was_bound = client->bound;
 
     memset(client, 0, sizeof(*client));
+
+    // Nothing is playing on the App any more, so the queues start empty.
+    for (size_t i = 0; i < 2; i++)
+        waveformClearQueue(&server->waveform[i]);
 
     if (server->status.clients)
         server->status.clients--;
@@ -517,6 +532,8 @@ void dglabNetServerPoll(DglabNetServer* server, uint64_t now_ms)
     if (!client)
         return;
 
+    waveformPump(server, now_ms);
+
     if (now_ms - server->last_heartbeat_ms >= DGLAB_NET_HEARTBEAT_INTERVAL_MS)
         sendHeartbeat(server, client, now_ms);
 
@@ -531,6 +548,209 @@ void dglabNetServerPoll(DglabNetServer* server, uint64_t now_ms)
 // ---------------------------------------------------------------------------
 // Commands to the App
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Waveform streaming
+//
+// The App plays a pulse segment once and stops, so a continuous waveform only
+// keeps going if it is fed. Slots come from an event source (a game hit, a
+// motion sensor), are queued per channel, and leave as pulse commands slightly
+// ahead of playback. The channel strength is untouched: the user owns it, and
+// the device multiplies it with the waveform strength.
+// ---------------------------------------------------------------------------
+
+static DglabNetWaveformQueue* waveformQueue(DglabNetServer* server, DglabSocketChannel channel)
+{
+    return &server->waveform[(channel == DglabSocketChannel_A) ? 0 : 1];
+}
+
+static void waveformClearQueue(DglabNetWaveformQueue* queue)
+{
+    queue->head = 0;
+    queue->count = 0;
+    queue->next_send_ms = 0;
+}
+
+static void waveformDrop(DglabNetWaveformQueue* queue, size_t count)
+{
+    if (count > queue->count)
+        count = queue->count;
+
+    queue->head = (queue->head + count) % DGLAB_NET_WAVEFORM_QUEUE_SLOTS;
+    queue->count -= count;
+}
+
+static void waveformPush(DglabNetServer* server, DglabSocketChannel channel,
+    const DglabNetWaveformSlot* slots, size_t count)
+{
+    DglabNetWaveformQueue* queue = waveformQueue(server, channel);
+
+    if (count > DGLAB_NET_WAVEFORM_QUEUE_SLOTS)
+        count = DGLAB_NET_WAVEFORM_QUEUE_SLOTS;
+
+    // A source that falls this far behind is better served by the newest
+    // material, so the oldest slots make room for it.
+    if (queue->count + count > DGLAB_NET_WAVEFORM_QUEUE_SLOTS) {
+        size_t drop = queue->count + count - DGLAB_NET_WAVEFORM_QUEUE_SLOTS;
+
+        waveformDrop(queue, drop);
+        dglabNetServerLog(server, "waveform queue was full, dropped %u slots", (unsigned)drop);
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        size_t index = (queue->head + queue->count) % DGLAB_NET_WAVEFORM_QUEUE_SLOTS;
+
+        queue->slots[index] = slots[i];
+        queue->count++;
+    }
+}
+
+// Sends one pulse command with as much queued material as fits. Returns false
+// when there was nothing whole to send (fewer than four slots, which is one
+// element).
+static bool waveformSendBatch(DglabNetServer* server, DglabNetClient* client,
+    DglabSocketChannel channel, uint64_t now_ms)
+{
+    DglabNetWaveformQueue* queue = waveformQueue(server, channel);
+    char storage[DGLAB_NET_WAVEFORM_BATCH_SLOTS / DGLAB_COYOTE_V3_WAVEFORM_SLOTS][17];
+    const char* hex[DGLAB_NET_WAVEFORM_BATCH_SLOTS / DGLAB_COYOTE_V3_WAVEFORM_SLOTS];
+    DglabCoyoteV3WaveformSlot group[DGLAB_COYOTE_V3_WAVEFORM_SLOTS];
+    char command[DGLAB_SOCKET_MAX_MESSAGE];
+    size_t elements = queue->count / DGLAB_COYOTE_V3_WAVEFORM_SLOTS;
+    size_t slots;
+    size_t len;
+    DglabNetSendResult result;
+
+    if (elements == 0)
+        return false;
+
+    if (elements > DGLAB_NET_WAVEFORM_BATCH_SLOTS / DGLAB_COYOTE_V3_WAVEFORM_SLOTS)
+        elements = DGLAB_NET_WAVEFORM_BATCH_SLOTS / DGLAB_COYOTE_V3_WAVEFORM_SLOTS;
+
+    for (size_t element = 0; element < elements; element++) {
+        for (size_t slot = 0; slot < DGLAB_COYOTE_V3_WAVEFORM_SLOTS; slot++) {
+            const DglabNetWaveformSlot* source =
+                &queue->slots[(queue->head + element * DGLAB_COYOTE_V3_WAVEFORM_SLOTS + slot) %
+                              DGLAB_NET_WAVEFORM_QUEUE_SLOTS];
+
+            // The protocol layer owns the app side frequency to device value
+            // conversion, so it is reused here rather than duplicated.
+            group[slot].frequency = dglabCoyoteV3CompressFrequency(source->frequency_ms);
+            group[slot].strength = source->strength;
+        }
+
+        dglabSocketEncodePulseHex(group, storage[element]);
+        hex[element] = storage[element];
+    }
+
+    len = dglabSocketBuildPulse(command, sizeof(command), channel, hex, elements);
+
+    if (len == 0)
+        return false;
+
+    slots = elements * DGLAB_COYOTE_V3_WAVEFORM_SLOTS;
+    result = sendCommand(server, client, command, false);
+
+    if (result != DglabNetSend_Ok)
+        return false;
+
+    waveformDrop(queue, slots);
+    server->status.commands_sent++;
+
+    // Next batch when the App is down to the lead time, so playback never runs
+    // dry but the queue stays short enough to react to a new event.
+    {
+        uint64_t lead = (uint64_t)slots * DGLAB_NET_WAVEFORM_SLOT_MS;
+
+        queue->next_send_ms = now_ms + ((lead > DGLAB_NET_WAVEFORM_LEAD_MS)
+                                           ? (lead - DGLAB_NET_WAVEFORM_LEAD_MS)
+                                           : 0);
+    }
+
+    return true;
+}
+
+// Feeds every channel that is due. Called from the periodic poll.
+static void waveformPump(DglabNetServer* server, uint64_t now_ms)
+{
+    DglabNetClient* client = findBoundClient(server);
+
+    if (!client)
+        return;
+
+    for (size_t i = 0; i < 2; i++) {
+        DglabSocketChannel channel = (i == 0) ? DglabSocketChannel_A : DglabSocketChannel_B;
+        DglabNetWaveformQueue* queue = &server->waveform[i];
+
+        if (queue->count < DGLAB_COYOTE_V3_WAVEFORM_SLOTS) {
+            // Nothing whole is left: the App should send again as soon as the
+            // next slots arrive.
+            queue->next_send_ms = now_ms;
+            continue;
+        }
+
+        if (now_ms >= queue->next_send_ms)
+            waveformSendBatch(server, client, channel, now_ms);
+    }
+}
+
+DglabNetSendResult dglabNetServerUploadWaveform(DglabNetServer* server,
+    const DglabNetWaveformRequest* request)
+{
+    DglabNetClient* client = findBoundClient(server);
+    DglabSocketChannel channels[2];
+    size_t channel_count = 0;
+
+    if (request->mode != DglabNetWaveform_Append && request->mode != DglabNetWaveform_Replace)
+        return DglabNetSend_BadRequest;
+
+    if (request->slot_count == 0 || request->slot_count > DGLAB_NET_WAVEFORM_MAX_SLOTS)
+        return DglabNetSend_BadRequest;
+
+    if (!channelList(request->channel, channels, &channel_count))
+        return DglabNetSend_BadRequest;
+
+    for (size_t i = 0; i < request->slot_count; i++) {
+        const DglabNetWaveformSlot* slot = &request->slots[i];
+
+        if (slot->frequency_ms < DGLAB_COYOTE_V3_WAVEFORM_FREQUENCY_MIN_MS ||
+            slot->frequency_ms > DGLAB_COYOTE_V3_WAVEFORM_FREQUENCY_MAX_MS ||
+            slot->strength > DGLAB_COYOTE_V3_WAVEFORM_STRENGTH_MAX)
+            return DglabNetSend_BadRequest;
+    }
+
+    if (!client)
+        return DglabNetSend_NotPaired;
+
+    for (size_t i = 0; i < channel_count; i++) {
+        DglabNetWaveformQueue* queue = waveformQueue(server, channels[i]);
+        DglabNetSendResult result;
+
+        if (request->mode == DglabNetWaveform_Replace) {
+            // An event replaces the gesture that is playing, so both our queue
+            // and the App's have to be dropped before the new slots go out.
+            char command[DGLAB_SOCKET_MAX_MESSAGE];
+
+            waveformClearQueue(queue);
+
+            if (dglabSocketBuildClear(command, sizeof(command), channels[i]) != 0) {
+                result = sendCommand(server, client, command, true);
+
+                if (result != DglabNetSend_Ok)
+                    return result;
+            }
+        }
+
+        waveformPush(server, channels[i], request->slots, request->slot_count);
+
+        if (request->mode == DglabNetWaveform_Replace)
+            waveformSendBatch(server, client, channels[i], nowMs(server));
+        else
+            waveformPump(server, nowMs(server));
+    }
+
+    return DglabNetSend_Ok;
+}
 
 static bool channelList(uint32_t channel, DglabSocketChannel out[2], size_t* count)
 {
@@ -554,7 +774,7 @@ static bool channelList(uint32_t channel, DglabSocketChannel out[2], size_t* cou
 }
 
 static DglabNetSendResult sendCommand(DglabNetServer* server, DglabNetClient* client,
-    const char* command)
+    const char* command, bool log)
 {
     // The command and the frame are big (the pulse command with its eight
     // elements is the largest message this build ever sends) and the sysmodule's
@@ -571,8 +791,11 @@ static DglabNetSendResult sendCommand(DglabNetServer* server, DglabNetClient* cl
         return DglabNetSend_TooLong;
 
     // Logged before the socket call, so a crash inside the write still leaves a
-    // trace of how far this message got.
-    dglabNetServerLog(server, "tx %s", command);
+    // trace of how far this message got. Waveform batches are silenced: they are
+    // long and arrive continuously, and would push everything else out of the
+    // ring.
+    if (log)
+        dglabNetServerLog(server, "tx %s", command);
 
     if (!sendText(server, client->conn, frame, len))
         return DglabNetSend_IoError;
@@ -637,7 +860,7 @@ DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSend
                     break;
                 }
 
-                result = sendCommand(server, client, command);
+                result = sendCommand(server, client, command, true);
             }
             break;
 
@@ -650,7 +873,11 @@ DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSend
                     break;
                 }
 
-                result = sendCommand(server, client, command);
+                // Clearing the channel also stops the waveform stream, which is
+                // what a user pressing "stop" expects.
+                waveformClearQueue(waveformQueue(server, channels[i]));
+
+                result = sendCommand(server, client, command, true);
             }
             break;
 
@@ -674,7 +901,7 @@ DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSend
                     break;
                 }
 
-                result = sendCommand(server, client, command);
+                result = sendCommand(server, client, command, true);
             }
             break;
 
@@ -688,7 +915,7 @@ DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSend
                     break;
                 }
 
-                result = sendCommand(server, client, command);
+                result = sendCommand(server, client, command, true);
             }
             break;
 

@@ -163,6 +163,28 @@ static void sendTestCommand(Service* dglab, u32 command, u32 channel, u32 value)
     serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_SEND, request);
 }
 
+// Queues one second of test waveform through the streaming path: 48 slots of
+// 25ms each, at the app side frequency of 100ms, with the waveform at full
+// strength so the channel strength alone decides how strong it feels. Replace
+// mode makes every press start a fresh gesture rather than queueing behind the
+// previous one.
+static void sendTestWaveform(Service* dglab)
+{
+    DglabNetWaveformRequest request;
+
+    memset(&request, 0, sizeof(request));
+    request.channel = 0; // both
+    request.mode = DglabNetWaveform_Replace;
+    request.slot_count = DGLAB_NET_WAVEFORM_MAX_SLOTS;
+
+    for (u32 i = 0; i < request.slot_count; i++) {
+        request.slots[i].frequency_ms = 100;
+        request.slots[i].strength = 100;
+    }
+
+    serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_WAVEFORM, request);
+}
+
 // Steps the channel strength, clamped instead of wrapping: at 0 a decrease does
 // nothing, at 100 an increase does nothing.
 static void adjustTestStrength(int delta)
@@ -200,7 +222,7 @@ static void handleButtons(Service* dglab, u64 down, u64 held)
     // waveform carries its full strength so the channel strength alone decides
     // how strong the test feels.
     if (down & HidNpadButton_ZL) {
-        sendTestCommand(dglab, DglabNetCommand_TestPulse, 0, TEST_STRENGTH_MAX);
+        sendTestWaveform(dglab);
         sendTestCommand(dglab, DglabNetCommand_SetStrength, 0, g_test_strength);
     }
 

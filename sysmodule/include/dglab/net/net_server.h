@@ -33,6 +33,21 @@
 // heartbeats, and logging every single one would flush everything else.
 #define DGLAB_NET_LOG_MESSAGE_LIMIT 32u
 
+// Pending waveform slots per channel. 128 slots are 3.2s, which is far more than
+// an event source should ever fall behind by.
+#define DGLAB_NET_WAVEFORM_QUEUE_SLOTS 128u
+
+// Slots sent per pulse command: 32 slots are eight elements (800ms), well inside
+// the 86 element limit and short enough for an event to be picked up quickly.
+#define DGLAB_NET_WAVEFORM_BATCH_SLOTS 32u
+
+// How much material stays queued on the App's side. The next batch goes out when
+// the App is down to this much, so playback never runs dry.
+#define DGLAB_NET_WAVEFORM_LEAD_MS 200u
+
+// One slot covers this much output.
+#define DGLAB_NET_WAVEFORM_SLOT_MS 25u
+
 typedef struct {
     uint32_t port;
     // Milliseconds; only differences are used (heartbeat schedule, log stamps).
@@ -61,10 +76,18 @@ typedef struct {
 } DglabNetClient;
 
 typedef struct {
+    DglabNetWaveformSlot slots[DGLAB_NET_WAVEFORM_QUEUE_SLOTS];
+    size_t head; // next slot to send
+    size_t count;
+    uint64_t next_send_ms; // when the App is expected to run low
+} DglabNetWaveformQueue;
+
+typedef struct {
     DglabNetServerConfig config;
     DglabNetStatus status;
     char controller_id[DGLAB_NET_ID_LEN];
     DglabNetClient clients[DGLAB_NET_MAX_CLIENTS];
+    DglabNetWaveformQueue waveform[2]; // A and B
     uint64_t last_heartbeat_ms;
     uint32_t fallback_counter; ///< keeps generated ids distinct when there is no random source
     uint32_t messages_logged;
@@ -110,6 +133,12 @@ void dglabNetServerPoll(DglabNetServer* server, uint64_t now_ms);
 
 // Sends one command to the bound App.
 DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSendRequest* request);
+
+// Queues (or replaces with) a batch of waveform slots for one or both channels.
+// Anything queued is fed to the App as pulse commands; see the header of the
+// request type for why that is needed.
+DglabNetSendResult dglabNetServerUploadWaveform(DglabNetServer* server,
+    const DglabNetWaveformRequest* request);
 
 // Fills out with a snapshot of the status. Also refreshes the LAN address, so a
 // reader that keeps polling sees the address appear once the Switch is online.

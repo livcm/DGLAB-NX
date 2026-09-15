@@ -40,5 +40,9 @@ Result dglabNetSocketGetQr(char* out, size_t out_size, size_t* out_written);
 
 Result dglabNetSocketSend(const DglabNetSendRequest* request);
 
+// Queues (or replaces with) a batch of waveform slots. The server feeds them to
+// the App as pulse commands, because a queued pulse plays once and stops.
+Result dglabNetSocketUploadWaveform(const DglabNetWaveformRequest* request);
+
 // Reads the log ring. Returns the cursor to pass in next time.
 u32 dglabNetSocketReadLog(u32 cursor, char* out, size_t out_size);
