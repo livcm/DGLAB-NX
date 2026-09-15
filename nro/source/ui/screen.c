@@ -192,16 +192,17 @@ static void drawStatus(DglabCanvas* canvas, const DglabFont* font, const DglabSc
     dglabCanvasText(canvas, font, x, y, 1, buffer, kText);
     y += LINE_HEIGHT;
 
-    // The 3.0 App never sends anything back, so this stays empty there; say so
-    // instead of showing a misleading 0/0.
+    // What the App says about the channel strengths. The 3.0 App never sends
+    // anything back, so this stays empty there; say so instead of showing a
+    // misleading 0/0.
     if (status->reports_received == 0)
-        snprintf(buffer, sizeof(buffer), "no report from the app");
+        snprintf(buffer, sizeof(buffer), "none");
     else
         snprintf(buffer, sizeof(buffer), "%u/%u (limit %u/%u)", (unsigned)status->app_strength_a,
             (unsigned)status->app_strength_b, (unsigned)status->app_limit_a,
             (unsigned)status->app_limit_b);
 
-    drawLine(canvas, font, x, y, "strength", buffer, kText);
+    drawLine(canvas, font, x, y, "app report", buffer, kText);
     y += LINE_HEIGHT;
 
     if (status->app_feedback == DGLAB_NET_FEEDBACK_NONE)
@@ -223,11 +224,14 @@ static void drawStatus(DglabCanvas* canvas, const DglabFont* font, const DglabSc
         (status->last_result || status->last_error) ? kWarn : kMuted);
     y += LINE_HEIGHT;
 
-    // Raw device values, the same numbers the App shows: 0..100, above which the
-    // official documentation only allows special cases.
+    // The channel strengths the test buttons send. Raw device values, the same
+    // numbers the App shows: 0..100, above which the official documentation only
+    // allows special cases. Labelled "strength" rather than after the buttons:
+    // these are the channels' values, and the buttons only happen to be how they
+    // are set here.
     snprintf(buffer, sizeof(buffer), "A %u/100  B %u/100",
         (unsigned)state->test_strength_a, (unsigned)state->test_strength_b);
-    drawLine(canvas, font, x, y, "test", buffer, kMuted);
+    drawLine(canvas, font, x, y, "strength", buffer, kMuted);
 
     // While the server is up the sysmodule holds a listening socket, and this
     // console hangs if that happens across a sleep. Say so on screen.
