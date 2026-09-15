@@ -538,7 +538,11 @@ static bool channelList(uint32_t channel, DglabSocketChannel out[2], size_t* cou
 static DglabNetSendResult sendCommand(DglabNetServer* server, DglabNetClient* client,
     const char* command, bool swap_envelope)
 {
-    char frame[WS_MAX_MESSAGE];
+    // The command and the frame are big (the pulse command with its eight
+    // elements is the largest message this build ever sends) and the sysmodule's
+    // main thread only has a 16KB stack, so both buffers live in .bss. All sends
+    // happen under the transport lock, so one set of buffers is enough.
+    static char frame[WS_MAX_MESSAGE];
     // swap_envelope is a temporary diagnostic: the routing fields are the one
     // thing about a message the App could reject while still logging it.
     size_t len = dglabSocketBuildMessage(frame, sizeof(frame), "msg",
@@ -547,6 +551,10 @@ static DglabNetSendResult sendCommand(DglabNetServer* server, DglabNetClient* cl
 
     if (len == 0 || len > DGLAB_SOCKET_MAX_MESSAGE)
         return DglabNetSend_TooLong;
+
+    // Logged before the socket call, so a crash inside the write still leaves a
+    // trace of how far this message got.
+    dglabNetServerLog(server, "tx %s", command);
 
     if (!sendText(server, client->conn, frame, len))
         return DglabNetSend_IoError;
@@ -642,7 +650,7 @@ DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSend
     DglabNetClient* client = findBoundClient(server);
     DglabSocketChannel channels[2];
     size_t channel_count = 0;
-    char command[DGLAB_SOCKET_MAX_MESSAGE];
+    static char command[DGLAB_SOCKET_MAX_MESSAGE];
     DglabNetSendResult result = DglabNetSend_Ok;
     uint32_t variant = request->pad;
     bool swap_envelope = false;
