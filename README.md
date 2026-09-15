@@ -74,7 +74,7 @@ make -C sysmodule package   # release/<TITLE_ID>/{exefs.nsp,toolbox.json,flags/b
 make -C nro package         # release/DGLAB-NX.nro
 ```
 
-sysmodule 的 Title ID 只在 `sysmodule/DGLAB-NX.json` 里写一次，Makefile、安装目录名和
+sysmodule 的 Title ID 只在 `sysmodule/DGLAB-NX-Core.json` 里写一次，Makefile、安装目录名和
 `toolbox.json` 都从它推导，别在别处再抄一份。
 
 ## 安装

@@ -233,7 +233,7 @@ DG-LAB Bluetooth Protocol 的官方参考仓库为：
 
 - 根目录 `make` 构建全部组件并生成上述布局；`make clean` 清除这些产物；
 - 各组件用 `make -C <component> package` 只生成自己那一部分；
-- `<TITLE_ID>` 目录名必须由 `sysmodule/DGLAB-NX.json` 推导，禁止在 Makefile、
+- `<TITLE_ID>` 目录名必须由 `sysmodule/DGLAB-NX-Core.json` 推导，禁止在 Makefile、
   脚本或文档里另写一份；
 - `release/` 属于构建产物，不提交到 Git。
 

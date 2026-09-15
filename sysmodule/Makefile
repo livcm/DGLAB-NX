@@ -10,7 +10,11 @@ TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
 
 #---------------------------------------------------------------------------------
-TARGET		:=	DGLAB-NX
+# The module name is DGLAB-NX-Core (see AGENTS.md). TARGET also selects the
+# NPDM config: libnx's template auto-detects <TARGET>.json (or config.json), so
+# sysmodule/DGLAB-NX-Core.json has to keep matching it. A mismatch is not
+# harmless: the build silently produces a homebrew .nro instead of a sysmodule.
+TARGET		:=	DGLAB-NX-Core
 BUILD		:=	build
 SOURCES		:=	source source/protocol source/transport source/net
 DATA		:=	data
@@ -135,11 +139,11 @@ package: $(BUILD)
 	@rm -rf $(PKG_DIR)
 	@mkdir -p $(FLAGS_DIR)
 	@cp $(OUTPUT).nsp $(PKG_DIR)/exefs.nsp
-	@printf '{\n  "name": "DGLAB-NX-Core",\n  "tid": "%s",\n  "requires_reboot": true\n}\n' '$(TITLE_ID_TID)' > $(TOOLBOX_JSON)
+	@printf '{\n  "name": "%s",\n  "tid": "%s",\n  "requires_reboot": true\n}\n' '$(TARGET)' '$(TITLE_ID_TID)' > $(TOOLBOX_JSON)
 	@: > $(BOOT2_FLAG)
 	@test -f $(TOOLBOX_JSON) || { echo "error: toolbox.json missing"; exit 1; }
 	@test -f $(BOOT2_FLAG) || { echo "error: boot2.flag missing"; exit 1; }
-	@grep -q '"name"[[:space:]]*:[[:space:]]*"DGLAB-NX-Core"' $(TOOLBOX_JSON) || { echo "error: toolbox.json name mismatch"; exit 1; }
+	@grep -q '"name"[[:space:]]*:[[:space:]]*"$(TARGET)"' $(TOOLBOX_JSON) || { echo "error: toolbox.json name mismatch"; exit 1; }
 	@TID=$$(sed -nE 's/.*"tid"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' $(TOOLBOX_JSON) | head -n1 | sed 's/^0x//' | tr '[:lower:]' '[:upper:]'); test "$$TID" = '$(TITLE_ID_DIR)' || { echo "error: toolbox.json tid mismatch"; exit 1; }
 	@echo "built ... $(PKG_DIR)"
 
@@ -151,11 +155,8 @@ $(BUILD):
 
 clean:
 	@echo clean ...
-ifeq ($(strip $(APP_JSON)),)
-	@rm -fr $(BUILD) $(TARGET).nro $(TARGET).nacp $(TARGET).elf
-else
-	@rm -fr $(BUILD) $(TARGET).nsp $(TARGET).nso $(TARGET).npdm $(TARGET).elf $(PKG_DIR)
-endif
+	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nso $(TARGET).nsp $(TARGET).npdm \
+		$(TARGET).nro $(TARGET).nacp $(PKG_DIR)
 
 #---------------------------------------------------------------------------------
 else

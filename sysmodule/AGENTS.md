@@ -225,11 +225,8 @@ V3 文档明确说明其数据处理方式与 V2 存在差异，应以 V3 文档
 - 根据其他项目的 Title ID 直接修改一个数字后使用；
 - 在没有检查现有项目配置的情况下自行决定 Title ID。
 
-推荐在合适的配置文件中定义：
-
-    TITLE_ID:=00FF072107210721
-
-所有构建脚本、toolbox.json 和安装目录都必须从这个唯一配置来源获取 Title ID。
+推荐在合适的配置文件中定义该 Title ID，所有构建脚本、toolbox.json
+和安装目录都必须从这个唯一配置来源获取 Title ID。
 
 禁止在以下位置重复硬编码 Title ID：
 
@@ -260,13 +257,26 @@ Sysmodule 的构建必须区分：
             └── boot2.flag
 
 该目录位于仓库根目录的 `release/` 下（见根 `AGENTS.md` 的“发布产物布局”），
-Title ID 目录名由 `DGLAB-NX.json` 推导。
+Title ID 目录名由 `DGLAB-NX-Core.json` 推导。
 
 其中：
 
 - `exefs.nsp` 是构建产生的 Sysmodule NSP；
 - `toolbox.json` 用于 Sysmodule Toolbox/Overlay；
 - `flags/boot2.flag` 用于 Atmosphère 启动阶段加载 Sysmodule。
+
+### Sysmodule 模块名称
+
+指定为
+
+    DGLAB-NX-Core
+
+`Makefile` 中的 `TARGET` 与 `sysmodule/DGLAB-NX-Core.json` 中的 `name` 都是此名称；
+`toolbox.json` 由 `Makefile` 从 `TARGET` 生成，禁止另写一份。
+
+NPDM 配置文件名必须与 `TARGET` 一致：libnx 模板只自动匹配 `<TARGET>.json` 或
+`config.json`。改名时漏掉文件不会直接报错，而是静默退化成生成普通的 homebrew
+`.nro`（只在 `make package` 最后报 `.nsp` 不存在），所以两者必须一起改。
 
 ### 构建验证
 
@@ -275,7 +285,7 @@ Title ID 目录名由 `DGLAB-NX.json` 推导。
 1. Title ID 与项目记录一致；
 2. `exefs.nsp` 存在；
 3. `toolbox.json` 存在；
-4. `toolbox.json` 中的 `name` 为 `DGLAB-NX-Core`；
+4. `toolbox.json` 中的 `name` 与模块名称一致；
 5. `toolbox.json` 中的 `tid` 与目录 Title ID 一致；
 6. `flags/boot2.flag` 存在；
 7. 输出目录结构正确。

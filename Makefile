@@ -13,7 +13,7 @@
 #   └── DGLAB-NX-ovl.ovl   Tesla / Ultrahand overlay (not implemented yet)
 #
 # The sysmodule Title ID is not written down here: sysmodule/ derives the
-# directory name from sysmodule/DGLAB-NX.json, which stays the single source of
+# directory name from sysmodule/DGLAB-NX-Core.json, which stays the single source of
 # truth for it.
 #---------------------------------------------------------------------------------
 
