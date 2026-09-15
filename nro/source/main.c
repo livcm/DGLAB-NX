@@ -40,14 +40,21 @@ static char g_partial[256];
 static size_t g_partial_len;
 // The value the test buttons use is the raw channel strength, the same number
 // the App shows: 0..100 (the official documentation only allows more than 100
-// for special cases), one step per press and no wrap around.
+// for special cases), one step per press and no wrap around. Each channel keeps
+// its own value, and both start at 0: nothing comes out until the user dials a
+// channel up.
 #define TEST_STRENGTH_MIN 0u
 #define TEST_STRENGTH_MAX 100u
 #define TEST_STRENGTH_STEP 1u
 
+// Channel numbers on the wire, see DglabNetSendRequest::channel.
+#define TEST_CHANNEL_A 1u
+#define TEST_CHANNEL_B 2u
+
 // Held buttons repeat at a usable rate; the UI loop runs at the display refresh.
 #define TEST_STRENGTH_REPEAT_FRAMES 6
-static u32 g_test_strength = 10;
+static u32 g_test_strength_a = TEST_STRENGTH_MIN;
+static u32 g_test_strength_b = TEST_STRENGTH_MIN;
 static int g_test_strength_held_frames;
 static FILE* g_log_file;
 // ---------------------------------------------------------------------------
@@ -165,15 +172,15 @@ static void sendTestCommand(Service* dglab, u32 command, u32 channel, u32 value)
 
 // Queues one second of test waveform through the streaming path: 48 slots of
 // 25ms each, at the app side frequency of 100ms, with the waveform at full
-// strength so the channel strength alone decides how strong it feels. Replace
-// mode makes every press start a fresh gesture rather than queueing behind the
-// previous one.
-static void sendTestWaveform(Service* dglab)
+// strength so the channel strength alone decides how strong it feels. The
+// waveform goes out on one channel; Replace mode makes every press start a fresh
+// gesture rather than queueing behind the previous one.
+static void sendTestWaveform(Service* dglab, u32 channel)
 {
     DglabNetWaveformRequest request;
 
     memset(&request, 0, sizeof(request));
-    request.channel = 0; // both
+    request.channel = channel;
     request.mode = DglabNetWaveform_Replace;
     request.slot_count = DGLAB_NET_WAVEFORM_MAX_SLOTS;
 
@@ -185,19 +192,49 @@ static void sendTestWaveform(Service* dglab)
     serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_WAVEFORM, request);
 }
 
-// Steps the channel strength, clamped instead of wrapping: at 0 a decrease does
-// nothing, at 100 an increase does nothing.
-static void adjustTestStrength(int delta)
+// Fires one channel: the waveform plus that channel's strength, so the button is
+// self contained even if the App reconnected since the strength last changed.
+static void testChannel(Service* dglab, u32 channel, u32 strength)
 {
-    int value = (int)g_test_strength + delta;
+    sendTestWaveform(dglab, channel);
+    sendTestCommand(dglab, DglabNetCommand_SetStrength, channel, strength);
+}
 
-    if (value < (int)TEST_STRENGTH_MIN)
-        value = (int)TEST_STRENGTH_MIN;
+// Steps one channel's strength and sends it straight away - there is no separate
+// "send strength" button. Clamped instead of wrapping: at 0 a decrease does
+// nothing, at 100 an increase does nothing, and a clamped step sends nothing.
+static void adjustStrength(Service* dglab, u32 channel, u32* value, int delta)
+{
+    int next = (int)*value + delta;
 
-    if (value > (int)TEST_STRENGTH_MAX)
-        value = (int)TEST_STRENGTH_MAX;
+    if (next < (int)TEST_STRENGTH_MIN)
+        next = (int)TEST_STRENGTH_MIN;
 
-    g_test_strength = (u32)value;
+    if (next > (int)TEST_STRENGTH_MAX)
+        next = (int)TEST_STRENGTH_MAX;
+
+    if ((u32)next == *value)
+        return;
+
+    *value = (u32)next;
+    sendTestCommand(dglab, DglabNetCommand_SetStrength, channel, *value);
+}
+
+// The D-pad is the mixer: the vertical axis dials channel A, the horizontal one
+// dials channel B. Used for the first press and, at a slower rate, while held.
+static void adjustStrengthFromDirections(Service* dglab, u64 buttons)
+{
+    if (buttons & HidNpadButton_Up)
+        adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, (int)TEST_STRENGTH_STEP);
+
+    if (buttons & HidNpadButton_Down)
+        adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, -(int)TEST_STRENGTH_STEP);
+
+    if (buttons & HidNpadButton_Right)
+        adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, (int)TEST_STRENGTH_STEP);
+
+    if (buttons & HidNpadButton_Left)
+        adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, -(int)TEST_STRENGTH_STEP);
 }
 
 static void handleButtons(Service* dglab, u64 down, u64 held)
@@ -211,40 +248,30 @@ static void handleButtons(Service* dglab, u64 down, u64 held)
     if (down & HidNpadButton_Y)
         serviceDispatch(dglab, DGLAB_IPC_CMD_NET_STOP);
 
-    if (down & HidNpadButton_X)
-        sendTestCommand(dglab, DglabNetCommand_SetStrength, 0, g_test_strength);
-
     if (down & HidNpadButton_B)
         sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0);
 
-    // One button for the whole test: a waveform without a strength does nothing
-    // on the device, and a strength without a waveform is just as silent. The
-    // waveform carries its full strength so the channel strength alone decides
-    // how strong the test feels.
-    if (down & HidNpadButton_ZL) {
-        sendTestWaveform(dglab);
-        sendTestCommand(dglab, DglabNetCommand_SetStrength, 0, g_test_strength);
-    }
+    // One trigger per channel: a waveform without a strength does nothing on the
+    // device, and a strength without a waveform is just as silent, so each button
+    // sends both for its own channel.
+    if (down & HidNpadButton_ZL)
+        testChannel(dglab, TEST_CHANNEL_A, g_test_strength_a);
 
-    if (down & HidNpadButton_L)
-        adjustTestStrength(-(int)TEST_STRENGTH_STEP);
+    if (down & HidNpadButton_ZR)
+        testChannel(dglab, TEST_CHANNEL_B, g_test_strength_b);
 
-    if (down & HidNpadButton_R)
-        adjustTestStrength((int)TEST_STRENGTH_STEP);
+    adjustStrengthFromDirections(dglab, down);
 
-    // Holding L/R walks the value at a usable speed instead of repeating at the
-    // display refresh rate.
-    if (held & (HidNpadButton_L | HidNpadButton_R)) {
+    // Holding a direction walks the value at a usable speed instead of repeating
+    // at the display refresh rate.
+    if (held & (HidNpadButton_Up | HidNpadButton_Down | HidNpadButton_Right |
+            HidNpadButton_Left)) {
         g_test_strength_held_frames++;
 
         if (g_test_strength_held_frames >= TEST_STRENGTH_REPEAT_FRAMES) {
             g_test_strength_held_frames = 0;
 
-            if (held & HidNpadButton_L)
-                adjustTestStrength(-(int)TEST_STRENGTH_STEP);
-
-            if (held & HidNpadButton_R)
-                adjustTestStrength((int)TEST_STRENGTH_STEP);
+            adjustStrengthFromDirections(dglab, held);
         }
     } else {
         g_test_strength_held_frames = 0;
@@ -278,7 +305,8 @@ static DglabViewResult runSocketView(Service* dglab, PadState* pad)
         memset(&chunk, 0, sizeof(chunk));
 
         state.version = version;
-        state.test_strength = g_test_strength;
+        state.test_strength_a = g_test_strength_a;
+        state.test_strength_b = g_test_strength_b;
         state.log_lines = g_log_pointers;
         state.log_count = g_log_filled;
         state.url = url;

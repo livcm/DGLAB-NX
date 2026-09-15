@@ -3,9 +3,13 @@
 //
 // The font is libnx's default console font. Extract it once with:
 //
-//   cd /tmp && ar x /opt/devkitpro/libnx/lib/libnx.a default_font.bin.o
-//   aarch64-none-elf-objcopy -O binary --only-section=.rodata.default_font_bin \
-//       default_font.bin.o font.bin
+//   AR=$DEVKITPRO/devkitA64/bin/aarch64-none-elf-ar
+//   $AR p $DEVKITPRO/libnx/lib/libnx.a default_font.bin.o > default_font.bin.o
+//   $DEVKITPRO/devkitA64/bin/aarch64-none-elf-objcopy -O binary \
+//       --only-section=.rodata.default_font_bin default_font.bin.o font.bin
+//
+// Use devkitA64's ar rather than the host one: the host ar (llvm ar on macOS)
+// does not resolve this archive's member names and reports "not found".
 //
 // Then:
 //
@@ -139,7 +143,8 @@ int main(int argc, char** argv)
     state.status.app_limit_a = 80;
     state.status.app_limit_b = 80;
     state.status.app_feedback = DGLAB_NET_FEEDBACK_NONE;
-    state.test_strength = 20;
+    state.test_strength_a = 20;
+    state.test_strength_b = 0;
     state.log_lines = log_lines;
     state.log_count = 6;
 

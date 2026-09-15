@@ -213,11 +213,14 @@ freetype 之类的依赖：
 - 右侧：二维码 + 其内容（自动换行，模块大小按剩余高度自适应）；
 - 下方：sysmodule 日志（`NET_LOG` 增量读取），同时写入
   `sdmc:/switch/DGLAB-NX/dglab-net.log`，方便测试后把文件发回来；
-- 按键提示分两行（`A start`/`Y stop`/`X strength`/`B clear` 一行，`ZL pulse`/
-  `L/R value`/`- BLE poc`/`+ exit` 一行）：一行放不下，之前会把最后的 `+ exit`
+- 按键提示分两行（`A start`/`Y stop`/`B clear`/`ZL`+`ZR` 两个测试键一行，
+  `D-pad` 调强度/`- BLE poc`/`+ exit` 一行）：一行放不下，之前会把最后的 `+ exit`
   挤出屏幕；
-- 按键：`A` 启动服务端、`Y` 停止、`X` 测试强度、`B` 清空波形、`ZL` 测试波形、
-  `L`/`R` 调整测试强度、`-` 打开 BLE PoC 控制台视图、`+` 退出。
+- 按键：`A` 启动服务端、`Y` 停止、`B` 清空波形、`ZL` 测试通道 A、`ZR` 测试通道 B、
+  `↑`/`↓` 调通道 A 强度、`→`/`←` 调通道 B 强度（改完立刻发给 App）、`-` 打开
+  BLE PoC 控制台视图、`+` 退出；
+- 两个通道的强度各自独立、默认都是 0，并排在 `test` 行显示（`A n/100  B n/100`）；
+  服务端那栏的值列只有 21 个字符宽，`A 100/100  B 100/100` 正好是最宽的一行。
 
 BLE PoC 的控制台视图挪到了 `nro/source/ble_poc_view.c`：它需要独占屏幕和 console，
 所以进入前会释放 framebuffer，退出后再建。

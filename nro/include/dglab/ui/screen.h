@@ -22,7 +22,10 @@ typedef struct {
     bool url_ok;      // a QR payload is available
     const char* url;  // QR payload, see docs/dglab-socket.md
 
-    u32 test_strength; // channel strength used by X and ZL, raw device value (0..100)
+    // Channel strengths the test buttons send and the D-pad changes, raw device
+    // values (0..100), one per channel.
+    u32 test_strength_a;
+    u32 test_strength_b;
 
     const char* const* log_lines;
     int log_count;

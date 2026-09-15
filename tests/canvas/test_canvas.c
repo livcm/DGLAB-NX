@@ -185,6 +185,11 @@ static void testScreen(void)
     dglabCanvasInit(&canvas, screen_pixels, 1280, 720, 1280 * 4);
     dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
 
+    // drawLine in screen.c puts the value column 12 characters in and the server
+    // panel leaves room for 21, so the two strengths together are the widest
+    // string that has to fit.
+    CHECK(dglabCanvasTextWidth(&kFont, 1, "A 100/100  B 100/100") <= 21 * 16);
+
     memset(&state, 0, sizeof(state));
     state.status_ok = true;
     state.version.minor = 2;
@@ -199,7 +204,9 @@ static void testScreen(void)
     state.url = "https://www.dungeon-lab.com/app-download.php#DGLAB-SOCKET#"
                 "ws://10.0.0.2:9999/8f2a4c1e-9b77-4d21-8c3a-5e6f7a8b9c0d";
     state.url_ok = true;
-    state.test_strength = 15;
+    // Both channels at the widest the value column has to hold.
+    state.test_strength_a = 100;
+    state.test_strength_b = 100;
     state.log_lines = log_lines;
     state.log_count = 2;
 

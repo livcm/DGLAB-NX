@@ -223,10 +223,11 @@ static void drawStatus(DglabCanvas* canvas, const DglabFont* font, const DglabSc
         (status->last_result || status->last_error) ? kWarn : kMuted);
     y += LINE_HEIGHT;
 
-    // Raw device value, the same number the App shows: 0..100, above which the
+    // Raw device values, the same numbers the App shows: 0..100, above which the
     // official documentation only allows special cases.
-    snprintf(buffer, sizeof(buffer), "strength %u of 100", (unsigned)state->test_strength);
-    drawLine(canvas, font, x, y, "buttons", buffer, kMuted);
+    snprintf(buffer, sizeof(buffer), "A %u/100  B %u/100",
+        (unsigned)state->test_strength_a, (unsigned)state->test_strength_b);
+    drawLine(canvas, font, x, y, "test", buffer, kMuted);
 
     // While the server is up the sysmodule holds a listening socket, and this
     // console hangs if that happens across a sleep. Say so on screen.
@@ -351,9 +352,9 @@ static void drawFooter(DglabCanvas* canvas, const DglabFont* font)
     // Two lines: one line of hints is wider than the screen at 16 pixels per
     // character, which used to push the trailing "+ exit" off the edge.
     dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 56, 1,
-        "A start    Y stop    X strength    B clear", kText);
+        "A start    Y stop    B clear    ZL test ch A    ZR test ch B", kText);
     dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 32, 1,
-        "ZL test    L/R value    - BLE poc    + exit", kText);
+        "D-pad up/down ch A    left/right ch B    - BLE poc    + exit", kText);
 }
 
 void dglabScreenDraw(DglabCanvas* canvas, const DglabFont* font, const DglabScreenState* state)
