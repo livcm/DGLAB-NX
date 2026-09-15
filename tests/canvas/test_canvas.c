@@ -176,7 +176,13 @@ static void testQr(void)
 static void testScreen(void)
 {
     static uint8_t screen_pixels[1280 * 720 * 4];
-    static const char* log_lines[] = { "listening on port 9999", "app bound" };
+    // A full log panel: the newest line has to stay inside the panel too.
+    static const char* log_lines[DGLAB_SCREEN_LOG_LINES] = {
+        "listening on port 9999", "app bound", "socket server core ready",
+        "accept from 10.0.0.9", "websocket from 10.0.0.9, target '/8f2a4c1e'",
+        "app 3c71d0b2-4e55-4a9f-9f1b-2b3c4d5e6f70 bound", "tx heartbeat", "rx ping #1",
+        "waveform ch A, 48 slots", "tx clear-A", "tx waveform ch A, 32 slots", "tx waveform ch A, 16 slots",
+    };
     const uint32_t blue = DGLAB_RGBA(0, 0, 0xFF, 0xFF);
     DglabScreenState state;
     DglabCanvas canvas;
@@ -189,6 +195,9 @@ static void testScreen(void)
     // panel leaves room for 21, so the two strengths together are the widest
     // string that has to fit.
     CHECK(dglabCanvasTextWidth(&kFont, 1, "A 100/100  B 100/100") <= 21 * 16);
+    // Same budget for the command feedback line: "A test  ok (A is 0)" is the
+    // longest form main.c can build.
+    CHECK(dglabCanvasTextWidth(&kFont, 1, "A test  ok (A is 0)") <= 21 * 16);
 
     memset(&state, 0, sizeof(state));
     state.status_ok = true;
@@ -207,8 +216,10 @@ static void testScreen(void)
     // Both channels at the widest the value column has to hold.
     state.test_strength_a = 100;
     state.test_strength_b = 100;
+    state.last_command = "A test  ok (A is 0)";
+    state.last_command_tone = DglabCmdTone_Warn;
     state.log_lines = log_lines;
-    state.log_count = 2;
+    state.log_count = DGLAB_SCREEN_LOG_LINES;
 
     dglabScreenDraw(&canvas, &kFont, &state);
 

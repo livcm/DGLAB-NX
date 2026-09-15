@@ -22,6 +22,11 @@
 
 #define LOG_POLL_ROUNDS 2
 
+// The log is the only thing here that arrives continuously, and the file it is
+// mirrored to does not care about the display refresh rate: the log IPC calls
+// are spread over a few frames instead of running 60 times a second.
+#define LOG_POLL_INTERVAL_FRAMES 3
+
 // The sysmodule log is mirrored to the SD card, so a test run can be reported
 // back as a file instead of as a photo of the screen.
 #define DATA_DIR "sdmc:/switch/DGLAB-NX"
@@ -38,6 +43,17 @@ static int g_log_filled;
 static u32 g_log_cursor;
 static char g_partial[256];
 static size_t g_partial_len;
+// Bumped for every line the log ring takes in, so the view can tell that the
+// panel changed even when the ring is full and the line count stays the same.
+static u32 g_log_generation;
+// Text and tone for the "last cmd" line. Every command the buttons send answers
+// with a Result, and this end used to throw them away: pressing a test key with
+// no App bound, or with the server stopped, looked exactly like pressing it
+// successfully. The line is the only place a failed press can surface, because
+// the sysmodule has nothing to log when a request never left the console. It is
+// built here rather than in the screen code, which stays platform independent.
+static char g_last_command[40];
+static u32 g_last_command_tone;
 // The value the test buttons use is the raw channel strength, the same number
 // the App shows: 0..100 (the official documentation only allows more than 100
 // for special cases), one step per press and no wrap around. Each channel keeps
@@ -74,6 +90,8 @@ static void logPushLine(const char* line)
 
     memcpy(g_log_lines[DGLAB_SCREEN_LOG_LINES - 1], line, len);
     g_log_lines[DGLAB_SCREEN_LOG_LINES - 1][len] = '\0';
+
+    g_log_generation++;
 
     if (g_log_filled < DGLAB_SCREEN_LOG_LINES)
         g_log_filled++;
@@ -159,7 +177,42 @@ static void buildLogPointers(void)
 // IPC
 // ---------------------------------------------------------------------------
 
-static void sendTestCommand(Service* dglab, u32 command, u32 channel, u32 value)
+// Turns the Result of a command into the single line the screen shows. The
+// failures the buttons can actually cause are named; anything else is shown as a
+// hex code rather than guessed at. Keep the result under 21 characters: that is
+// what the value column of the panel holds.
+static void noteCommand(const char* what, Result result, const char* success_note)
+{
+    const char* outcome = NULL;
+
+    if (R_SUCCEEDED(result)) {
+        if (success_note)
+            snprintf(g_last_command, sizeof(g_last_command), "%s  ok (%s)", what, success_note);
+        else
+            snprintf(g_last_command, sizeof(g_last_command), "%s  ok", what);
+    } else {
+        if (R_DESCRIPTION(result) == LibnxError_NotFound)
+            outcome = "no app bound";
+        else if (R_DESCRIPTION(result) == LibnxError_BadInput)
+            outcome = "rejected";
+        else if (R_DESCRIPTION(result) == LibnxError_IoError)
+            outcome = "socket error";
+
+        if (outcome)
+            snprintf(g_last_command, sizeof(g_last_command), "%s  %s", what, outcome);
+        else
+            snprintf(g_last_command, sizeof(g_last_command), "%s  0x%08X", what, (unsigned)result);
+    }
+
+    if (R_FAILED(result))
+        g_last_command_tone = DglabCmdTone_Error;
+    else if (success_note)
+        g_last_command_tone = DglabCmdTone_Warn;
+    else
+        g_last_command_tone = DglabCmdTone_Ok;
+}
+
+static Result sendTestCommand(Service* dglab, u32 command, u32 channel, u32 value)
 {
     DglabNetSendRequest request = { 0 };
 
@@ -167,7 +220,7 @@ static void sendTestCommand(Service* dglab, u32 command, u32 channel, u32 value)
     request.channel = channel;
     request.value = value;
 
-    serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_SEND, request);
+    return serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_SEND, request);
 }
 
 // Queues one second of test waveform through the streaming path: 48 slots of
@@ -175,7 +228,7 @@ static void sendTestCommand(Service* dglab, u32 command, u32 channel, u32 value)
 // strength so the channel strength alone decides how strong it feels. The
 // waveform goes out on one channel; Replace mode makes every press start a fresh
 // gesture rather than queueing behind the previous one.
-static void sendTestWaveform(Service* dglab, u32 channel)
+static Result sendTestWaveform(Service* dglab, u32 channel)
 {
     DglabNetWaveformRequest request;
 
@@ -189,21 +242,26 @@ static void sendTestWaveform(Service* dglab, u32 channel)
         request.slots[i].strength = 100;
     }
 
-    serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_WAVEFORM, request);
+    return serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_WAVEFORM, request);
 }
 
 // Fires one channel: the waveform plus that channel's strength, so the button is
 // self contained even if the App reconnected since the strength last changed.
-static void testChannel(Service* dglab, u32 channel, u32 strength)
+static Result testChannel(Service* dglab, u32 channel, u32 strength)
 {
-    sendTestWaveform(dglab, channel);
-    sendTestCommand(dglab, DglabNetCommand_SetStrength, channel, strength);
+    Result rc = sendTestWaveform(dglab, channel);
+
+    if (R_FAILED(rc))
+        return rc;
+
+    return sendTestCommand(dglab, DglabNetCommand_SetStrength, channel, strength);
 }
 
 // Steps one channel's strength and sends it straight away - there is no separate
 // "send strength" button. Clamped instead of wrapping: at 0 a decrease does
-// nothing, at 100 an increase does nothing, and a clamped step sends nothing.
-static void adjustStrength(Service* dglab, u32 channel, u32* value, int delta)
+// nothing, at 100 an increase does nothing, and a clamped step sends nothing (so
+// there is nothing to report either).
+static bool adjustStrength(Service* dglab, u32 channel, u32* value, int delta, Result* out)
 {
     int next = (int)*value + delta;
 
@@ -214,27 +272,35 @@ static void adjustStrength(Service* dglab, u32 channel, u32* value, int delta)
         next = (int)TEST_STRENGTH_MAX;
 
     if ((u32)next == *value)
-        return;
+        return false;
 
     *value = (u32)next;
-    sendTestCommand(dglab, DglabNetCommand_SetStrength, channel, *value);
+    *out = sendTestCommand(dglab, DglabNetCommand_SetStrength, channel, *value);
+
+    return true;
 }
 
 // The D-pad is the mixer: the vertical axis dials channel A, the horizontal one
 // dials channel B. Used for the first press and, at a slower rate, while held.
 static void adjustStrengthFromDirections(Service* dglab, u64 buttons)
 {
-    if (buttons & HidNpadButton_Up)
-        adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, (int)TEST_STRENGTH_STEP);
+    Result rc;
 
-    if (buttons & HidNpadButton_Down)
-        adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, -(int)TEST_STRENGTH_STEP);
+    if (buttons & HidNpadButton_Up &&
+        adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, (int)TEST_STRENGTH_STEP, &rc))
+        noteCommand("A up", rc, NULL);
 
-    if (buttons & HidNpadButton_Right)
-        adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, (int)TEST_STRENGTH_STEP);
+    if (buttons & HidNpadButton_Down &&
+        adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, -(int)TEST_STRENGTH_STEP, &rc))
+        noteCommand("A down", rc, NULL);
 
-    if (buttons & HidNpadButton_Left)
-        adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, -(int)TEST_STRENGTH_STEP);
+    if (buttons & HidNpadButton_Right &&
+        adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, (int)TEST_STRENGTH_STEP, &rc))
+        noteCommand("B up", rc, NULL);
+
+    if (buttons & HidNpadButton_Left &&
+        adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, -(int)TEST_STRENGTH_STEP, &rc))
+        noteCommand("B down", rc, NULL);
 }
 
 static void handleButtons(Service* dglab, u64 down, u64 held)
@@ -242,23 +308,26 @@ static void handleButtons(Service* dglab, u64 down, u64 held)
     if (down & HidNpadButton_A) {
         DglabNetStartRequest request = { 0 };
 
-        serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_START, request);
+        noteCommand("start", serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_START, request), NULL);
     }
 
     if (down & HidNpadButton_Y)
-        serviceDispatch(dglab, DGLAB_IPC_CMD_NET_STOP);
+        noteCommand("stop", serviceDispatch(dglab, DGLAB_IPC_CMD_NET_STOP), NULL);
 
     if (down & HidNpadButton_B)
-        sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0);
+        noteCommand("clear", sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
 
     // One trigger per channel: a waveform without a strength does nothing on the
     // device, and a strength without a waveform is just as silent, so each button
-    // sends both for its own channel.
+    // sends both for its own channel. A test at strength 0 is legal and answers
+    // ok, so it says why nothing came out instead of leaving the screen alone.
     if (down & HidNpadButton_ZL)
-        testChannel(dglab, TEST_CHANNEL_A, g_test_strength_a);
+        noteCommand("A test", testChannel(dglab, TEST_CHANNEL_A, g_test_strength_a),
+            g_test_strength_a ? NULL : "A is 0");
 
     if (down & HidNpadButton_ZR)
-        testChannel(dglab, TEST_CHANNEL_B, g_test_strength_b);
+        noteCommand("B test", testChannel(dglab, TEST_CHANNEL_B, g_test_strength_b),
+            g_test_strength_b ? NULL : "B is 0");
 
     adjustStrengthFromDirections(dglab, down);
 
@@ -282,12 +351,53 @@ static void handleButtons(Service* dglab, u64 down, u64 held)
 // The view
 // ---------------------------------------------------------------------------
 
+// Everything the screen draws, so the loop can tell whether redrawing is worth
+// it. A full 1280x720 frame plus the QR code is expensive, and the panel only
+// changes when one of these does.
+typedef struct {
+    DglabIpcVersion version;
+    DglabNetStatus status;
+    bool status_ok;
+    bool url_ok;
+    char url[DGLAB_NET_QR_MAX];
+    u32 test_strength_a;
+    u32 test_strength_b;
+    char last_command[sizeof(g_last_command)];
+    u32 last_command_tone;
+    int log_count;
+    u32 log_generation;
+} DglabScreenSnapshot;
+
+static void snapshotFromState(DglabScreenSnapshot* out, const DglabScreenState* state)
+{
+    memset(out, 0, sizeof(*out));
+
+    out->version = state->version;
+    out->status = state->status;
+    out->status_ok = state->status_ok;
+    out->url_ok = state->url_ok;
+    out->test_strength_a = state->test_strength_a;
+    out->test_strength_b = state->test_strength_b;
+    out->last_command_tone = state->last_command_tone;
+    out->log_count = state->log_count;
+    out->log_generation = g_log_generation;
+
+    snprintf(out->last_command, sizeof(out->last_command), "%s",
+        state->last_command ? state->last_command : "");
+
+    if (state->url)
+        snprintf(out->url, sizeof(out->url), "%s", state->url);
+}
+
 static DglabViewResult runSocketView(Service* dglab, PadState* pad)
 {
     const DglabFont* font = dglabFramebufferFont();
     DglabIpcVersion version = { 0 };
+    DglabScreenSnapshot snapshot;
+    bool have_snapshot = false;
     char url[DGLAB_NET_QR_MAX];
     bool url_ok = false;
+    u32 frame = 0;
 
     url[0] = '\0';
 
@@ -305,19 +415,21 @@ static DglabViewResult runSocketView(Service* dglab, PadState* pad)
         memset(&chunk, 0, sizeof(chunk));
 
         state.version = version;
-        state.test_strength_a = g_test_strength_a;
-        state.test_strength_b = g_test_strength_b;
-        state.log_lines = g_log_pointers;
-        state.log_count = g_log_filled;
         state.url = url;
         state.url_ok = url_ok;
 
         state.status_ok =
             R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, state.status));
 
-        logPoll(dglab);
-        buildLogPointers();
+        // The log is the one thing that arrives continuously, and the file it is
+        // mirrored to does not care about 60Hz: polling every few frames keeps
+        // the IPC traffic down without a visible delay.
+        if (++frame % LOG_POLL_INTERVAL_FRAMES == 1) {
+            logPoll(dglab);
+            buildLogPointers();
+        }
 
+        state.log_lines = g_log_pointers;
         state.log_count = g_log_filled;
 
         if (R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_QR, chunk))) {
@@ -339,12 +451,26 @@ static DglabViewResult runSocketView(Service* dglab, PadState* pad)
 
         handleButtons(dglab, down, padGetButtons(pad));
 
-        {
+        // Read after the buttons are handled, so a press shows up in the same
+        // frame it happened.
+        state.test_strength_a = g_test_strength_a;
+        state.test_strength_b = g_test_strength_b;
+        state.last_command = g_last_command;
+        state.last_command_tone = g_last_command_tone;
+
+        DglabScreenSnapshot candidate;
+
+        snapshotFromState(&candidate, &state);
+
+        if (!have_snapshot || memcmp(&candidate, &snapshot, sizeof(candidate)) != 0) {
             DglabCanvas canvas;
 
             if (dglabFramebufferBegin(&canvas)) {
                 dglabScreenDraw(&canvas, font, &state);
                 dglabFramebufferEnd();
+
+                snapshot = candidate;
+                have_snapshot = true;
             }
         }
     }

@@ -145,6 +145,8 @@ int main(int argc, char** argv)
     state.status.app_feedback = DGLAB_NET_FEEDBACK_NONE;
     state.test_strength_a = 20;
     state.test_strength_b = 0;
+    state.last_command = "A test  ok (A is 0)";
+    state.last_command_tone = DglabCmdTone_Warn;
     state.log_lines = log_lines;
     state.log_count = 6;
 

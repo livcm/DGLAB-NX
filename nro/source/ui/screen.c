@@ -11,8 +11,10 @@
 #define GAP 16
 #define TITLE_HEIGHT 56
 #define STATUS_WIDTH 560
-#define STATUS_HEIGHT 300
-#define LOG_HEIGHT 260
+// Sized so the panels hold their content: the status panel's ten rows plus the
+// one-line sleep warning, and the log panel's DGLAB_SCREEN_LOG_LINES rows.
+#define STATUS_HEIGHT 272
+#define LOG_HEIGHT 280
 #define LINE_HEIGHT 20
 #define LOG_CHARS ((STATUS_WIDTH - 32) / 16)
 #define QR_QUIET_ZONE 4
@@ -205,14 +207,6 @@ static void drawStatus(DglabCanvas* canvas, const DglabFont* font, const DglabSc
     drawLine(canvas, font, x, y, "app report", buffer, kText);
     y += LINE_HEIGHT;
 
-    if (status->app_feedback == DGLAB_NET_FEEDBACK_NONE)
-        snprintf(buffer, sizeof(buffer), "-");
-    else
-        snprintf(buffer, sizeof(buffer), "%u", (unsigned)status->app_feedback);
-
-    drawLine(canvas, font, x, y, "feedback", buffer, kText);
-    y += LINE_HEIGHT;
-
     if (status->last_result)
         snprintf(buffer, sizeof(buffer), "0x%08X", (unsigned)status->last_result);
     else if (status->last_error)
@@ -222,6 +216,25 @@ static void drawStatus(DglabCanvas* canvas, const DglabFont* font, const DglabSc
 
     drawLine(canvas, font, x, y, "last issue", buffer,
         (status->last_result || status->last_error) ? kWarn : kMuted);
+    y += LINE_HEIGHT;
+
+    // What the buttons sent last. Without this line a press that never reached
+    // the App - no App bound, server stopped - was indistinguishable from a
+    // successful one, which is exactly how the first hardware runs were debugged
+    // the hard way.
+    if (state->last_command && state->last_command[0]) {
+        uint32_t tone = kText;
+
+        if (state->last_command_tone == DglabCmdTone_Warn)
+            tone = kWarn;
+        else if (state->last_command_tone == DglabCmdTone_Error)
+            tone = kError;
+
+        drawLine(canvas, font, x, y, "last cmd", state->last_command, tone);
+    } else {
+        drawLine(canvas, font, x, y, "last cmd", "-", kMuted);
+    }
+
     y += LINE_HEIGHT;
 
     // The channel strengths the test buttons send. Raw device values, the same
@@ -234,11 +247,12 @@ static void drawStatus(DglabCanvas* canvas, const DglabFont* font, const DglabSc
     drawLine(canvas, font, x, y, "strength", buffer, kMuted);
 
     // While the server is up the sysmodule holds a listening socket, and this
-    // console hangs if that happens across a sleep. Say so on screen.
+    // console hangs if that happens across a sleep. Say so on screen: one line,
+    // the panel has no room for the full explanation (docs/dglab-socket.md).
     if (status->state == DglabNetState_Listening || status->state == DglabNetState_Paired) {
         y += LINE_HEIGHT;
         drawWrapped(canvas, font, x, y, (STATUS_WIDTH - 32) / 16,
-            "do not sleep the console while the server runs: press Y first.", kWarn);
+            "do not sleep: press Y first", kWarn);
     }
 }
 
