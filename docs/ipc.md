@@ -133,8 +133,6 @@ cursor = chunk.next_cursor;
 落后太多时游标会被夹到最旧的可用位置，因此读到的是“还留在环里的最新内容”，不会
 报错。每块最多 `DGLAB_NET_LOG_CHUNK_SIZE` 字节，读到 `size == 0` 说明已经追平。
 
-## 临时命令
-
 ## NET_WAVEFORM（事件源上传波形）
 
 App 收到一段 `pulse` 后**播完就停**，所以连续波形必须由我们持续供给。事件源（游戏
@@ -158,6 +156,8 @@ Mod、手柄传感器）用这个命令把波形槽位交给 sysmodule，由 sys
 下一次上传补齐。队列每通道 128 个槽位（3.2 秒），溢出时丢弃最旧的并记一行日志。
 
 `NET_SEND` 的 `Clear` 会同时清空这两个队列，所以"停止"按钮能把流停干净。
+
+## 临时命令
 
 BLE 直连 PoC 的命令（`DGLAB_IPC_POC_*`）保留在 `common/include/dglab/ipc_poc.h`，
 用于 `docs/ble-poc.md` 里描述的实机诊断。BLE 路线已经搁置，这些命令不是稳定契约，

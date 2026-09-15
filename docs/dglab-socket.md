@@ -277,8 +277,6 @@ socket、服务线程、PSC 注册全部放在 `dglabNetSocketStart()` 里，也
 | 收到 `break` | 解除绑定，回到 `Listening`，等 App 重连 |
 | 收到未知 `msg` 指令 | 记日志后忽略，不报错（App 版本比本实现新时不应断线） |
 
-### 测试按键为什么需要同时发强度和波形
-
 ### 事件 → 波形：本项目真正的用途
 
 **强度由用户设定，波形值由事件源设定。** 强度相当于音量旋钮（用户在 App 或 NRO 上设一次
@@ -428,8 +426,8 @@ make -C tests/net        # 内存级协议测试 + 真实回环 TCP 端到端测
 1. Switch 与手机连同一个局域网；
 2. NRO 显示地址与二维码，用 DG-LAB App 扫码；
 3. 期望 `NET_STATUS.state` 变成 `Paired`、`peer_id` 非空、App 界面显示已连接；
-4. 用 `NET_SEND` 的测试按钮看强度/清空是否生效；
-5. 观察 `NET_LOG` 里的收发记录，据此修正上面 1、2、3 三条约定。
+4. 用测试按键确认：`ZL` 走波形流（1.2 秒测试波形 + 设置强度）、`X` 只设强度、`B` 清空；
+5. 观察 `NET_LOG` 里的收发记录。
 
 NRO 会把 `NET_LOG` 同步写到 `sdmc:/switch/DGLAB-NX/dglab-net.log`（打不开时退到
 `sdmc:/dglab-net.log`），实机测试后直接把这个文件发回来即可。
