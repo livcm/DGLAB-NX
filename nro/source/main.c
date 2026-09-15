@@ -49,6 +49,9 @@ static size_t g_partial_len;
 #define TEST_STRENGTH_REPEAT_FRAMES 6
 static u32 g_test_strength = 10;
 static int g_test_strength_held_frames;
+// Temporary: the App accepts the binding but ignores our commands, so the shape
+// of the command is selectable to find the one it wants (see docs).
+static u32 g_variant;
 static FILE* g_log_file;
 // ---------------------------------------------------------------------------
 // Log ring
@@ -159,6 +162,7 @@ static void sendTestCommand(Service* dglab, u32 command, u32 channel, u32 value)
     request.command = command;
     request.channel = channel;
     request.value = value;
+    request.pad = g_variant;
 
     serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_SEND, request);
 }
@@ -203,6 +207,9 @@ static void handleButtons(Service* dglab, u64 down, u64 held)
         sendTestCommand(dglab, DglabNetCommand_TestPulse, 0, TEST_STRENGTH_MAX);
         sendTestCommand(dglab, DglabNetCommand_SetStrength, 0, g_test_strength);
     }
+
+    if (down & HidNpadButton_ZR)
+        g_variant = (g_variant + 1u) % 6u;
 
     if (down & HidNpadButton_L)
         adjustTestStrength(-(int)TEST_STRENGTH_STEP);
@@ -257,6 +264,7 @@ static DglabViewResult runSocketView(Service* dglab, PadState* pad)
 
         state.version = version;
         state.test_strength = g_test_strength;
+        state.variant = g_variant;
         state.log_lines = g_log_pointers;
         state.log_count = g_log_filled;
         state.url = url;
