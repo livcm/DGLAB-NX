@@ -96,6 +96,9 @@ sysmodule 带 `flags/boot2.flag`（`toolbox.json` 里也是 `requires_reboot: tr
 3. 用 DG-LAB App 扫码接入（App 是 WebSocket 客户端）；
 4. 用测试按键确认设备有输出。
 
+按了没反应先看界面上的 `last cmd` 行：它显示最近一次按键的结果（`ok` / `no app bound`
+/ `socket error`），红色是失败、黄色是"命令发出去了但听不到"（那一路强度还是 0）。
+
 | 按键 | 动作 |
 | --- | --- |
 | `A` | 启动 WebSocket 服务端 |

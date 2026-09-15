@@ -151,6 +151,42 @@
 后端先实现 libnx framebuffer。这样将来换 deko3d 只是"再实现一个 canvas 后端"，
 UI 逻辑一行都不用动。按这个结构估计：路线 A 约半天，路线 B 约 1~2 天，路线 C 是另立项目。
 
+### 2026-09-15 复核：结论是"先不做"
+
+分层建议已经落地（`nro/source/ui/canvas.c` 是绘制层，`nro/source/platform/framebuffer.c`
+是后端），所以真要迁的时候成本比上面估的还低。但复核后**当前不值得做**：
+
+| 想要的收益 | deko3d 能给吗 | 现有方案够不够 |
+| --- | --- | --- |
+| 省 CPU | 能（GPU 合成） | 已解决：界面改成按需重绘，状态不变就不 Begin/End |
+| 双缓冲 / vsync | 能 | libnx 的 `framebufferCreate` 已是 2 缓冲 + `framebufferEnd` 提交 |
+| dock 1080p 清晰度 | 能 | 未定：`framebufferCreate` 能否直接开 1920×1080 还没实测（见"实机待确认"第 4 条）；若可行，缺的只是布局缩放，与渲染后端无关 |
+| 动画 / 实时曲线 | 能（着色器、批绘） | 目前没有需求：静态文字 + 一个二维码 |
+| 文字渲染 | **不能**：deko3d 是 GPU API，字体光栅化仍要自己解决 | 现成的 16×16 位图字体够用 |
+
+复核时实测了工具链，确认"要做就能做"（这是成本证据，不是该做的理由）：
+
+- `deko3d 0.5.0` 已安装：头文件 `libnx/include/deko3d.h`，库 `libnx/lib/libdeko3d.a`
+  （另有 `libdeko3dd.a`）；
+- 着色器编译器是 `uam -s vert|frag …`（在 `tools/bin`），实测能把示例的 `.glsl`
+  编成 `.dksh`；
+- 官方示例 `examples/switch/graphics/deko3d/deko_basic` 在本机**完整构建通过**
+  （device → linear image → swapchain → RomFS(shaders) → `.nro`）；
+- `dkCmdBufCopyBufferToImage` 与 `dkCmdBufBlitImage`（带线性过滤标志）都在
+  `deko3d.h` 里，所以"canvas 上传成纹理再缩放到 swapchain"这条**不用写着色器**；
+- 示例的 `graphicsInitialize()` 没有额外的服务初始化（不需要手工 `nvInitialize`），
+  窗口仍是 `nwindowGetDefault()`，主循环与输入代码不用改。
+
+触发条件（满足任一条再启动；届时走路线 A：只加后端，`screen.c` 不动）：
+
+1. 优先级 8 的 Joy-Con 传感器要在屏幕上显示**实时**波形/曲线；
+2. dock 1080p 的清晰度或缩放成为实际痛点，而"canvas 按分辨率缩放"解决不了；
+3. 需要成套动画/过渡，或要把位图字体换成矢量字体的观感。
+
+优先级位置：**不插入 1–12 的编号**，当作第 9 项（基础 UI）之后的增强。顺序上建议在
+第 8、9 项完成之后、第 10 项（Overlay）开工之前评估一次——"要不要 GPU"取决于前两项
+最终要画什么；而 Overlay 是另一个进程里的另一套渲染，两者互不影响。
+
 ---
 
 ## 实现记录（优先级 5.4）
@@ -210,9 +246,18 @@ freetype 之类的依赖：
 - 服务器状态：状态、局域网地址、控制器 uuid、App uuid、连接/指令/上报计数、
   App 上报的强度与上限、最近一次协议错误；端口号显示在标题栏（值那一列只有 21 个
   字符宽，`192.168.1.161:9999` 正好占满）；
+- `last cmd` 行是最近一次按键命令的结果（`A test  ok`、`clear  no app bound`、
+  `A test  ok (A is 0)`，失败为红色、空通道为黄色）：sysmodule 是设备链路的唯一
+  所有者，命令没送出去时那边没有任何日志，这一行是唯一能看到原因的地方。
+  以前所有按键的 `Result` 都被丢掉，"按了没反应"和"按成功了"在屏幕上完全一样；
+- App 的 `feedback` 字段（`DGLAB_NET_FEEDBACK_*`）不再单独占一行：3.0 App 是单向的，
+  它永远是 `none`。字段仍在 `NET_STATUS` 里，将来有 App 上报再恢复那一行；
 - 右侧：二维码 + 其内容（自动换行，模块大小按剩余高度自适应）；
 - 下方：sysmodule 日志（`NET_LOG` 增量读取），同时写入
   `sdmc:/switch/DGLAB-NX/dglab-net.log`，方便测试后把文件发回来；
+- 重绘策略：状态、二维码、强度和 `last cmd` 打包成快照，只有快照变化才
+  `framebufferBegin/End`（整屏 1280×720 + 二维码以前是每帧都画）；日志轮询也从每帧
+  降到每 3 帧一次（约 20Hz），SD 卡上的日志文件不受影响；
 - 按键提示分两行（`A start`/`Y stop`/`B clear`/`ZL`+`ZR` 两个测试键一行，
   `D-pad` 调强度/`- BLE poc`/`+ exit` 一行）：一行放不下，之前会把最后的 `+ exit`
   挤出屏幕；
@@ -246,6 +291,8 @@ tests/canvas/tools/render_preview.c   # 用法见文件头部注释
 2. 二维码在真实屏幕上以 8~10 像素/模块渲染时的扫码成功率；
 3. 手柄按键提示是否符合实际使用习惯；
 4. 1080p dock 模式下 `nwindowGetDefault()` 的分辨率（当前按 720p 固定布局）。
+5. 按需重绘：不调用 `framebufferBegin/End` 的那些帧，实机上画面应当保持不动
+   （而不是闪烁或变黑）。这一条只有实机能验，电脑上只能验证布局与像素。
 
 如果没有 sysmodule，或者 framebuffer 建不起来，NRO **不使用 framebuffer**，而是走
 console（`consoleInit` + `printf` + 等 `+` 退出）打印服务名、`smGetService` 的返回值
