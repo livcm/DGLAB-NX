@@ -38,7 +38,17 @@ static int g_log_filled;
 static u32 g_log_cursor;
 static char g_partial[256];
 static size_t g_partial_len;
+// The value the test buttons use is the raw channel strength, the same number
+// the App shows: 0..100 (the official documentation only allows more than 100
+// for special cases), one step per press and no wrap around.
+#define TEST_STRENGTH_MIN 0u
+#define TEST_STRENGTH_MAX 100u
+#define TEST_STRENGTH_STEP 1u
+
+// Held buttons repeat at a usable rate; the UI loop runs at the display refresh.
+#define TEST_STRENGTH_REPEAT_FRAMES 6
 static u32 g_test_strength = 10;
+static int g_test_strength_held_frames;
 static FILE* g_log_file;
 // ---------------------------------------------------------------------------
 // Log ring
@@ -153,7 +163,22 @@ static void sendTestCommand(Service* dglab, u32 command, u32 channel, u32 value)
     serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_SEND, request);
 }
 
-static void handleButtons(Service* dglab, u64 down)
+// Steps the channel strength, clamped instead of wrapping: at 0 a decrease does
+// nothing, at 100 an increase does nothing.
+static void adjustTestStrength(int delta)
+{
+    int value = (int)g_test_strength + delta;
+
+    if (value < (int)TEST_STRENGTH_MIN)
+        value = (int)TEST_STRENGTH_MIN;
+
+    if (value > (int)TEST_STRENGTH_MAX)
+        value = (int)TEST_STRENGTH_MAX;
+
+    g_test_strength = (u32)value;
+}
+
+static void handleButtons(Service* dglab, u64 down, u64 held)
 {
     if (down & HidNpadButton_A) {
         DglabNetStartRequest request = { 0 };
@@ -170,14 +195,38 @@ static void handleButtons(Service* dglab, u64 down)
     if (down & HidNpadButton_B)
         sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0);
 
-    if (down & HidNpadButton_ZL)
-        sendTestCommand(dglab, DglabNetCommand_TestPulse, 0, g_test_strength);
+    // One button for the whole test: a waveform without a strength does nothing
+    // on the device, and a strength without a waveform is just as silent. The
+    // waveform carries its full strength so the channel strength alone decides
+    // how strong the test feels.
+    if (down & HidNpadButton_ZL) {
+        sendTestCommand(dglab, DglabNetCommand_TestPulse, 0, TEST_STRENGTH_MAX);
+        sendTestCommand(dglab, DglabNetCommand_SetStrength, 0, g_test_strength);
+    }
 
     if (down & HidNpadButton_L)
-        g_test_strength = (g_test_strength > 5) ? g_test_strength - 5 : 100;
+        adjustTestStrength(-(int)TEST_STRENGTH_STEP);
 
     if (down & HidNpadButton_R)
-        g_test_strength = (g_test_strength < 100) ? g_test_strength + 5 : 5;
+        adjustTestStrength((int)TEST_STRENGTH_STEP);
+
+    // Holding L/R walks the value at a usable speed instead of repeating at the
+    // display refresh rate.
+    if (held & (HidNpadButton_L | HidNpadButton_R)) {
+        g_test_strength_held_frames++;
+
+        if (g_test_strength_held_frames >= TEST_STRENGTH_REPEAT_FRAMES) {
+            g_test_strength_held_frames = 0;
+
+            if (held & HidNpadButton_L)
+                adjustTestStrength(-(int)TEST_STRENGTH_STEP);
+
+            if (held & HidNpadButton_R)
+                adjustTestStrength((int)TEST_STRENGTH_STEP);
+        }
+    } else {
+        g_test_strength_held_frames = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +287,7 @@ static DglabViewResult runSocketView(Service* dglab, PadState* pad)
         if (down & HidNpadButton_Minus)
             return DglabView_BlePoc;
 
-        handleButtons(dglab, down);
+        handleButtons(dglab, down, padGetButtons(pad));
 
         {
             DglabCanvas canvas;

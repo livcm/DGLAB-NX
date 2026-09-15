@@ -217,7 +217,9 @@ static void drawStatus(DglabCanvas* canvas, const DglabFont* font, const DglabSc
         (status->last_result || status->last_error) ? kWarn : kMuted);
     y += LINE_HEIGHT;
 
-    snprintf(buffer, sizeof(buffer), "test strength %u", (unsigned)state->test_strength);
+    // Raw device value, the same number the App shows: 0..100, above which the
+    // official documentation only allows special cases.
+    snprintf(buffer, sizeof(buffer), "strength %u of 100", (unsigned)state->test_strength);
     drawLine(canvas, font, x, y, "buttons", buffer, kMuted);
 
     // While the server is up the sysmodule holds a listening socket, and this
