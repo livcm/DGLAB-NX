@@ -483,6 +483,28 @@ static void testCommands(void)
     CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
     CHECK(contains(frame, "\"message\":\"clear-2\""));
 
+    // Relative changes: an event source says "a bit more" without knowing the
+    // current level.
+    request.command = DglabNetCommand_IncreaseStrength;
+    request.channel = 1;
+    request.value = 5;
+    link.tx_size = 0;
+    CHECK(dglabNetServerSend(&harness.server, &request) == DglabNetSend_Ok);
+    CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"strength-1+1+5\""));
+
+    request.command = DglabNetCommand_DecreaseStrength;
+    request.channel = 0;
+    link.tx_size = 0;
+    CHECK(dglabNetServerSend(&harness.server, &request) == DglabNetSend_Ok);
+    CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"strength-1+0+5\""));
+    CHECK(payloadAt(&link, 1, frame, sizeof(frame)));
+    CHECK(contains(frame, "\"message\":\"strength-2+0+5\""));
+
+    request.value = DGLAB_COYOTE_V3_STRENGTH_MAX + 1;
+    CHECK(dglabNetServerSend(&harness.server, &request) == DglabNetSend_BadRequest);
+
     request.command = DglabNetCommand_TestPulse;
     request.channel = 1;
     request.value = 20;

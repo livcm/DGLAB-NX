@@ -63,6 +63,10 @@ typedef enum {
     DglabNetCommand_SetStrength = 1, ///< value = strength 0..200, channel 0 = both
     DglabNetCommand_Clear       = 2, ///< Clear the waveform queue, channel 0 = both
     DglabNetCommand_TestPulse   = 3, ///< Built in test waveform, value = waveform strength 0..100 (0 selects 10)
+    // Relative changes, for event sources that should not have to track the
+    // current strength themselves ("the character took a hit: +5").
+    DglabNetCommand_IncreaseStrength = 4, ///< value = delta, channel 0 = both
+    DglabNetCommand_DecreaseStrength = 5, ///< value = delta, channel 0 = both
 } DglabNetCommand;
 
 typedef struct {

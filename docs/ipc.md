@@ -84,6 +84,20 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 | `channel` | `1` = A，`2` = B，`0` = 两个通道 |
 | `value` | `SetStrength`：0..200；`TestPulse`：波形强度 0..100，0 表示用默认的 10 |
 
+`command` 的完整取值：
+
+| 取值 | 含义 |
+| --- | --- |
+| `DglabNetCommand_SetStrength` | 把通道强度设为 `value`（0..200，原始值） |
+| `DglabNetCommand_IncreaseStrength` | 通道强度相对增加 `value` |
+| `DglabNetCommand_DecreaseStrength` | 通道强度相对减少 `value` |
+| `DglabNetCommand_Clear` | 清空该通道波形队列（`value` 忽略） |
+| `DglabNetCommand_TestPulse` | 送一段内置测试波形，`value` = 波形强度 0..100 |
+
+相对增减是给**事件源**用的：游戏 Mod / NRO 只需要说"受击了，+5"，不必自己维护当前强度
+（App 是单向的，它不会把强度回报给我们）。真正的强度曲线（衰减、连击加成之类）由事件源
+自己决定，sysmodule 只负责把它变成协议指令。
+
 `TestPulse` 发送的是内置的短测试波形（8 个 100ms 元素，固定频率），用来验证
 “sysmodule → 服务端 → App”整条链路，不是给实际游戏使用的接口。真正的波形数据
 接入按 AGENTS.md 的优先级 6 再做。

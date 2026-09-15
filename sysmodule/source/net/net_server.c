@@ -654,6 +654,30 @@ DglabNetSendResult dglabNetServerSend(DglabNetServer* server, const DglabNetSend
             }
             break;
 
+        case DglabNetCommand_IncreaseStrength:
+        case DglabNetCommand_DecreaseStrength:
+            // The protocol calls these relative changes: the App adds or
+            // subtracts the value from whatever the channel is set to, so an
+            // event source can react without knowing the current level.
+            if (request->value > DGLAB_COYOTE_V3_STRENGTH_MAX)
+                return DglabNetSend_BadRequest;
+
+            for (size_t i = 0; i < channel_count && result == DglabNetSend_Ok; i++) {
+                DglabSocketStrengthOp op = (request->command == DglabNetCommand_IncreaseStrength)
+                                               ? DglabSocketStrength_Increase
+                                               : DglabSocketStrength_Decrease;
+                size_t len = dglabSocketBuildStrength(command, sizeof(command), channels[i], op,
+                    (int)request->value);
+
+                if (len == 0) {
+                    result = DglabNetSend_TooLong;
+                    break;
+                }
+
+                result = sendCommand(server, client, command);
+            }
+            break;
+
         case DglabNetCommand_TestPulse:
             if (request->value > DGLAB_COYOTE_V3_WAVEFORM_STRENGTH_MAX)
                 return DglabNetSend_BadRequest;
