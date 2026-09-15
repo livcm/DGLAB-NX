@@ -13,7 +13,7 @@ DG-LAB App 扫码接入，BLE 由手机负责，Switch 不直接持有蓝牙连�
 | 组件 | 状态 |
 | --- | --- |
 | `sysmodule/` DG-LAB 服务（服务名 `dglab`，Title ID `0x00FF072107210721`） | 可用：Coyote V3 协议层 + Wi-Fi/WebSocket 服务端 + IPC |
-| `nro/` 前端 | 可用：显示局域网地址与二维码、发测试指令、读服务端日志 |
+| `nro/` 前端 | 可用：菜单选择玩法——测试屏（地址/二维码/测试键/日志）与体感玩法（Joy-Con 驱动波形） |
 | `overlay/` | 未实现 |
 | `mods/` | 未实现 |
 | 主机侧 BLE 直连 | 已搁置，见 `docs/ble-poc.md` |
@@ -92,9 +92,13 @@ sysmodule 带 `flags/boot2.flag`（`toolbox.json` 里也是 `requires_reboot: tr
 ## 使用
 
 1. Switch 与手机连同一个局域网；
-2. 打开 `DGLAB-NX.nro`，界面显示局域网地址与二维码；
+2. 打开 `DGLAB-NX.nro`，菜单里选 `Socket test`，界面显示局域网地址与二维码；
 3. 用 DG-LAB App 扫码接入（App 是 WebSocket 客户端）；
 4. 用测试按键确认设备有输出。
+
+菜单里的 `Motion (Joy-Con)` 是另一个玩法：左右 Joy-Con 分别驱动 A / B 通道，动得越快
+波形值越大、脉冲越密；通道强度仍然是上面的"音量"。做法与参数见
+`docs/joycon-input.md`。
 
 按了没反应先看界面上的 `last cmd` 行：它显示最近一次按键的结果（`ok` / `no app bound`
 / `socket error`），红色是失败、黄色是"命令发出去了但听不到"（那一路强度还是 0）。

@@ -7,6 +7,8 @@
 // Run with: make -C tests/canvas
 
 #include <dglab/ui/canvas.h>
+#include <dglab/ui/menu.h>
+#include <dglab/ui/motion.h>
 #include <dglab/ui/screen.h>
 
 #include <stdio.h>
@@ -14,6 +16,23 @@
 
 static int g_checks;
 static int g_failures;
+
+// Counts the pixels a screen changed away from the background it was filled
+// with, which is how these tests notice a screen that drew nothing at all.
+static int countChangedPixels(const uint8_t* pixels, size_t size, uint32_t background)
+{
+    int changed = 0;
+
+    for (size_t i = 0; i + 3 < size; i += 4) {
+        uint32_t pixel = ((uint32_t)pixels[i] << 24) | ((uint32_t)pixels[i + 1] << 16) |
+                         ((uint32_t)pixels[i + 2] << 8) | pixels[i + 3];
+
+        if (pixel != background)
+            changed++;
+    }
+
+    return changed;
+}
 
 #define CHECK(condition)                                                \
     do {                                                                \
@@ -223,17 +242,80 @@ static void testScreen(void)
 
     dglabScreenDraw(&canvas, &kFont, &state);
 
-    for (size_t i = 0; i < sizeof(screen_pixels); i += 4) {
-        uint32_t pixel = ((uint32_t)screen_pixels[i] << 24) |
-                         ((uint32_t)screen_pixels[i + 1] << 16) |
-                         ((uint32_t)screen_pixels[i + 2] << 8) | screen_pixels[i + 3];
-
-        if (pixel != blue)
-            changed++;
-    }
+    changed = countChangedPixels(screen_pixels, sizeof(screen_pixels), blue);
 
     // The chrome fills most of the screen, but the corners keep the background
     // and the code must not have run off the end of the buffer.
+    CHECK(changed > 1280 * 720 / 2);
+}
+
+// The mode menu: every entry draws, the selection wraps both ways, and a full
+// circle of moves comes back to where it started.
+static void testMenu(void)
+{
+    static uint8_t screen_pixels[1280 * 720 * 4];
+    const uint32_t blue = DGLAB_RGBA(0, 0, 0xFF, 0xFF);
+    DglabMenuState menu;
+    DglabCanvas canvas;
+
+    CHECK(dglabMenuMove(0, -1) == DglabMenu_ItemCount - 1);
+    CHECK(dglabMenuMove(DglabMenu_ItemCount - 1, 1) == 0);
+    CHECK(dglabMenuMove(DglabMenu_ItemCount - 1, -1) == DglabMenu_ItemCount - 2);
+
+    for (unsigned item = 0; item < (unsigned)DglabMenu_ItemCount; item++) {
+        int changed;
+
+        CHECK(dglabMenuItemName(item)[0] != '\0');
+        CHECK(dglabMenuItemDescription(item)[0] != '\0');
+        CHECK(dglabMenuMove(item, (int)DglabMenu_ItemCount) == item);
+
+        memset(&menu, 0, sizeof(menu));
+        menu.selected = item;
+        menu.sysmodule_ok = (item % 2) == 0;
+
+        dglabCanvasInit(&canvas, screen_pixels, 1280, 720, 1280 * 4);
+        dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
+        dglabMenuDraw(&canvas, &kFont, &menu);
+
+        changed = countChangedPixels(screen_pixels, sizeof(screen_pixels), blue);
+        CHECK(changed > 1280 * 720 / 2);
+    }
+}
+
+// The motion screen: the widest values it can hold still have to fit, and it
+// draws for both a connected and a missing Joy-Con.
+static void testMotionScreen(void)
+{
+    static uint8_t screen_pixels[1280 * 720 * 4];
+    const uint32_t blue = DGLAB_RGBA(0, 0, 0xFF, 0xFF);
+    DglabMotionScreenState state;
+    DglabCanvas canvas;
+    int changed;
+
+    memset(&state, 0, sizeof(state));
+    state.left_connected = true;
+    state.right_connected = false;
+    state.moving_a = true;
+    state.level_a = 100;
+    state.frequency_a = 30;
+    state.frequency_b = 100;
+    state.channel_strength_a = 100;
+    state.channel_strength_b = 0;
+    state.link = "app connected";
+    state.link_tone = DglabCmdTone_Ok;
+    state.last_upload = "waveform A  ok";
+    state.last_upload_tone = DglabCmdTone_Ok;
+    state.server_running = true;
+
+    // The row is "A" + two spaces + the value, and the value is the widest form
+    // the drawing code can produce.
+    CHECK(dglabCanvasTextWidth(&kFont, 1, "moving     level 100    30ms") <= 34 * 16);
+
+    dglabCanvasInit(&canvas, screen_pixels, 1280, 720, 1280 * 4);
+    dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
+    dglabMotionScreenDraw(&canvas, &kFont, &state);
+
+    changed = countChangedPixels(screen_pixels, sizeof(screen_pixels), blue);
     CHECK(changed > 1280 * 720 / 2);
 }
 
@@ -244,6 +326,8 @@ int main(void)
     testText();
     testQr();
     testScreen();
+    testMenu();
+    testMotionScreen();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
 

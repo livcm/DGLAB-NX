@@ -238,6 +238,21 @@ static void testStrengthMaxScales(void)
     CHECK(slot.strength == 40);
 }
 
+static void testFrequencyGetterMatchesTheSlots(void)
+{
+    DglabNetWaveformSlot slot;
+
+    resetFeed();
+
+    CHECK(dglabMotionFeedFrequencyMs(&g_feed) == 100);
+
+    for (int i = 0; i < 8; i++)
+        (void)stepOne(swingSample(), &slot);
+
+    // The getter is what the screen shows, so it has to agree with the slot.
+    CHECK(dglabMotionFeedFrequencyMs(&g_feed) == slot.frequency_ms);
+}
+
 int main(void)
 {
     testStillHandIsSilent();
@@ -248,6 +263,7 @@ int main(void)
     testAccelerationDeltaContributes();
     testPacingFollowsTimeNotFrames();
     testStrengthMaxScales();
+    testFrequencyGetterMatchesTheSlots();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
 

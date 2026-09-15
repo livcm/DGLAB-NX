@@ -16,8 +16,12 @@
 #include <switch.h>
 
 #include <dglab/ipc.h>
+#include <dglab/nro/joycon.h>
+#include <dglab/nro/motion_feed.h>
 #include <dglab/nro/ble_poc_view.h>
 #include <dglab/platform/framebuffer.h>
+#include <dglab/ui/menu.h>
+#include <dglab/ui/motion.h>
 #include <dglab/ui/screen.h>
 
 #define LOG_POLL_ROUNDS 2
@@ -33,9 +37,11 @@
 #define LOG_FILE_PATH DATA_DIR "/dglab-net.log"
 
 typedef enum {
-    DglabView_Exit = 0,
-    DglabView_BlePoc,
-} DglabViewResult;
+    DglabMenuResult_Exit = 0,
+    DglabMenuResult_Socket,
+    DglabMenuResult_Motion,
+    DglabMenuResult_BlePoc,
+} DglabMenuResult;
 
 static char g_log_lines[DGLAB_SCREEN_LOG_LINES][DGLAB_SCREEN_LOG_LINE_LEN];
 static const char* g_log_pointers[DGLAB_SCREEN_LOG_LINES];
@@ -389,7 +395,8 @@ static void snapshotFromState(DglabScreenSnapshot* out, const DglabScreenState* 
         snprintf(out->url, sizeof(out->url), "%s", state->url);
 }
 
-static DglabViewResult runSocketView(Service* dglab, PadState* pad)
+// The socket test screen. Returns to the menu when `+` is pressed.
+static void runSocketView(Service* dglab, PadState* pad)
 {
     const DglabFont* font = dglabFramebufferFont();
     DglabIpcVersion version = { 0 };
@@ -444,10 +451,7 @@ static DglabViewResult runSocketView(Service* dglab, PadState* pad)
         state.url_ok = url_ok;
 
         if (down & HidNpadButton_Plus)
-            return DglabView_Exit;
-
-        if (down & HidNpadButton_Minus)
-            return DglabView_BlePoc;
+            return;
 
         handleButtons(dglab, down, padGetButtons(pad));
 
@@ -475,7 +479,252 @@ static DglabViewResult runSocketView(Service* dglab, PadState* pad)
         }
     }
 
-    return DglabView_Exit;
+}
+
+// ---------------------------------------------------------------------------
+// The menu
+// ---------------------------------------------------------------------------
+
+// How often the menu checks that the sysmodule is still there. Every mode needs
+// it, and finding out after entering one wastes a trip through the menu.
+#define MENU_PING_FRAMES 60
+
+// Kept across visits, so leaving a mode comes back to the same entry.
+static unsigned g_menu_selected = DglabMenu_ItemSocket;
+
+static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
+{
+    const DglabFont* font = dglabFramebufferFont();
+    DglabMenuState state;
+    unsigned drawn_selected = 0;
+    bool drawn_liveness = false;
+    bool have_drawn = false;
+    u32 frame = 0;
+
+    memset(&state, 0, sizeof(state));
+    state.sysmodule_ok = true;
+
+    while (appletMainLoop()) {
+        DglabCanvas canvas;
+        u64 down;
+
+        padUpdate(pad);
+        down = padGetButtonsDown(pad);
+
+        if (down & HidNpadButton_Plus)
+            return DglabMenuResult_Exit;
+
+        if (down & HidNpadButton_Up)
+            g_menu_selected = dglabMenuMove(g_menu_selected, -1);
+
+        if (down & HidNpadButton_Down)
+            g_menu_selected = dglabMenuMove(g_menu_selected, 1);
+
+        if (down & HidNpadButton_A) {
+            switch (g_menu_selected) {
+                case DglabMenu_ItemMotion: return DglabMenuResult_Motion;
+                case DglabMenu_ItemBlePoc: return DglabMenuResult_BlePoc;
+                default: return DglabMenuResult_Socket;
+            }
+        }
+
+        if (++frame % MENU_PING_FRAMES == 1) {
+            u32 pong = 0;
+
+            state.sysmodule_ok =
+                R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_PING, pong)) &&
+                pong == DGLAB_IPC_PING_MAGIC;
+        }
+
+        state.selected = g_menu_selected;
+
+        if (have_drawn && state.selected == drawn_selected &&
+            state.sysmodule_ok == drawn_liveness)
+            continue;
+
+        if (dglabFramebufferBegin(&canvas)) {
+            dglabMenuDraw(&canvas, font, &state);
+            dglabFramebufferEnd();
+
+            drawn_selected = state.selected;
+            drawn_liveness = state.sysmodule_ok;
+            have_drawn = true;
+        }
+    }
+
+    return DglabMenuResult_Exit;
+}
+
+// ---------------------------------------------------------------------------
+// The motion mode
+// ---------------------------------------------------------------------------
+
+// The live values are throttled to about 5Hz: at 60Hz every frame would change
+// the screen and undo the socket screen's redraw-only-on-change policy. Sampling
+// and uploading still happen every frame.
+#define MOTION_DISPLAY_FRAMES 12
+#define MOTION_DRAIN_MAX 17u
+
+#define MOTION_CHANNEL_A 1u
+#define MOTION_CHANNEL_B 2u
+
+static bool slotsHaveStrength(const DglabNetWaveformSlot* slots, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (slots[i].strength > 0)
+            return true;
+    }
+
+    return false;
+}
+
+static Result uploadSlots(Service* dglab, u32 channel, const DglabNetWaveformSlot* slots,
+    size_t count)
+{
+    DglabNetWaveformRequest request;
+
+    if (count == 0 || count > DGLAB_NET_WAVEFORM_MAX_SLOTS)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    memset(&request, 0, sizeof(request));
+    request.channel = channel;
+    request.mode = DglabNetWaveform_Append;
+    request.slot_count = (u32)count;
+    memcpy(request.slots, slots, count * sizeof(slots[0]));
+
+    return serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_WAVEFORM, request);
+}
+
+// Short form of the server's state for the motion screen's link line.
+static const char* netStateText(u32 state)
+{
+    switch (state) {
+        case DglabNetState_Listening: return "waiting for the app";
+        case DglabNetState_Paired: return "app connected";
+        case DglabNetState_Stopped: return "server stopped";
+        case DglabNetState_Failed: return "server failed";
+        default: return "server not started";
+    }
+}
+
+static void runMotionView(Service* dglab, PadState* pad)
+{
+    const DglabFont* font = dglabFramebufferFont();
+    DglabMotionFeedConfig config;
+    DglabMotionFeed feed_a;
+    DglabMotionFeed feed_b;
+    DglabMotionScreenState state;
+    DglabNetWaveformSlot slots[DGLAB_NET_WAVEFORM_MAX_SLOTS];
+    u64 last_ticks;
+    u32 frame = 0;
+
+    dglabMotionFeedDefaultConfig(&config);
+    dglabMotionFeedInit(&feed_a, &config);
+    dglabMotionFeedInit(&feed_b, &config);
+
+    memset(&state, 0, sizeof(state));
+    state.link = "server not started";
+    state.last_upload = "";
+
+    // Whatever the test buttons left queued should not play underneath the
+    // motion stream.
+    noteCommand("clear", sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
+
+    dglabJoyconStart();
+
+    last_ticks = armGetSystemTick();
+
+    while (appletMainLoop()) {
+        DglabMotionSample samples[MOTION_DRAIN_MAX];
+        u32 elapsed_ns;
+        u64 now;
+        u64 down;
+
+        now = armGetSystemTick();
+        elapsed_ns = (u32)armTicksToNs(now - last_ticks);
+        last_ticks = now;
+
+        padUpdate(pad);
+        down = padGetButtonsDown(pad);
+
+        if (down & HidNpadButton_Plus)
+            break;
+
+        if (down & HidNpadButton_B)
+            noteCommand("clear", sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
+
+        // Drain both sides every frame: the sensors run faster than this loop,
+        // and a reading that is not collected now is gone.
+        for (size_t i = 0, count = dglabJoyconPoll(DglabJoycon_Left, samples, MOTION_DRAIN_MAX);
+             i < count; i++)
+            dglabMotionFeedAddSample(&feed_a, &samples[i]);
+
+        for (size_t i = 0, count = dglabJoyconPoll(DglabJoycon_Right, samples, MOTION_DRAIN_MAX);
+             i < count; i++)
+            dglabMotionFeedAddSample(&feed_b, &samples[i]);
+
+        // A batch that is all silence is dropped instead of uploaded: that is
+        // what makes a still controller cost no traffic at all.
+        {
+            size_t produced = dglabMotionFeedAdvance(&feed_a, elapsed_ns, slots,
+                DGLAB_NET_WAVEFORM_MAX_SLOTS);
+
+            if (produced > 0 && slotsHaveStrength(slots, produced))
+                noteCommand("waveform A",
+                    uploadSlots(dglab, MOTION_CHANNEL_A, slots, produced), NULL);
+        }
+
+        {
+            size_t produced = dglabMotionFeedAdvance(&feed_b, elapsed_ns, slots,
+                DGLAB_NET_WAVEFORM_MAX_SLOTS);
+
+            if (produced > 0 && slotsHaveStrength(slots, produced))
+                noteCommand("waveform B",
+                    uploadSlots(dglab, MOTION_CHANNEL_B, slots, produced), NULL);
+        }
+
+        if (++frame % MOTION_DISPLAY_FRAMES == 1) {
+            DglabNetStatus status;
+            bool status_ok = R_SUCCEEDED(
+                serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, status));
+            DglabCanvas canvas;
+
+            state.left_connected = dglabJoyconIsConnected(DglabJoycon_Left);
+            state.right_connected = dglabJoyconIsConnected(DglabJoycon_Right);
+            state.moving_a = dglabMotionFeedIsMoving(&feed_a);
+            state.moving_b = dglabMotionFeedIsMoving(&feed_b);
+            state.level_a = (unsigned)(dglabMotionFeedLevel(&feed_a) * 100.0f + 0.5f);
+            state.level_b = (unsigned)(dglabMotionFeedLevel(&feed_b) * 100.0f + 0.5f);
+            state.frequency_a = dglabMotionFeedFrequencyMs(&feed_a);
+            state.frequency_b = dglabMotionFeedFrequencyMs(&feed_b);
+            state.channel_strength_a = g_test_strength_a;
+            state.channel_strength_b = g_test_strength_b;
+            state.server_running = status_ok &&
+                (status.state == DglabNetState_Listening || status.state == DglabNetState_Paired);
+
+            if (!status_ok) {
+                state.link = "IPC call failed";
+                state.link_tone = DglabCmdTone_Error;
+            } else {
+                state.link = netStateText(status.state);
+                state.link_tone = (status.state == DglabNetState_Paired) ? DglabCmdTone_Ok
+                                                                        : DglabCmdTone_Warn;
+            }
+
+            state.last_upload = g_last_command;
+            state.last_upload_tone = g_last_command_tone;
+
+            if (dglabFramebufferBegin(&canvas)) {
+                dglabMotionScreenDraw(&canvas, font, &state);
+                dglabFramebufferEnd();
+            }
+        }
+    }
+
+    // Stop the stream before leaving: the sensors go quiet and the queued
+    // waveform is cleared, so nothing keeps playing from the menu.
+    dglabJoyconStop();
+    noteCommand("clear", sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
 }
 
 // Error path: the console is used instead of the framebuffer, because it is the
@@ -541,10 +790,19 @@ int main(int argc, char* argv[])
     logFileOpen();
 
     while (true) {
-        DglabViewResult result = runSocketView(&dglab, &pad);
+        DglabMenuResult selection = runMenuView(&dglab, &pad);
 
-        if (result == DglabView_Exit) {
+        if (selection == DglabMenuResult_Exit)
             break;
+
+        if (selection == DglabMenuResult_Socket) {
+            runSocketView(&dglab, &pad);
+            continue;
+        }
+
+        if (selection == DglabMenuResult_Motion) {
+            runMotionView(&dglab, &pad);
+            continue;
         }
 
         // The BLE PoC view takes the console and the screen over, so the

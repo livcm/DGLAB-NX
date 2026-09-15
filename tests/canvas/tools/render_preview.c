@@ -18,9 +18,13 @@
 //   /tmp/preview /tmp/font.bin /tmp/preview.bmp
 //   /tmp/preview /tmp/font.bin /tmp/nowifi.bmp nowifi   (no LAN address yet)
 //   /tmp/preview /tmp/font.bin /tmp/stopped.bmp stopped (server not started)
+//   /tmp/preview /tmp/font.bin /tmp/menu.bmp menu       (the mode menu)
+//   /tmp/preview /tmp/font.bin /tmp/motion.bmp motion   (the Joy-Con mode)
 //   sips -s format png /tmp/preview.bmp --out /tmp/preview.png
 
 #include <dglab/ui/screen.h>
+#include <dglab/ui/menu.h>
+#include <dglab/ui/motion.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -101,7 +105,8 @@ int main(int argc, char** argv)
     FILE* file;
 
     if (argc < 3) {
-        fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> [normal|nowifi]\n");
+        fprintf(stderr,
+            "usage: render_preview <font.bin> <out.bmp> [normal|nowifi|stopped|menu|motion]\n");
         return 2;
     }
 
@@ -180,7 +185,39 @@ int main(int argc, char** argv)
     }
 
     dglabCanvasInit(&canvas, g_pixels, WIDTH, HEIGHT, WIDTH * 4);
-    dglabScreenDraw(&canvas, &font, &state);
+
+    if (argc >= 4 && strcmp(argv[3], "menu") == 0) {
+        DglabMenuState menu;
+
+        memset(&menu, 0, sizeof(menu));
+        menu.selected = DglabMenu_ItemMotion;
+        menu.sysmodule_ok = true;
+
+        dglabMenuDraw(&canvas, &font, &menu);
+    } else if (argc >= 4 && strcmp(argv[3], "motion") == 0) {
+        DglabMotionScreenState motion;
+
+        memset(&motion, 0, sizeof(motion));
+        motion.left_connected = true;
+        motion.right_connected = true;
+        motion.moving_a = true;
+        motion.level_a = 62;
+        motion.frequency_a = 57;
+        motion.moving_b = false;
+        motion.level_b = 0;
+        motion.frequency_b = 100;
+        motion.channel_strength_a = 20;
+        motion.channel_strength_b = 0;
+        motion.link = "app connected";
+        motion.link_tone = DglabCmdTone_Ok;
+        motion.last_upload = "waveform A  ok";
+        motion.last_upload_tone = DglabCmdTone_Ok;
+        motion.server_running = true;
+
+        dglabMotionScreenDraw(&canvas, &font, &motion);
+    } else {
+        dglabScreenDraw(&canvas, &font, &state);
+    }
 
     writeBmp(argv[2]);
 

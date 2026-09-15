@@ -198,6 +198,21 @@ float dglabMotionFeedLevel(const DglabMotionFeed* feed)
     return clamp01(feed->level);
 }
 
+uint16_t dglabMotionFeedFrequencyMs(const DglabMotionFeed* feed)
+{
+    float level;
+    float frequency;
+
+    if (!feed)
+        return 0;
+
+    level = clamp01(feed->level);
+    frequency = (float)feed->config.frequency_still_ms +
+                ((float)feed->config.frequency_fast_ms - (float)feed->config.frequency_still_ms) * level;
+
+    return (uint16_t)(frequency + 0.5f);
+}
+
 bool dglabMotionFeedIsStreaming(const DglabMotionFeed* feed)
 {
     return feed ? feed->streaming : false;

@@ -95,6 +95,9 @@ size_t dglabMotionFeedAdvance(DglabMotionFeed* feed, uint32_t elapsed_ns,
 /// 0..1 envelope for the UI.
 float dglabMotionFeedLevel(const DglabMotionFeed* feed);
 
+/// The frequency that goes with the current level, in app side milliseconds.
+uint16_t dglabMotionFeedFrequencyMs(const DglabMotionFeed* feed);
+
 /// Whether the caller should upload at all: false once the controller has been
 /// still for `idle_stop_ms` (the decay has already been delivered by then).
 bool dglabMotionFeedIsStreaming(const DglabMotionFeed* feed);
