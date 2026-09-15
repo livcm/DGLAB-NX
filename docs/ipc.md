@@ -94,9 +94,11 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 | `DglabNetCommand_Clear` | 清空该通道波形队列（`value` 忽略） |
 | `DglabNetCommand_TestPulse` | 送一段内置测试波形，`value` = 波形强度 0..100 |
 
-相对增减是给**事件源**用的：游戏 Mod / NRO 只需要说"受击了，+5"，不必自己维护当前强度
-（App 是单向的，它不会把强度回报给我们）。真正的强度曲线（衰减、连击加成之类）由事件源
-自己决定，sysmodule 只负责把它变成协议指令。
+相对增减是给**用户级控制**用的：手柄的 +/-、overlay 的加减按钮不必自己维护当前强度
+（App 是单向的，它不会把强度回报给我们），说一句"加 5"就够了。
+
+**强度是用户设定、波形由事件源设定**：事件源（游戏 Mod / 手柄传感器）生产的是波形流
+（25ms 槽位的频率与波形强度），见 `docs/dglab-socket.md` 里"事件 → 波形"一节。
 
 `TestPulse` 发送的是内置的短测试波形（8 个 100ms 元素，固定频率），用来验证
 “sysmodule → 服务端 → App”整条链路，不是给实际游戏使用的接口。真正的波形数据
