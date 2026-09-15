@@ -276,9 +276,23 @@ static void netClientThreadMain(void* arg)
             uint8_t payload[WS_MAX_MESSAGE];
             size_t size = 0;
             WsOpcode opcode;
+            uint32_t pings_before = conn->ping_count;
 
             if (!wsConnRecv(conn, &opcode, payload, sizeof(payload), &size))
                 break;
+
+            // WebSocket pings are handled inside the frame layer, so they are
+            // counted here: the App keeps the link alive with them and would
+            // otherwise look completely silent.
+            if (conn->ping_count != pings_before) {
+                mutexLock(&g_net.mutex);
+
+                if (conn->ping_count <= 4)
+                    dglabNetServerLog(&g_net.server, "rx ping #%u", (unsigned)conn->ping_count);
+
+                dglabNetServerOnActivity(&g_net.server, conn);
+                mutexUnlock(&g_net.mutex);
+            }
 
             if (opcode != WsOpcode_Text && opcode != WsOpcode_Binary)
                 continue;

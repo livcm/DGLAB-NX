@@ -451,6 +451,8 @@ bool wsConnRecv(WsConn* conn, WsOpcode* opcode, uint8_t* payload, size_t payload
 
         switch (frame_opcode) {
             case WsOpcode_Ping:
+                conn->ping_count++;
+
                 if (!wsConnSend(conn, WsOpcode_Pong, frame_payload, frame_size)) {
                     wsDropFrame(conn, header_len, frame_size);
                     return false;
@@ -459,10 +461,12 @@ bool wsConnRecv(WsConn* conn, WsOpcode* opcode, uint8_t* payload, size_t payload
                 continue;
 
             case WsOpcode_Pong:
+                conn->pong_count++;
                 wsDropFrame(conn, header_len, frame_size);
                 continue;
 
             case WsOpcode_Close:
+                conn->close_count++;
                 (void)wsConnSend(conn, WsOpcode_Close, frame_payload, frame_size);
                 wsDropFrame(conn, header_len, frame_size);
                 return false;

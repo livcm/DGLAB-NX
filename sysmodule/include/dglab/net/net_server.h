@@ -97,6 +97,10 @@ void dglabNetServerDetach(DglabNetServer* server, WsConn* conn);
 // Called by the transport for one complete WebSocket text message.
 void dglabNetServerOnMessage(DglabNetServer* server, WsConn* conn, const char* text, size_t size);
 
+// Called by the transport when the connection showed life that is not a
+// protocol message, which for the App means a WebSocket ping.
+void dglabNetServerOnActivity(DglabNetServer* server, WsConn* conn);
+
 // Periodic work: heartbeats and stale connection detection. Call every 100ms.
 void dglabNetServerPoll(DglabNetServer* server, uint64_t now_ms);
 

@@ -47,6 +47,11 @@ typedef struct {
     uint8_t rx[WS_MAX_MESSAGE + 64];
     size_t rx_len;
     bool handshake_done;
+    // Protocol level traffic counters. A client that keeps the link alive with
+    // WebSocket pings looks completely silent to the message layer otherwise.
+    uint32_t ping_count;
+    uint32_t pong_count;
+    uint32_t close_count;
     // Request target of the handshake, for example "/<clientId>" or "/?tid=<clientId>".
     // The DG-LAB Socket protocol carries the controller id here, so the layer
     // above needs it after the handshake to decide how to pair the connection.

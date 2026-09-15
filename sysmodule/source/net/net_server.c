@@ -492,6 +492,17 @@ void dglabNetServerOnMessage(DglabNetServer* server, WsConn* conn, const char* t
     }
 }
 
+void dglabNetServerOnActivity(DglabNetServer* server, WsConn* conn)
+{
+    DglabNetClient* client = findClient(server, conn);
+
+    if (!client)
+        return;
+
+    client->last_message_ms = nowMs(server);
+    client->warned_silent = false;
+}
+
 void dglabNetServerPoll(DglabNetServer* server, uint64_t now_ms)
 {
     DglabNetClient* client = findBoundClient(server);

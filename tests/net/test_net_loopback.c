@@ -153,6 +153,20 @@ static size_t buildClientFrame(uint8_t* out, size_t out_size, const char* text,
     return len + 6;
 }
 
+// Same, for a control frame such as a ping.
+static size_t buildClientControlFrame(uint8_t* out, size_t out_size, uint8_t opcode,
+    const uint8_t mask[4])
+{
+    if (out_size < 6)
+        return 0;
+
+    out[0] = (uint8_t)(0x80u | opcode);
+    out[1] = 0x80; // masked, empty payload
+    memcpy(out + 2, mask, 4);
+
+    return 6;
+}
+
 static bool sendAll(int fd, const uint8_t* data, size_t size)
 {
     size_t sent = 0;
@@ -350,6 +364,37 @@ static void testLoopbackSession(void)
         CHECK(dglabNetServerSend(&harness.server, &send) == DglabNetSend_Ok);
         CHECK(readServerFrame(client, frame, sizeof(frame)));
         CHECK(strstr(frame, "\"message\":\"pulse-A:[\\\"") != NULL);
+    }
+
+    // A WebSocket ping is answered with a pong and counted, because that is how
+    // the App keeps the link alive: without the counter the server sees a
+    // perfectly healthy client as silent.
+    {
+        size_t size = buildClientControlFrame(outgoing, sizeof(outgoing), 0x9u, kMask);
+        uint8_t ping_reply[WS_MAX_MESSAGE];
+        size_t payload_size = 0;
+        WsOpcode opcode;
+        static const char after[] =
+            "{\"type\":\"msg\",\"clientId\":\"c\",\"targetId\":\"c\",\"message\":\"feedback-1\"}";
+
+        CHECK(size > 0);
+        CHECK(sendAll(client, outgoing, size));
+
+        // wsConnRecv keeps reading after handling the ping, so a data frame
+        // follows it; the ping itself must have been counted by then.
+        {
+            size_t text_size = buildClientFrame(outgoing, sizeof(outgoing), after, kMask);
+
+            CHECK(text_size > 0);
+            CHECK(sendAll(client, outgoing, text_size));
+        }
+
+        CHECK(wsConnRecv(&conn, &opcode, ping_reply, sizeof(ping_reply), &payload_size));
+        CHECK(opcode == WsOpcode_Text);
+        CHECK(conn.ping_count == 1);
+
+        dglabNetServerOnMessage(&harness.server, &conn, (const char*)ping_reply, payload_size);
+        dglabNetServerOnActivity(&harness.server, &conn);
     }
 
     // Closing the App side makes the server drop the binding.
