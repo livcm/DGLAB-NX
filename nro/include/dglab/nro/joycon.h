@@ -36,7 +36,10 @@ bool dglabJoyconIsConnected(DglabJoyconSide side);
 
 /// Writes one line describing what this side's handles are and what the last
 /// poll got out of them, e.g.
-/// "left: handles 2, #0 states 16, samples 16, connected 1, #1 not polled".
+/// "left: handles 2, quiet 0, #0 states 16, samples 16, connected 1, #1 not
+/// polled". `quiet` counts the polls in a row without any readings, which is
+/// what turns the row to "not connected" once it reaches
+/// DGLAB_MOTION_SENSOR_QUIET_POLLS.
 /// Written into the NRO's log by main.c when the mode starts: which handles a
 /// console really hands over (and which of them answer) is a hardware fact, and
 /// this is what makes the next hardware run conclusive. A handle that was not

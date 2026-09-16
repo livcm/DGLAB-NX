@@ -28,6 +28,10 @@ typedef struct {
     size_t handle_count;
     bool started;
     bool connected;
+    // Polls in a row that produced no readings at all: a live sensor fills the
+    // LIFO every frame, so a run of these is how a controller that was turned
+    // off or plugged back in shows up (see dglabMotionSensorConnected).
+    unsigned quiet_polls;
     // What the last poll asked each handle and what it answered, oldest first,
     // for the log line dglabJoyconDescribe() builds. A handle the poll did not
     // reach (see the order rule below) keeps polled=false, which the log says
@@ -200,8 +204,13 @@ size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max)
             break;
     }
 
-    if (totals.poll.answered)
-        state->connected = dglabMotionSensorConnected(state->connected, &totals.poll);
+    if (totals.poll.samples > 0)
+        state->quiet_polls = 0;
+    else
+        state->quiet_polls++;
+
+    state->connected = dglabMotionSensorConnected(state->connected, &totals.poll,
+        state->quiet_polls);
 
     return totals.poll.samples;
 }
@@ -226,8 +235,9 @@ size_t dglabJoyconDescribe(DglabJoyconSide side, char* out, size_t size)
     out[0] = '\0';
     state = &g_joycon[side];
 
-    written = snprintf(out, size, "%s: handles %u", side == DglabJoycon_Left ? "left" : "right",
-        (unsigned)state->handle_count);
+    written = snprintf(out, size, "%s: handles %u, quiet %u",
+        side == DglabJoycon_Left ? "left" : "right", (unsigned)state->handle_count,
+        state->quiet_polls);
 
     if (written <= 0 || (size_t)written >= size)
         return 0;

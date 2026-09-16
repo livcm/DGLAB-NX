@@ -152,23 +152,32 @@
 `dglabMotionSensorConnected()`，`tests/motion` 覆盖）：
 
 1. 这一轮有任何采样 → **已连接**（读数只有在自称已连接时才会进入 feed，所以"显示未连接"
-   与"正在输出"不可能同时成立）；
+  与"正在输出"不可能同时成立）；
 2. 否则有句柄报 `IsConnected` → 已连接；
 3. 否则有句柄回答、但都不算已连接 → 未连接（手柄断开/休眠就是这一条）；
-4. 这一轮谁都没回答 → 保持上一次（空闲的传感器没话可说，抖着刷新更糟）。
+4. 否则**连续 `DGLAB_MOTION_SENSOR_QUIET_POLLS`(20) 次轮询一条读数都没有** → 未连接；
+5. 还没到那个次数 → 保持上一次（刚进玩法的那几帧还没有读数可看，抖着刷新更糟）。
 
-进入玩法时 NRO 会把每侧的句柄数与本轮每个句柄的 states/采样/connected 写一行日志到
-`sdmc:/switch/DGLAB-NX/logs/dglab-net.log`；没轮到的句柄会写成 `#n not polled`（"没有读数"
-和"没问它"是两件事）。**实机实测（2026-09-17，一对拆下的 Joy-Con，进去就挥）**：
+第 4 条是**实机反馈（2026-09-17）**补上的，也是这套规则里最容易漏的一种：把 Joy-Con
+**插回主机**、或者按同步键把它**关掉**时，句柄不是"回一个未连接的占位读数"，而是**干脆不再
+产生读数**（`hidGetSixAxisSensorStates` 返回 0 条）。当时只有"没人回答就保持上一次"这一条，
+于是界面整场都停在"已连接"、不会变回"未连接"——用户报的就是这个。判断依据是"活的传感器每帧
+都把 LIFO 填满"（实测每次轮询 16 条），所以安静的轮询连续出现就是手柄不在了；用**轮询次数**
+而不是毫秒计数，是为了让一次卡帧/一次 IPC 停顿看起来只是"一次轮询"，不会误判成断开。
 
-    motion left: handles 2, #0 states 16, samples 16, connected 1, #1 not polled
-      | right: handles 2, #0 states 16, samples 16, connected 1, #1 not polled
+进入玩法时 NRO 会把每侧的句柄数、连续空轮询次数与本轮每个句柄的 states/采样/connected 写
+一行日志到 `sdmc:/switch/DGLAB-NX/logs/dglab-net.log`；没轮到的句柄会写成 `#n not polled`
+（"没有读数"和"没问它"是两件事）。**实机实测（2026-09-17，一对拆下的 Joy-Con，进去就挥）**：
+
+    motion left: handles 2, quiet 0, #0 states 16, samples 16, connected 1, #1 not polled
+      | right: handles 2, quiet 0, #0 states 16, samples 16, connected 1, #1 not polled
 
 由此确定的实机事实：
 
 - **每侧确实拿到两个句柄**（`NpadJoyDual` 的一个 + 单只风格的一个），顺序如设计；
-- **真正给数据的是 `NpadJoyDual` 那个**：一次轮询 16 条，全部 `IsConnected`，没有插值样本；
-  它的采样深度正好是系统 LIFO 的上限附近（17 条），所以每帧都把环形缓冲取空；
+- **真正给数据的是 `NpadJoyDual` 那个**：一次轮询 16 条（后续帧 14~15 条是有效读数，差的那
+  一两条是插值样本，被丢掉）；深度正好是系统 LIFO 的上限附近（17 条），所以每帧都把环形缓冲
+  取空。这条"每帧都被填满"是上面第 4 条规则的依据；
 - **单只风格的句柄在这套玩法下没有数据**（新规则下根本不去轮询它）——这也解释了为什么
   "一个句柄判整侧"的旧规则会出错；
 - 连接状态变化时会另写一行 `motion left connected` / `motion left disconnected`（只在变化时
@@ -285,5 +294,7 @@
    很低，但还没有长时间统计）；
 5. `hidIsSixAxisSensorAtRest` 的判据是否够稳（能否用来做零偏归零）；
 6. NRO 在 applet 模式下读六轴的可用性与开销（每帧 60 次读是否明显耗电）；
-7. Joy-Con 断开/休眠时 `attributes` 的变化时机：现在有 `motion left/right connected /
-   disconnected` 的行，把一只 Joy-Con 收起来或让它休眠，再看 `dglab-net.log` 就是答案。
+7. Joy-Con 断开/休眠时 `attributes` 的变化时机：**已确认不会有"未连接"的占位读数**——句柄
+   直接停止产生读数（2026-09-17 实机），规则因此改为按"连续空轮询"判定；`motion
+   left/right connected / disconnected` 的行仍在，插回主机或关掉一只 Joy-Con 时应能看到
+   `disconnected`，那行就是这条的最终确认。

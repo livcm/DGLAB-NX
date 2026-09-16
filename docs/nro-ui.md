@@ -721,8 +721,9 @@ Socket 服务端页的两栏直接采用实测数字：左栏 `DGLAB_SOCKET_QR_X
   "最后一个回答的句柄的最后一条读数"曾经直接决定整侧状态；单只风格的句柄只回
   `IsConnected=0` 的占位读数时，整侧被判成未连接，而采样早已进了映射——正是截图里的现象。
   现在每侧只用一个句柄（`NpadJoyDual` 优先，只有它没给出采样才回退），状态用
-  `dglabMotionSensorConnected()` 判定："有采样 → 已连接，否则看有没有句柄自称已连接，
-  都没有就保持上一次"，细节见 `docs/joycon-input.md`；
+  `dglabMotionSensorConnected()` 判定："有采样 → 已连接；否则看有没有句柄自称已连接；否则
+  连续 20 次轮询没有读数 → 未连接（手柄关掉或插回主机就是这样，2026-09-17 补的规则）；
+  再否则才保持上一次"，细节见 `docs/joycon-input.md`；
 - 进入玩法时会往日志写一行 `motion left: handles 2, #0 states … | motion right: …`（落到
   `dglab-net.log`），把主机实际交出的句柄布局记下来；连接状态变化时另写一行
   `motion left connected` / `motion left disconnected`。实机结果与解读见

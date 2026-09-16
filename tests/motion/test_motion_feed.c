@@ -268,27 +268,44 @@ static void testSensorSideConnection(void)
     poll.answered = true;
     poll.connected = false;
     poll.samples = 5;
-    CHECK(dglabMotionSensorConnected(false, &poll));
+    CHECK(dglabMotionSensorConnected(false, &poll, 0));
 
     // The case that used to decide the whole side: a handle answered, nothing in
     // it was connected, and it produced no readings.
     poll.samples = 0;
-    CHECK(!dglabMotionSensorConnected(true, &poll));
+    CHECK(!dglabMotionSensorConnected(true, &poll, 0));
 
-    // Nothing answered at all - an idle sensor has nothing to say, so the row
-    // keeps what it had instead of flickering.
+    // Nothing answered at all, and not for long: the first frames after the mode
+    // starts have nothing to show yet, so the row keeps what it had instead of
+    // flickering.
     poll.answered = false;
-    CHECK(dglabMotionSensorConnected(true, &poll));
-    CHECK(!dglabMotionSensorConnected(false, &poll));
+    CHECK(dglabMotionSensorConnected(true, &poll, 0));
+    CHECK(!dglabMotionSensorConnected(false, &poll, 0));
+    CHECK(dglabMotionSensorConnected(true, &poll, DGLAB_MOTION_SENSOR_QUIET_POLLS - 1));
+
+    // A Joy-Con that is turned off, or plugged back into the console, stops
+    // delivering readings instead of announcing that it left: after a run of
+    // empty polls the side has to count as gone (hardware report, 2026-09-17,
+    // where the row stayed on "connected" for the whole session).
+    CHECK(!dglabMotionSensorConnected(true, &poll, DGLAB_MOTION_SENSOR_QUIET_POLLS));
+    CHECK(!dglabMotionSensorConnected(true, &poll, DGLAB_MOTION_SENSOR_QUIET_POLLS + 50));
+
+    // Readings reset that count, so a controller that comes back is connected
+    // again on the first poll that carries something.
+    poll.answered = true;
+    poll.connected = true;
+    poll.samples = 1;
+    CHECK(dglabMotionSensorConnected(false, &poll, 0));
 
     // Connected, but everything it produced was interpolated (no samples): still
     // connected.
     poll.answered = true;
     poll.connected = true;
-    CHECK(dglabMotionSensorConnected(false, &poll));
+    poll.samples = 0;
+    CHECK(dglabMotionSensorConnected(false, &poll, 0));
 
     // And no poll at all is not evidence either.
-    CHECK(dglabMotionSensorConnected(true, NULL));
+    CHECK(dglabMotionSensorConnected(true, NULL, 999));
 }
 
 int main(void)

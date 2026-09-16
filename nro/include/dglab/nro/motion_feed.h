@@ -124,9 +124,26 @@ typedef struct {
     unsigned samples;  ///< readings that were handed to the feed
 } DglabMotionSensorPoll;
 
+/// How many polls in a row a side may deliver nothing before it counts as gone.
+///
+/// A connected Joy-Con fills the system's six-axis LIFO every frame - on
+/// hardware, each poll handed over 16 readings - so silence is not idleness, it
+/// is a controller that was taken off, turned off, or has fallen asleep. This is
+/// the case the row used to miss: such a controller stops producing readings
+/// instead of announcing that it left, and a rule that only believes what it is
+/// told keeps showing the last state forever.
+///
+/// Twenty polls is a third of a second at 60Hz. Counting polls rather than
+/// milliseconds is deliberate: a slow frame or a stalled IPC call shows up as
+/// one poll, not twenty, so a hitch cannot look like a disconnect.
+#define DGLAB_MOTION_SENSOR_QUIET_POLLS 20u
+
 /// The side's connection state after a poll. Samples are the strongest evidence
 /// - a reading only reaches the feed when it said it was connected, so "output
-/// works but the screen says not connected" cannot happen. A poll where no
-/// handle answered at all keeps `previous`: an idle sensor has nothing to say,
-/// and flickering the row on every empty poll would be worse than a stale value.
-bool dglabMotionSensorConnected(bool previous, const DglabMotionSensorPoll* poll);
+/// works but the screen says not connected" cannot happen. `quiet_polls` is how
+/// many polls in a row produced no readings at all: while that is below
+/// DGLAB_MOTION_SENSOR_QUIET_POLLS an empty poll keeps `previous` (the first
+/// frames after the mode starts have nothing to show yet), and past it the side
+/// counts as disconnected.
+bool dglabMotionSensorConnected(bool previous, const DglabMotionSensorPoll* poll,
+    unsigned quiet_polls);
