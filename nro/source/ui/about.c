@@ -73,7 +73,10 @@ void dglabAboutDraw(DglabCanvas* canvas, DglabGlyphSource* text, const DglabAbou
     int line = text->line_height;
     int x = MARGIN + 24;
     int y = TITLE_HEIGHT + GAP + 32;
-    int panel_height = line * 10 + 40;
+    int wrap_width = PANEL_WIDTH - 48;
+    int panel_height = 40 + line * 6 +
+        line * (dglabTextCountLines(text, dglabString(DglabString_AboutLine1), wrap_width) +
+                dglabTextCountLines(text, dglabString(DglabString_AboutLine2), wrap_width));
     char buffer[96];
 
     dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, kBackground);

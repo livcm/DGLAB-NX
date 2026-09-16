@@ -175,6 +175,30 @@ size_t dglabTextWrapLine(DglabGlyphSource* source, const char* text, int max_wid
     return break_at;
 }
 
+int dglabTextCountLines(DglabGlyphSource* source, const char* text, int max_width)
+{
+    int lines = 0;
+    char line[192];
+
+    if (!source || !text || max_width <= 0)
+        return 0;
+
+    while (*text) {
+        size_t taken = dglabTextWrapLine(source, text, max_width, line, sizeof(line));
+
+        if (taken == 0)
+            break;
+
+        lines++;
+        text += taken;
+
+        while (*text == ' ')
+            text++;
+    }
+
+    return lines;
+}
+
 // ---------------------------------------------------------------------------
 // The bitmap font adapter (ASCII)
 // ---------------------------------------------------------------------------

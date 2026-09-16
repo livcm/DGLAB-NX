@@ -52,6 +52,11 @@ int dglabTextWidth(DglabGlyphSource* source, const char* text);
 size_t dglabTextWrapLine(DglabGlyphSource* source, const char* text, int max_width, char* out,
     size_t out_size);
 
+/// How many wrapped lines `text` needs at this width. Panels size themselves
+/// from this instead of a hand computed guess, which is what let a border cut
+/// through the last row of the about screen.
+int dglabTextCountLines(DglabGlyphSource* source, const char* text, int max_width);
+
 /// A source over libnx's bitmap font (ASCII only). Used on the host, where there
 /// is no system font to rasterise, and as the fallback when the real font cannot
 /// be loaded on the console.
