@@ -62,6 +62,8 @@ void dglabTextDraw(DglabCanvas* canvas, DglabGlyphSource* source, int x, int y, 
     while (*text) {
         uint32_t codepoint = decodeUtf8(text, &used);
         DglabGlyph glyph;
+        int left;
+        int top;
 
         text += used;
 
@@ -74,6 +76,14 @@ void dglabTextDraw(DglabCanvas* canvas, DglabGlyphSource* source, int x, int y, 
 
         // Coverage is blended, which is what makes the glyphs antialiased; the
         // bitmap font's 1-bit glyphs come through as full or no coverage.
+        //
+        // The pen walks in logical pixels - that is the unit the whole layout is
+        // measured in and the unit dglabTextWidth reports - while the bitmap is
+        // drawn at the buffer's own resolution: a scaled display rasterises the
+        // font that much larger, so only the pen's position is converted here.
+        left = dglabCanvasScale(canvas, pen + glyph.bearing_x);
+        top = dglabCanvasScale(canvas, y + source->ascent - glyph.bearing_y);
+
         for (int row = 0; row < glyph.height; row++) {
             const uint8_t* bits = glyph.pixels + (size_t)row * (size_t)glyph.stride;
 
@@ -83,14 +93,71 @@ void dglabTextDraw(DglabCanvas* canvas, DglabGlyphSource* source, int x, int y, 
                                                      (uint8_t)(0x80u >> (col & 7))) ? 255u : 0u);
 
                 if (alpha) {
-                    dglabCanvasBlend(canvas, pen + glyph.bearing_x + col,
-                        y + source->ascent - glyph.bearing_y + row, color, alpha);
+                    dglabCanvasBlend(canvas, left + col, top + row, color, alpha);
                 }
             }
         }
 
         pen += glyph.advance;
     }
+}
+
+// The ink of one line, relative to the y dglabTextDraw is given: `top` is the
+// first row the glyphs cover and `bottom` is one past the last. An empty string
+// or a line of missing glyphs has no ink at all.
+static bool textInkBox(DglabGlyphSource* source, const char* text, int* top, int* bottom)
+{
+    size_t used = 0;
+    bool any = false;
+
+    if (!source || !text)
+        return false;
+
+    *top = 0;
+    *bottom = 0;
+
+    while (*text) {
+        uint32_t codepoint = decodeUtf8(text, &used);
+        DglabGlyph glyph;
+        int glyph_top;
+        int glyph_bottom;
+
+        text += used;
+
+        memset(&glyph, 0, sizeof(glyph));
+
+        if (!source->lookup(source, codepoint, &glyph) || glyph.height <= 0)
+            continue;
+
+        glyph_top = source->ascent - glyph.bearing_y;
+        glyph_bottom = glyph_top + glyph.height;
+
+        if (!any || glyph_top < *top)
+            *top = glyph_top;
+
+        if (!any || glyph_bottom > *bottom)
+            *bottom = glyph_bottom;
+
+        any = true;
+    }
+
+    return any;
+}
+
+int dglabTextInkTop(DglabGlyphSource* source, const char* text)
+{
+    int top = 0;
+    int bottom = 0;
+
+    return textInkBox(source, text, &top, &bottom) ? top : 0;
+}
+
+int dglabTextInkHeight(DglabGlyphSource* source, const char* text)
+{
+    int top = 0;
+    int bottom = 0;
+
+    return textInkBox(source, text, &top, &bottom) ? bottom - top : 0;
 }
 
 int dglabTextWidth(DglabGlyphSource* source, const char* text)

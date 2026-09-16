@@ -26,10 +26,21 @@ typedef struct {
     // starts as the whole canvas; a page narrows it to its content column
     // (dglabPageClipContent) so a row scrolled past the edge is cut there
     // instead of drawn over the rules.
+    //
+    // It is kept in buffer pixels, like every other coordinate the canvas works
+    // with: the display scale is applied on the way in (see below).
     int clip_x;
     int clip_y;
     int clip_width;
     int clip_height;
+
+    // Physical pixels per logical pixel. The screens lay out in the 720p
+    // coordinate system whatever the framebuffer is doing (docs/nro-ui.md), so a
+    // docked console that renders a 1920x1080 frame sets this to 3/2 and every
+    // coordinate handed to the calls below is scaled on the way to the buffer.
+    // 1/1 is the handheld case and the host tools.
+    int scale_num;
+    int scale_den;
 } DglabCanvas;
 
 // Bitmap font. The glyph data is one bit per pixel, tile_width must be a
@@ -45,6 +56,17 @@ typedef struct {
 } DglabFont;
 
 void dglabCanvasInit(DglabCanvas* canvas, uint8_t* pixels, int width, int height, int stride);
+
+// Sets the logical to physical factor. The backend calls it right after
+// dglabCanvasInit and nothing in a screen has to know about it.
+void dglabCanvasSetScale(DglabCanvas* canvas, int num, int den);
+
+// One logical length or coordinate in buffer pixels, rounded to nearest. Edges
+// are always converted one at a time (x and x + width separately) so that two
+// rectangles which share an edge keep sharing it after the conversion instead of
+// leaving a seam or overlapping by a pixel. Text draws through this too, which
+// is what lets the measurements stay logical.
+int dglabCanvasScale(const DglabCanvas* canvas, int value);
 
 // Blends one pixel: alpha 0 keeps what is there, 255 replaces it. This is what
 // glyph coverage needs - everything else in the canvas simply overwrites.

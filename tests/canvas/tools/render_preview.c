@@ -24,6 +24,7 @@
 //   /tmp/preview /tmp/font.bin /tmp/motion.bmp motion   (the Joy-Con mode)
 //   /tmp/preview /tmp/font.bin /tmp/advanced.bmp advanced  (the motion parameters)
 //   /tmp/preview /tmp/font.bin /tmp/log.bmp log        (the sysmodule log page)
+//   /tmp/preview /tmp/font.bin /tmp/dock.bmp menu dock (the docked 1080p frame)
 //   sips -s format png /tmp/preview.bmp --out /tmp/preview.png
 //
 // PREVIEW_TTF=/path/to/font.ttf renders with the real glyph source instead of
@@ -46,17 +47,26 @@
 
 #include "../../lang/lang_fixture.h"
 
+// The handheld frame and the docked one (docs/nro-ui.md): the second is the same
+// layout at 3/2, which is what a docked console draws. Pass `dock` after the
+// page name to render that one.
 #define WIDTH 1280
 #define HEIGHT 720
+#define DOCK_WIDTH 1920
+#define DOCK_HEIGHT 1080
 
 static uint8_t g_font_data[8192];
-static uint8_t g_pixels[WIDTH * HEIGHT * 4];
+static uint8_t g_pixels[DOCK_WIDTH * DOCK_HEIGHT * 4];
 static DglabFontSet g_fonts;
+static int g_width = WIDTH;
+static int g_height = HEIGHT;
+static int g_scale_num = 1;
+static int g_scale_den = 1;
 
 static void writeBmp(const char* path)
 {
-    int row_size = (WIDTH * 3 + 3) & ~3;
-    int data_size = row_size * HEIGHT;
+    int row_size = (g_width * 3 + 3) & ~3;
+    int data_size = row_size * g_height;
     int file_size = 54 + data_size;
     unsigned char header[54];
     FILE* out = fopen(path, "wb");
@@ -77,8 +87,8 @@ static void writeBmp(const char* path)
 
         memcpy(header + 10, &offset, 4);
         memcpy(header + 14, &dib, 4);
-        memcpy(header + 18, &(int){ WIDTH }, 4);
-        memcpy(header + 22, &(int){ HEIGHT }, 4);
+        memcpy(header + 18, &(int){ g_width }, 4);
+        memcpy(header + 22, &(int){ g_height }, 4);
         memcpy(header + 26, &planes, 2);
         memcpy(header + 28, &bpp, 2);
         memcpy(header + 34, &data_size, 4);
@@ -87,11 +97,11 @@ static void writeBmp(const char* path)
     fwrite(header, 1, sizeof(header), out);
 
     // BMP rows run bottom to top.
-    for (int y = HEIGHT - 1; y >= 0; y--) {
+    for (int y = g_height - 1; y >= 0; y--) {
         memset(row, 0, (size_t)row_size);
 
-        for (int x = 0; x < WIDTH; x++) {
-            const uint8_t* pixel = g_pixels + ((size_t)y * WIDTH + x) * 4;
+        for (int x = 0; x < g_width; x++) {
+            const uint8_t* pixel = g_pixels + ((size_t)y * (size_t)g_width + x) * 4;
 
             row[x * 3 + 0] = pixel[2];
             row[x * 3 + 1] = pixel[1];
@@ -123,8 +133,15 @@ int main(int argc, char** argv)
 
     if (argc < 3) {
         fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> "
-                        "[normal|nowifi|stopped|log|menu|motion|advanced|about]\n");
+                        "[normal|nowifi|stopped|log|menu|motion|advanced|about] [dock]\n");
         return 2;
+    }
+
+    if (argc >= 5 && strcmp(argv[4], "dock") == 0) {
+        g_width = DOCK_WIDTH;
+        g_height = DOCK_HEIGHT;
+        g_scale_num = 3;
+        g_scale_den = 2;
     }
 
     // The text comes from the files the NRO ships, not from the binary.
@@ -211,10 +228,11 @@ int main(int argc, char** argv)
         state.status.paired = 0;
     }
 
-    dglabCanvasInit(&canvas, g_pixels, WIDTH, HEIGHT, WIDTH * 4);
+    dglabCanvasInit(&canvas, g_pixels, g_width, g_height, g_width * 4);
+    dglabCanvasSetScale(&canvas, g_scale_num, g_scale_den);
 
     // PREVIEW_TTF=/path/to/font.ttf renders the localised screens with the real
-    // glyph source, at the four sizes the console's UI uses; without it the
+    // glyph source, at the sizes the console's UI uses; without it the
     // bitmap font is used, which is ASCII only and has one size, so every size
     // ends up drawing with it.
     {
@@ -229,18 +247,25 @@ int main(int argc, char** argv)
                 size_t size = fread(font_data, 1, sizeof(font_data), font_file);
                 fclose(font_file);
 
-                DglabTtfFont* title = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_TITLE);
-                DglabTtfFont* body = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_BODY);
-                DglabTtfFont* value = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_VALUE);
-                DglabTtfFont* note = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_NOTE);
+                DglabTtfFont* title = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_TITLE,
+                    g_scale_num, g_scale_den);
+                DglabTtfFont* body = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_BODY,
+                    g_scale_num, g_scale_den);
+                DglabTtfFont* value = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_VALUE,
+                    g_scale_num, g_scale_den);
+                DglabTtfFont* note = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_NOTE,
+                    g_scale_num, g_scale_den);
+                DglabTtfFont* icon = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_ICON,
+                    g_scale_num, g_scale_den);
 
-                if (title && body && value && note) {
+                if (title && body && value && note && icon) {
                     const char* language = getenv("PREVIEW_LANG");
 
                     g_fonts.title = dglabTtfFontSource(title);
                     g_fonts.body = dglabTtfFontSource(body);
                     g_fonts.value = dglabTtfFontSource(value);
                     g_fonts.note = dglabTtfFontSource(note);
+                    g_fonts.icon = dglabTtfFontSource(icon);
                     loaded = true;
 
                     dglabStringsSetLanguage((language && strcmp(language, "en") == 0)
@@ -258,6 +283,7 @@ int main(int argc, char** argv)
             g_fonts.body = source;
             g_fonts.value = source;
             g_fonts.note = source;
+            g_fonts.icon = source;
         }
     }
 

@@ -1,5 +1,7 @@
 #include <dglab/platform/font.h>
 
+#include <dglab/platform/framebuffer.h>
+
 #include <switch.h>
 
 static bool g_pl_ready;
@@ -21,7 +23,17 @@ const DglabFontSet* dglabFontOpen(bool chinese)
 {
     PlFontData font;
     Result rc;
-    DglabTtfFont* faces[4];
+    DglabTtfFont* faces[5];
+    // The glyphs are rasterised at the resolution the framebuffer is running at;
+    // every metric the layout reads stays in logical pixels (docs/nro-ui.md).
+    static const float sizes[5] = {
+        DGLAB_TEXT_TITLE, DGLAB_TEXT_BODY, DGLAB_TEXT_VALUE, DGLAB_TEXT_NOTE,
+        DGLAB_TEXT_ICON,
+    };
+    int scale_num = 1;
+    int scale_den = 1;
+
+    dglabFramebufferScale(&scale_num, &scale_den);
 
     if (!g_pl_ready) {
         // pl:u, because the shared fonts are not available over pl:s on newer
@@ -48,14 +60,13 @@ const DglabFontSet* dglabFontOpen(bool chinese)
     if (R_FAILED(rc))
         return NULL;
 
-    // One face, four sizes: they share the font bytes but each keeps its own
-    // glyph cache, so a page can draw its title, rows, values and notes at once.
+    // One face, one object per size: they share the font bytes but each keeps its
+    // own glyph cache, so a page can draw its title, rows, values, notes and
+    // button letters at once.
     dglabTtfFontReset();
 
-    faces[0] = dglabTtfFontCreate(font.address, font.size, DGLAB_TEXT_TITLE);
-    faces[1] = dglabTtfFontCreate(font.address, font.size, DGLAB_TEXT_BODY);
-    faces[2] = dglabTtfFontCreate(font.address, font.size, DGLAB_TEXT_VALUE);
-    faces[3] = dglabTtfFontCreate(font.address, font.size, DGLAB_TEXT_NOTE);
+    for (size_t i = 0; i < sizeof(faces) / sizeof(faces[0]); i++)
+        faces[i] = dglabTtfFontCreate(font.address, font.size, sizes[i], scale_num, scale_den);
 
     for (size_t i = 0; i < sizeof(faces) / sizeof(faces[0]); i++) {
         if (dglabTtfFontSource(faces[i]) == NULL) {
@@ -68,6 +79,7 @@ const DglabFontSet* dglabFontOpen(bool chinese)
     g_set.body = dglabTtfFontSource(faces[1]);
     g_set.value = dglabTtfFontSource(faces[2]);
     g_set.note = dglabTtfFontSource(faces[3]);
+    g_set.icon = dglabTtfFontSource(faces[4]);
 
     return &g_set;
 }

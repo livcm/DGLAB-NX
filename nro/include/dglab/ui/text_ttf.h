@@ -9,9 +9,9 @@
 // draws the screens on both.
 //
 // One size is one object with its own glyph cache. The console's UI draws a 28px
-// title, 24px rows, 22px values and 18px notes on the same screen, and a single
-// global font could only ever hold one of those, which is what kept the layout
-// on one size until now.
+// title, 24px rows, 22px values, a 20px button letter and 18px notes on the same
+// screen, and a single global font could only ever hold one of those, which is
+// what kept the layout on one size until now.
 
 #include <dglab/ui/text.h>
 
@@ -21,14 +21,17 @@
 /// One prepared size of a face.
 typedef struct DglabTtfFont DglabTtfFont;
 
-/// How many sizes can be prepared at once: the four in text.h. Preparing a fifth
+/// How many sizes can be prepared at once: the five in text.h. Preparing a sixth
 /// fails rather than silently reusing a cache.
-#define DGLAB_TTF_MAX_SIZES 4
+#define DGLAB_TTF_MAX_SIZES 5
 
-/// Prepares one size. `pixel_height` is the em size in pixels (24 for a row,
-/// see text.h). Returns NULL when the data is not a usable font or no slot is
-/// left.
-DglabTtfFont* dglabTtfFontCreate(const void* data, size_t size, float pixel_height);
+/// Prepares one size. `pixel_height` is the em size in *logical* pixels (24 for a
+/// row, see text.h); `scale_num`/`scale_den` are the display's physical pixels
+/// per logical pixel, so a docked console rasterises 42px bitmaps for the 28px
+/// title while every metric the layout reads stays logical. Returns NULL when the
+/// data is not a usable font or no slot is left.
+DglabTtfFont* dglabTtfFontCreate(const void* data, size_t size, float pixel_height,
+    int scale_num, int scale_den);
 
 /// The glyph source for a prepared size, for the text layer.
 DglabGlyphSource* dglabTtfFontSource(DglabTtfFont* font);

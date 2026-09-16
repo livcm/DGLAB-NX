@@ -18,11 +18,14 @@ typedef struct {
     const uint8_t* pixels; ///< coverage (8 bit) or one bit per pixel, see below
     bool coverage;         ///< true: one byte per pixel, 0..255; false: 1 bit, MSB left
     int stride;            ///< bytes per row of the bitmap
-    int width;             ///< ink box
+    // The ink box, in the buffer's pixels: `width`/`height` size the bitmap
+    // itself, which a scaled display rasterises larger than the logical box the
+    // metrics above describe (see docs/nro-ui.md).
+    int width;
     int height;
-    int bearing_x;         ///< pen to ink box left
-    int bearing_y;         ///< baseline up to ink box top
-    int advance;           ///< pen movement after the glyph
+    int bearing_x;         ///< pen to ink box left, in logical pixels
+    int bearing_y;         ///< baseline up to ink box top, in logical pixels
+    int advance;           ///< pen movement after the glyph, in logical pixels
 } DglabGlyph;
 
 typedef struct DglabGlyphSource DglabGlyphSource;
@@ -36,6 +39,10 @@ typedef struct DglabGlyphSource DglabGlyphSource;
 #define DGLAB_TEXT_BODY 24
 #define DGLAB_TEXT_VALUE 22
 #define DGLAB_TEXT_NOTE 18
+/// The letter knocked out of a button icon. Smaller than the row text so the
+/// letter has room inside its shape instead of touching the outline
+/// (docs/nro-ui.md has the measurements).
+#define DGLAB_TEXT_ICON 20
 
 /// A font together with the colour it is drawn in. The components take these
 /// rather than a pair of arguments each, so a screen can describe a row without
@@ -54,6 +61,7 @@ typedef struct {
     DglabGlyphSource* body;  ///< DGLAB_TEXT_BODY
     DglabGlyphSource* value; ///< DGLAB_TEXT_VALUE
     DglabGlyphSource* note;  ///< DGLAB_TEXT_NOTE
+    DglabGlyphSource* icon;  ///< DGLAB_TEXT_ICON
 } DglabFontSet;
 
 struct DglabGlyphSource {
@@ -72,6 +80,13 @@ void dglabTextDraw(DglabCanvas* canvas, DglabGlyphSource* source, int x, int y, 
 
 /// The width dglabTextDraw would use, in pixels.
 int dglabTextWidth(DglabGlyphSource* source, const char* text);
+
+/// Where the ink starts below the y dglabTextDraw is given, and how tall it is.
+/// A button centres its letter with these rather than with the line box: the box
+/// carries the descender space under the baseline, which leaves a letter that
+/// sits on the baseline visibly high in its shape.
+int dglabTextInkTop(DglabGlyphSource* source, const char* text);
+int dglabTextInkHeight(DglabGlyphSource* source, const char* text);
 
 /// Takes one line's worth of `text` that fits `max_width` pixels, writes it into
 /// out (without any trailing space) and returns how many bytes of `text` that

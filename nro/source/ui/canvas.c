@@ -8,8 +8,41 @@ void dglabCanvasInit(DglabCanvas* canvas, uint8_t* pixels, int width, int height
     canvas->width = width;
     canvas->height = height;
     canvas->stride = stride;
+    canvas->scale_num = 1;
+    canvas->scale_den = 1;
 
     dglabCanvasClearClip(canvas);
+}
+
+void dglabCanvasSetScale(DglabCanvas* canvas, int num, int den)
+{
+    if (!canvas)
+        return;
+
+    canvas->scale_num = num > 0 ? num : 1;
+    canvas->scale_den = den > 0 ? den : 1;
+}
+
+int dglabCanvasScale(const DglabCanvas* canvas, int value)
+{
+    int num;
+    int den;
+    int scaled;
+
+    if (!canvas)
+        return value;
+
+    num = canvas->scale_num > 0 ? canvas->scale_num : 1;
+    den = canvas->scale_den > 0 ? canvas->scale_den : 1;
+
+    if (num == den)
+        return value;
+
+    scaled = value * num;
+
+    // Round half away from zero, so the conversion is symmetric about the
+    // origin and an edge does not drift depending on which side of it we are.
+    return scaled >= 0 ? (scaled + den / 2) / den : -((-scaled + den / 2) / den);
 }
 
 void dglabCanvasSetClip(DglabCanvas* canvas, int x, int y, int width, int height)
@@ -17,10 +50,14 @@ void dglabCanvasSetClip(DglabCanvas* canvas, int x, int y, int width, int height
     if (!canvas)
         return;
 
-    canvas->clip_x = x;
-    canvas->clip_y = y;
-    canvas->clip_width = width > 0 ? width : 0;
-    canvas->clip_height = height > 0 ? height : 0;
+    // The clip is stored in buffer pixels: the pixel-level helpers below
+    // (insideClip, clipRect) work on buffer coordinates only.
+    canvas->clip_x = dglabCanvasScale(canvas, x);
+    canvas->clip_y = dglabCanvasScale(canvas, y);
+    canvas->clip_width = width > 0
+        ? dglabCanvasScale(canvas, x + width) - canvas->clip_x : 0;
+    canvas->clip_height = height > 0
+        ? dglabCanvasScale(canvas, y + height) - canvas->clip_y : 0;
 }
 
 void dglabCanvasClearClip(DglabCanvas* canvas)
@@ -28,7 +65,12 @@ void dglabCanvasClearClip(DglabCanvas* canvas)
     if (!canvas)
         return;
 
-    dglabCanvasSetClip(canvas, 0, 0, canvas->width, canvas->height);
+    // The whole buffer, in buffer pixels: going through dglabCanvasSetClip would
+    // scale the buffer's own size a second time.
+    canvas->clip_x = 0;
+    canvas->clip_y = 0;
+    canvas->clip_width = canvas->width;
+    canvas->clip_height = canvas->height;
 }
 
 // Whether a pixel is inside the active clip rectangle. The canvas bounds are a
@@ -116,15 +158,14 @@ void dglabCanvasBlend(DglabCanvas* canvas, int x, int y, uint32_t color, uint8_t
     }
 }
 
-void dglabCanvasFill(DglabCanvas* canvas, int x, int y, int width, int height, uint32_t color)
+// The one place pixels are written in bulk. Everything else converts its
+// logical coordinates to buffer pixels first (edge by edge, see
+// dglabCanvasScale) and then works entirely in that space.
+static void fillPixels(DglabCanvas* canvas, int left, int top, int right, int bottom,
+    uint32_t color)
 {
-    if (!canvas->pixels || width <= 0 || height <= 0)
+    if (!canvas->pixels || left >= right || top >= bottom)
         return;
-
-    int left = x;
-    int top = y;
-    int right = x + width;
-    int bottom = y + height;
 
     if (!clipRect(canvas, &left, &top, &right, &bottom))
         return;
@@ -135,22 +176,45 @@ void dglabCanvasFill(DglabCanvas* canvas, int x, int y, int width, int height, u
     }
 }
 
-void dglabCanvasFrame(DglabCanvas* canvas, int x, int y, int width, int height, int thickness,
-    uint32_t color)
+void dglabCanvasFill(DglabCanvas* canvas, int x, int y, int width, int height, uint32_t color)
 {
+    if (!canvas || width <= 0 || height <= 0)
+        return;
+
+    fillPixels(canvas, dglabCanvasScale(canvas, x), dglabCanvasScale(canvas, y),
+        dglabCanvasScale(canvas, x + width), dglabCanvasScale(canvas, y + height), color);
+}
+
+// A rectangle outline, in buffer pixels.
+static void framePixels(DglabCanvas* canvas, int left, int top, int right, int bottom,
+    int thickness, uint32_t color)
+{
+    int width = right - left;
+    int height = bottom - top;
+
     if (thickness <= 0)
         return;
 
     if (thickness * 2 >= width || thickness * 2 >= height) {
-        dglabCanvasFill(canvas, x, y, width, height, color);
+        fillPixels(canvas, left, top, right, bottom, color);
         return;
     }
 
-    dglabCanvasFill(canvas, x, y, width, thickness, color);
-    dglabCanvasFill(canvas, x, y + height - thickness, width, thickness, color);
-    dglabCanvasFill(canvas, x, y + thickness, thickness, height - thickness * 2, color);
-    dglabCanvasFill(canvas, x + width - thickness, y + thickness, thickness,
-        height - thickness * 2, color);
+    fillPixels(canvas, left, top, right, top + thickness, color);
+    fillPixels(canvas, left, bottom - thickness, right, bottom, color);
+    fillPixels(canvas, left, top + thickness, left + thickness, bottom - thickness, color);
+    fillPixels(canvas, right - thickness, top + thickness, right, bottom - thickness, color);
+}
+
+void dglabCanvasFrame(DglabCanvas* canvas, int x, int y, int width, int height, int thickness,
+    uint32_t color)
+{
+    if (!canvas || width <= 0 || height <= 0)
+        return;
+
+    framePixels(canvas, dglabCanvasScale(canvas, x), dglabCanvasScale(canvas, y),
+        dglabCanvasScale(canvas, x + width), dglabCanvasScale(canvas, y + height),
+        dglabCanvasScale(canvas, thickness), color);
 }
 
 // How many of a pixel's four sample points fall inside the circle of `radius`
@@ -242,17 +306,29 @@ static void blendHits(DglabCanvas* canvas, int x, int y, int hits, uint32_t colo
 
 void dglabCanvasHLine(DglabCanvas* canvas, int x, int y, int width, uint32_t color)
 {
-    dglabCanvasFill(canvas, x, y, width, 1, color);
+    int top;
+    int bottom;
+
+    if (!canvas || width <= 0)
+        return;
+
+    // A rule is one logical pixel; on a scaled display that is one or two, and
+    // the two edges of the strip decide which.
+    top = dglabCanvasScale(canvas, y);
+    bottom = dglabCanvasScale(canvas, y + 1);
+
+    fillPixels(canvas, dglabCanvasScale(canvas, x), top, dglabCanvasScale(canvas, x + width),
+        bottom > top ? bottom : top + 1, color);
 }
 
-void dglabCanvasRoundFill(DglabCanvas* canvas, int x, int y, int width, int height, int radius,
+static void roundFillPixels(DglabCanvas* canvas, int x, int y, int width, int height, int radius,
     uint32_t color)
 {
     if (width <= 0 || height <= 0)
         return;
 
     if (radius <= 0) {
-        dglabCanvasFill(canvas, x, y, width, height, color);
+        fillPixels(canvas, x, y, x + width, y + height, color);
         return;
     }
 
@@ -264,9 +340,9 @@ void dglabCanvasRoundFill(DglabCanvas* canvas, int x, int y, int width, int heig
 
     // The straight middle is a plain fill; only the four corner squares need
     // the coverage test.
-    dglabCanvasFill(canvas, x + radius, y, width - radius * 2, height, color);
-    dglabCanvasFill(canvas, x, y + radius, radius, height - radius * 2, color);
-    dglabCanvasFill(canvas, x + width - radius, y + radius, radius, height - radius * 2, color);
+    fillPixels(canvas, x + radius, y, x + width - radius, y + height, color);
+    fillPixels(canvas, x, y + radius, x + radius, y + height - radius, color);
+    fillPixels(canvas, x + width - radius, y + radius, x + width, y + height - radius, color);
 
     for (int row = y; row < y + radius; row++) {
         int bottom = y + height - 1 - (row - y);
@@ -286,7 +362,21 @@ void dglabCanvasRoundFill(DglabCanvas* canvas, int x, int y, int width, int heig
     }
 }
 
-void dglabCanvasRoundFrame(DglabCanvas* canvas, int x, int y, int width, int height, int radius,
+void dglabCanvasRoundFill(DglabCanvas* canvas, int x, int y, int width, int height, int radius,
+    uint32_t color)
+{
+    if (!canvas || width <= 0 || height <= 0)
+        return;
+
+    // The shape is converted once, edge by edge, so its outline matches the
+    // plain fills around it.
+    roundFillPixels(canvas, dglabCanvasScale(canvas, x), dglabCanvasScale(canvas, y),
+        dglabCanvasScale(canvas, x + width) - dglabCanvasScale(canvas, x),
+        dglabCanvasScale(canvas, y + height) - dglabCanvasScale(canvas, y),
+        dglabCanvasScale(canvas, radius), color);
+}
+
+static void roundFramePixels(DglabCanvas* canvas, int x, int y, int width, int height, int radius,
     int thickness, uint32_t color)
 {
     int inner_x;
@@ -299,7 +389,7 @@ void dglabCanvasRoundFrame(DglabCanvas* canvas, int x, int y, int width, int hei
         return;
 
     if (thickness * 2 >= width || thickness * 2 >= height) {
-        dglabCanvasRoundFill(canvas, x, y, width, height, radius, color);
+        roundFillPixels(canvas, x, y, width, height, radius, color);
         return;
     }
 
@@ -321,7 +411,27 @@ void dglabCanvasRoundFrame(DglabCanvas* canvas, int x, int y, int width, int hei
     }
 }
 
-void dglabCanvasDisc(DglabCanvas* canvas, int cx, int cy, int radius, uint32_t color)
+void dglabCanvasRoundFrame(DglabCanvas* canvas, int x, int y, int width, int height, int radius,
+    int thickness, uint32_t color)
+{
+    int left;
+    int top;
+
+    if (!canvas || width <= 0 || height <= 0)
+        return;
+
+    // Shared edges again: the ring's inner rectangle is derived from the same
+    // converted outline, so the stroke keeps an even width.
+    left = dglabCanvasScale(canvas, x);
+    top = dglabCanvasScale(canvas, y);
+
+    roundFramePixels(canvas, left, top,
+        dglabCanvasScale(canvas, x + width) - left,
+        dglabCanvasScale(canvas, y + height) - top,
+        dglabCanvasScale(canvas, radius), dglabCanvasScale(canvas, thickness), color);
+}
+
+static void discPixels(DglabCanvas* canvas, int cx, int cy, int radius, uint32_t color)
 {
     if (radius <= 0)
         return;
@@ -332,7 +442,25 @@ void dglabCanvasDisc(DglabCanvas* canvas, int cx, int cy, int radius, uint32_t c
     }
 }
 
-void dglabCanvasRing(DglabCanvas* canvas, int cx, int cy, int radius, int thickness,
+void dglabCanvasDisc(DglabCanvas* canvas, int cx, int cy, int radius, uint32_t color)
+{
+    int left;
+    int top;
+
+    if (!canvas || radius <= 0)
+        return;
+
+    // The bounding box is converted, not the centre and the radius, so the disc
+    // sits exactly where its own edges say it does.
+    left = dglabCanvasScale(canvas, cx - radius);
+    top = dglabCanvasScale(canvas, cy - radius);
+
+    discPixels(canvas, (left + dglabCanvasScale(canvas, cx + radius)) / 2,
+        (top + dglabCanvasScale(canvas, cy + radius)) / 2,
+        (dglabCanvasScale(canvas, cx + radius) - left) / 2, color);
+}
+
+static void ringPixels(DglabCanvas* canvas, int cx, int cy, int radius, int thickness,
     uint32_t color)
 {
     int inner;
@@ -350,6 +478,26 @@ void dglabCanvasRing(DglabCanvas* canvas, int cx, int cy, int radius, int thickn
             blendHits(canvas, col, row, covered, color);
         }
     }
+}
+
+void dglabCanvasRing(DglabCanvas* canvas, int cx, int cy, int radius, int thickness,
+    uint32_t color)
+{
+    int left;
+    int top;
+    int right;
+    int bottom;
+
+    if (!canvas || radius <= 0 || thickness <= 0)
+        return;
+
+    left = dglabCanvasScale(canvas, cx - radius);
+    top = dglabCanvasScale(canvas, cy - radius);
+    right = dglabCanvasScale(canvas, cx + radius);
+    bottom = dglabCanvasScale(canvas, cy + radius);
+
+    ringPixels(canvas, (left + right) / 2, (top + bottom) / 2, (right - left) / 2,
+        dglabCanvasScale(canvas, thickness), color);
 }
 
 static bool glyphPixel(const DglabFont* font, int glyph, int row, int col)
@@ -371,7 +519,7 @@ void dglabCanvasText(DglabCanvas* canvas, const DglabFont* font, int x, int y, i
 {
     int cursor = x;
 
-    if (scale <= 0)
+    if (!canvas || scale <= 0)
         scale = 1;
 
     for (const char* p = text; *p; p++) {
@@ -381,9 +529,18 @@ void dglabCanvasText(DglabCanvas* canvas, const DglabFont* font, int x, int y, i
         if (glyph >= 0 && glyph < font->glyph_count) {
             for (int row = 0; row < font->tile_height; row++) {
                 for (int col = 0; col < font->tile_width; col++) {
-                    if (glyphPixel(font, glyph, row, col))
-                        dglabCanvasFill(canvas, cursor + col * scale, y + row * scale, scale,
-                            scale, color);
+                    int left;
+                    int top;
+
+                    if (!glyphPixel(font, glyph, row, col))
+                        continue;
+
+                    left = dglabCanvasScale(canvas, cursor + col * scale);
+                    top = dglabCanvasScale(canvas, y + row * scale);
+
+                    fillPixels(canvas, left, top,
+                        dglabCanvasScale(canvas, cursor + (col + 1) * scale),
+                        dglabCanvasScale(canvas, y + (row + 1) * scale), color);
                 }
             }
         }
@@ -404,22 +561,42 @@ void dglabCanvasQr(DglabCanvas* canvas, const DglabQrCode* code, int x, int y, i
     int quiet_zone, uint32_t dark, uint32_t light)
 {
     int total;
+    int module;
+    int side;
+    int left;
+    int top;
 
-    if (module_size <= 0)
+    if (!canvas || module_size <= 0)
         return;
 
     total = (int)code->size + quiet_zone * 2;
+    // Whole buffer pixels per module, rounded down again after the scale: a
+    // module that straddled a pixel edge would come out soft, and the phone's
+    // scanner is the one consumer here that cannot be retried.
+    module = dglabCanvasScale(canvas, module_size);
+
+    if (module < 1)
+        module = 1;
+
+    side = total * module;
+    // Centred inside the box the caller reserved in logical units, so rounding
+    // the module down cannot push the code off centre.
+    left = dglabCanvasScale(canvas, x) +
+        (dglabCanvasScale(canvas, x + total * module_size) - dglabCanvasScale(canvas, x) - side) / 2;
+    top = dglabCanvasScale(canvas, y) +
+        (dglabCanvasScale(canvas, y + total * module_size) - dglabCanvasScale(canvas, y) - side) / 2;
 
     if (light)
-        dglabCanvasFill(canvas, x, y, total * module_size, total * module_size, light);
+        fillPixels(canvas, left, top, left + side, top + side, light);
 
     for (int row = 0; row < code->size; row++) {
         for (int col = 0; col < code->size; col++) {
             if (!code->modules[row][col])
                 continue;
 
-            dglabCanvasFill(canvas, x + (col + quiet_zone) * module_size,
-                y + (row + quiet_zone) * module_size, module_size, module_size, dark);
+            fillPixels(canvas, left + (col + quiet_zone) * module,
+                top + (row + quiet_zone) * module, left + (col + quiet_zone + 1) * module,
+                top + (row + quiet_zone + 1) * module, dark);
         }
     }
 }

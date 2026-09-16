@@ -9,7 +9,9 @@
 
 #include <stdbool.h>
 
-/// Loads the shared font for the language and prepares the four sizes.
+/// Loads the shared font for the language and prepares every size in
+/// DglabFontSet (title, body, value, note and the button icons), rasterised at
+/// the display's own scale.
 /// `chinese` picks the Simplified Chinese face; otherwise the standard one.
 /// Returns NULL when the font could not be loaded, in which case the caller
 /// falls back to the built in bitmap font (ASCII only).
