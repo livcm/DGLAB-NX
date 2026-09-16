@@ -226,13 +226,18 @@ DG-LAB Bluetooth Protocol 的官方参考仓库为：
     │   ├── exefs.nsp
     │   ├── toolbox.json
     │   └── flags/boot2.flag
-    ├── DGLAB-NX.nro       前端 NRO
+    ├── DGLAB-NX/         前端（整份拷到 SD:/switch/DGLAB-NX/）
+    │   ├── DGLAB-NX.nro
+    │   └── lang/          NRO 运行期读取的界面文案（每个语言一个 .json）
     └── DGLAB-NX-Ovl.ovl   Overlay
 
 规则：
 
 - 根目录 `make` 构建全部组件并生成上述布局；`make clean` 清除这些产物；
 - 各组件用 `make -C <component> package` 只生成自己那一部分；
+- `release/DGLAB-NX/` 的内容与 SD 卡上的目录一一对应：`lang/` 的源头是仓库根目录的
+  `lang/`，随 `nro` 一起发布，必须和 `DGLAB-NX.nro` 一起安装，否则 NRO 启动时会报错
+  退出（见 `nro/AGENTS.md`）；
 - `<TITLE_ID>` 目录名必须由 `sysmodule/DGLAB-NX-Core.json` 推导，禁止在 Makefile、
   脚本或文档里另写一份；
 - `release/` 属于构建产物，不提交到 Git。

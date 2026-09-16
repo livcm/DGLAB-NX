@@ -31,12 +31,15 @@
 #define LOG_LINE_MAX 192
 #define LOG_POLL_ROUNDS 8
 
-// Everything the NRO writes lives in one directory, created on startup.
+// The same SD card layout the rest of the front end uses (main.c): this view
+// reads its optional target address from config/ and writes its log to logs/.
 #define DATA_DIR "sdmc:/switch/DGLAB-NX"
-#define LOG_FILE_PATH DATA_DIR "/dglab-ble-poc.log"
+#define CONFIG_DIR DATA_DIR "/config"
+#define LOG_DIR DATA_DIR "/logs"
+#define LOG_FILE_PATH LOG_DIR "/dglab-ble-poc.log"
 // Optional: connect straight to this address instead of scanning, for the case
 // where the console's scan filters cannot report the device.
-#define ADDRESS_FILE_PATH DATA_DIR "/dglab-ble-address.txt"
+#define ADDRESS_FILE_PATH CONFIG_DIR "/dglab-ble-address.txt"
 
 static char g_log_lines[LOG_LINES][LOG_LINE_LEN];
 static int g_log_filled;
@@ -87,13 +90,15 @@ static void logPushLine(const char* line)
     }
 }
 
-// Creates sdmc:/switch/DGLAB-NX if it is not there yet. A failure here is not
-// fatal: the directory is usually already present, and if the card really is
+// Creates the SD card directories if they are not there yet. A failure here is
+// not fatal: they are usually already present, and if the card really is
 // unusable the fopen below reports it.
 static void ensureDataDir(void)
 {
     mkdir("sdmc:/switch", 0777);
     mkdir(DATA_DIR, 0777);
+    mkdir(CONFIG_DIR, 0777);
+    mkdir(LOG_DIR, 0777);
 }
 
 // libnx's default init already mounts sdmc, so mounting again must never be

@@ -14,5 +14,5 @@ typedef struct {
     bool saved;          ///< the last change reached the config file
 } DglabAdvancedState;
 
-void dglabAdvancedDraw(DglabCanvas* canvas, DglabGlyphSource* text,
+void dglabAdvancedDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     const DglabAdvancedState* state);

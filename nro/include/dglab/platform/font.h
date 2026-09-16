@@ -9,11 +9,11 @@
 
 #include <stdbool.h>
 
-/// Loads the shared font for the language and prepares the glyph source.
+/// Loads the shared font for the language and prepares the four sizes.
 /// `chinese` picks the Simplified Chinese face; otherwise the standard one.
 /// Returns NULL when the font could not be loaded, in which case the caller
 /// falls back to the built in bitmap font (ASCII only).
-DglabGlyphSource* dglabFontOpen(bool chinese, float pixel_height);
+const DglabFontSet* dglabFontOpen(bool chinese);
 
 void dglabFontClose(void);
 

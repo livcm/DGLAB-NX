@@ -14,15 +14,21 @@
 // Then:
 //
 //   cc -std=c11 -I nro/include -I common/include -I tests/net/hostshim \
+//       -DDGLAB_TEST_LANG_DIR='"/path/to/DGLAB-NX/lang"' \
 //       tests/canvas/tools/render_preview.c nro/source/ui/*.c nro/source/motion/*.c \
-//       -o /tmp/preview -lm
+//       nro/source/util/json.c -o /tmp/preview -lm
 //   /tmp/preview /tmp/font.bin /tmp/preview.bmp
 //   /tmp/preview /tmp/font.bin /tmp/nowifi.bmp nowifi   (no LAN address yet)
 //   /tmp/preview /tmp/font.bin /tmp/stopped.bmp stopped (server not started)
 //   /tmp/preview /tmp/font.bin /tmp/menu.bmp menu       (the mode menu)
 //   /tmp/preview /tmp/font.bin /tmp/motion.bmp motion   (the Joy-Con mode)
 //   /tmp/preview /tmp/font.bin /tmp/advanced.bmp advanced  (the motion parameters)
+//   /tmp/preview /tmp/font.bin /tmp/log.bmp log        (the sysmodule log page)
 //   sips -s format png /tmp/preview.bmp --out /tmp/preview.png
+//
+// PREVIEW_TTF=/path/to/font.ttf renders with the real glyph source instead of
+// the bitmap font (the console's system font), and PREVIEW_LANG=en keeps the
+// English strings with it: the console picks the face and the strings together.
 
 #include <dglab/ui/screen.h>
 #include <dglab/ui/advanced.h>
@@ -38,12 +44,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../../lang/lang_fixture.h"
+
 #define WIDTH 1280
 #define HEIGHT 720
 
 static uint8_t g_font_data[8192];
 static uint8_t g_pixels[WIDTH * HEIGHT * 4];
-static DglabGlyphSource* g_text;
+static DglabFontSet g_fonts;
 
 static void writeBmp(const char* path)
 {
@@ -115,8 +123,18 @@ int main(int argc, char** argv)
 
     if (argc < 3) {
         fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> "
-                        "[normal|nowifi|stopped|menu|motion|advanced]\n");
+                        "[normal|nowifi|stopped|log|menu|motion|advanced|about]\n");
         return 2;
+    }
+
+    // The text comes from the files the NRO ships, not from the binary.
+    {
+        char message[512] = { 0 };
+
+        if (!dglabTestLoadLanguages(message, sizeof(message))) {
+            fprintf(stderr, "cannot load the language files: %s\n", message);
+            return 5;
+        }
     }
 
     file = fopen(argv[1], "rb");
@@ -196,10 +214,12 @@ int main(int argc, char** argv)
     dglabCanvasInit(&canvas, g_pixels, WIDTH, HEIGHT, WIDTH * 4);
 
     // PREVIEW_TTF=/path/to/font.ttf renders the localised screens with the real
-    // glyph source; without it the bitmap font is used, which is ASCII only.
+    // glyph source, at the four sizes the console's UI uses; without it the
+    // bitmap font is used, which is ASCII only and has one size, so every size
+    // ends up drawing with it.
     {
         const char* ttf = getenv("PREVIEW_TTF");
-        DglabGlyphSource* source = NULL;
+        bool loaded = false;
 
         if (ttf) {
             FILE* font_file = fopen(ttf, "rb");
@@ -209,22 +229,36 @@ int main(int argc, char** argv)
                 size_t size = fread(font_data, 1, sizeof(font_data), font_file);
                 fclose(font_file);
 
-                const char* size_text = getenv("PREVIEW_TTF_SIZE");
-                float pixel_height = size_text ? (float)atof(size_text) : 24.0f;
+                DglabTtfFont* title = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_TITLE);
+                DglabTtfFont* body = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_BODY);
+                DglabTtfFont* value = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_VALUE);
+                DglabTtfFont* note = dglabTtfFontCreate(font_data, size, DGLAB_TEXT_NOTE);
 
-                if (dglabTtfFontInit(font_data, size, pixel_height)) {
-                    source = dglabTtfFontSource();
-                    dglabStringsSetLanguage(DglabLanguage_ChineseSimplified);
+                if (title && body && value && note) {
+                    const char* language = getenv("PREVIEW_LANG");
+
+                    g_fonts.title = dglabTtfFontSource(title);
+                    g_fonts.body = dglabTtfFontSource(body);
+                    g_fonts.value = dglabTtfFontSource(value);
+                    g_fonts.note = dglabTtfFontSource(note);
+                    loaded = true;
+
+                    dglabStringsSetLanguage((language && strcmp(language, "en") == 0)
+                        ? DglabLanguage_English : DglabLanguage_ChineseSimplified);
                 } else {
                     fprintf(stderr, "not a usable font: %s\n", ttf);
                 }
             }
         }
 
-        if (!source)
-            source = dglabBitmapGlyphSource(&font);
+        if (!loaded) {
+            DglabGlyphSource* source = dglabBitmapGlyphSource(&font);
 
-        g_text = source;
+            g_fonts.title = source;
+            g_fonts.body = source;
+            g_fonts.value = source;
+            g_fonts.note = source;
+        }
     }
 
     if (argc >= 4 && strcmp(argv[3], "about") == 0) {
@@ -236,7 +270,7 @@ int main(int argc, char** argv)
         about.version = state.version;
         about.github_url = "https://github.com/livcm/DGLAB-NX";
 
-        dglabAboutDraw(&canvas, g_text, &about);
+        dglabAboutDraw(&canvas, &g_fonts, &about);
     } else if (argc >= 4 && strcmp(argv[3], "menu") == 0) {
         DglabMenuState menu;
 
@@ -244,7 +278,7 @@ int main(int argc, char** argv)
         menu.selected = DglabMenu_ItemMotion;
         menu.sysmodule_ok = true;
 
-        dglabMenuDraw(&canvas, g_text, &menu);
+        dglabMenuDraw(&canvas, &g_fonts, &menu);
     } else if (argc >= 4 && strcmp(argv[3], "motion") == 0) {
         DglabMotionScreenState motion;
 
@@ -265,7 +299,7 @@ int main(int argc, char** argv)
         motion.last_upload_tone = DglabCmdTone_Ok;
         motion.server_running = true;
 
-        dglabMotionScreenDraw(&canvas, g_text, &motion);
+        dglabMotionScreenDraw(&canvas, &g_fonts, &motion);
     } else if (argc >= 4 && strcmp(argv[3], "advanced") == 0) {
         DglabMotionFeedConfig motion_config;
         DglabAdvancedState advanced;
@@ -281,9 +315,15 @@ int main(int argc, char** argv)
         advanced.selected = DglabMotionSetting_FrequencyFast;
         advanced.saved = true;
 
-        dglabAdvancedDraw(&canvas, g_text, &advanced);
+        dglabAdvancedDraw(&canvas, &g_fonts, &advanced);
+    } else if (argc >= 4 && strcmp(argv[3], "log") == 0) {
+        // The sysmodule log page: what Y opens on the socket page.
+        state.log_open = true;
+        state.log_offset = 0;
+
+        dglabScreenDraw(&canvas, &g_fonts, &state);
     } else {
-        dglabScreenDraw(&canvas, g_text, &font, &state);
+        dglabScreenDraw(&canvas, &g_fonts, &state);
     }
 
     writeBmp(argv[2]);

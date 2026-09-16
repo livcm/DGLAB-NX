@@ -49,6 +49,7 @@ DG-LAB App（手机，负责 BLE）
 | --- | --- |
 | `sysmodule/` | DG-LAB 设备生命周期、协议实现、WebSocket 服务端、IPC 服务端 |
 | `nro/` | Homebrew 前端：界面、二维码、测试按键、日志落盘 |
+| `lang/` | 界面文案，一个语言一个 `.json`（构建时复制到 `release/DGLAB-NX/lang/`） |
 | `overlay/` | Tesla / Ultrahand overlay（未实现） |
 | `mods/` | 特定游戏的联动（未实现） |
 | `common/` | 组件间共享的 IPC 定义与公共类型 |
@@ -71,7 +72,7 @@ make clean           # 清除 release/ 与各组件的 build/
 
 ```
 make -C sysmodule package   # release/<TITLE_ID>/{exefs.nsp,toolbox.json,flags/boot2.flag}
-make -C nro package         # release/DGLAB-NX.nro
+make -C nro package         # release/DGLAB-NX/{DGLAB-NX.nro, lang/*.json}
 ```
 
 sysmodule 的 Title ID 只在 `sysmodule/DGLAB-NX-Core.json` 里写一次，Makefile、安装目录名和
@@ -81,11 +82,21 @@ sysmodule 的 Title ID 只在 `sysmodule/DGLAB-NX-Core.json` 里写一次，Make
 
 ```
 release/00FF072107210721/  →  SD:/atmosphere/contents/00FF072107210721/
-release/DGLAB-NX.nro       →  SD:/switch/DGLAB-NX.nro
+release/DGLAB-NX/          →  SD:/switch/DGLAB-NX/      （整个目录一起拷）
 ```
 
 sysmodule 带 `flags/boot2.flag`（`toolbox.json` 里也是 `requires_reboot: true`），
 随系统启动加载，复制完要重启主机。overlay 还没实现，所以现在没有 `DGLAB-NX-Ovl.ovl`。
+
+NRO 的运行期文件都在这一个目录下，并且固定分层：
+
+    SD:/switch/DGLAB-NX/DGLAB-NX.nro     NRO 本体
+    SD:/switch/DGLAB-NX/lang/            界面文案，运行时读，不是编进 NRO 的
+    SD:/switch/DGLAB-NX/config/          app.cfg、motion.cfg 等设置（自动创建）
+    SD:/switch/DGLAB-NX/logs/            dglab-net.log、dglab-sys.log 等（自动创建）
+
+`lang/` 必须和 NRO 一起拷过去：一个 `.json` 都找不到时 NRO 会在启动时打印路径与原因后
+退出。文案格式和 key 清单见 `docs/nro-ui.md`。
 
 需要 Atmosphère。当前实机验证环境是 HOS 22.5.0 + AMS 1.11.2。
 
@@ -101,7 +112,7 @@ sysmodule 带 `flags/boot2.flag`（`toolbox.json` 里也是 `requires_reboot: tr
 `docs/joycon-input.md`。
 
 同一菜单里的 `Advanced (motion)` 是体感玩法的参数页（死区、灵敏度、包络、频率、波形
-强度上限），改完自动存到 `sdmc:/switch/DGLAB-NX/motion.cfg`。
+强度上限），改完自动存到 `sdmc:/switch/DGLAB-NX/config/motion.cfg`。
 
 按了没反应先看界面上的 `last cmd` 行：它显示最近一次按键的结果（`ok` / `no app bound`
 / `socket error`），红色是失败、黄色是"命令发出去了但听不到"（那一路强度还是 0）。
@@ -131,7 +142,7 @@ sysmodule 带 `flags/boot2.flag`（`toolbox.json` 里也是 `requires_reboot: tr
 - **测试按钮会真的输出电压。** `ZL`/`ZR` 是测试波形 + 强度，请先确认设备和电极连接
   正常，强度从 0 开始一点点加。
 
-排查实机问题时看 `sdmc:/switch/DGLAB-NX/dglab-net.log`：NRO 会把服务端的收发日志
+排查实机问题时看 `sdmc:/switch/DGLAB-NX/logs/dglab-net.log`：NRO 会把服务端的收发日志
 增量写到那里，出问题直接把这个文件发回来最有用。
 
 ## 测试
@@ -142,6 +153,7 @@ make -C tests/ipc        # 手写 CMIF 服务端与 libnx 客户端的发法是�
 make -C tests/net        # WebSocket 帧、Socket 协议、服务端会话、真实回环端到端
 make -C tests/qr         # 二维码与 CoreImage 参考矩阵逐模块比对
 make -C tests/canvas     # canvas 裁剪、字体位序、整屏排版
+make -C tests/lang       # JSON 读取、语言文件加载、lang/*.json 是否完整
 ```
 
 这些测试都不需要 Switch，也不需要 devkitA64（只有 `tests/ipc` 要读 libnx 头文件）。

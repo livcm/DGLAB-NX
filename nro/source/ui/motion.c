@@ -1,154 +1,150 @@
 #include <dglab/ui/motion.h>
 
+#include <dglab/ui/list.h>
+#include <dglab/ui/page.h>
 #include <dglab/ui/strings.h>
 #include <dglab/ui/theme.h>
+
 #include <stdio.h>
 #include <string.h>
 
-// Colours come from the active theme (nro/include/dglab/ui/theme.h); the names
-// below are only there to keep the drawing code readable.
-#define kBackground (dglabThemeGet()->background)
-#define kPanel (dglabThemeGet()->panel)
-#define kPanelBorder (dglabThemeGet()->panel_border)
-#define kSelected (dglabThemeGet()->selected)
-#define kText (dglabThemeGet()->text)
-#define kMuted (dglabThemeGet()->muted)
-#define kAccent (dglabThemeGet()->accent)
-#define kWarn (dglabThemeGet()->warn)
-#define kError (dglabThemeGet()->error)
-#define kWhite (dglabThemeGet()->white)
-#define kBlack (dglabThemeGet()->black)
-
-#define SCREEN_WIDTH 1280
-#define SCREEN_HEIGHT 720
-#define MARGIN 24
-#define GAP 16
-#define TITLE_HEIGHT 56
-#define PANEL_HEIGHT 300
-#define LINE_HEIGHT 20
-#define PANEL_WIDTH 560
-
-// Same palette as screen.c.
+// The motion mode is a read-only page with the same shortcuts as the socket
+// page: the D-pad dials the two channel strengths, ZL and ZR fire a test, X
+// clears what a test left playing. Nothing is focused and nothing scrolls, so
+// the page has to fit the content column as it is.
 
 static uint32_t toneColor(u32 tone)
 {
+    const DglabTheme* theme = dglabThemeGet();
+
     switch (tone) {
-        case DglabCmdTone_Warn: return kWarn;
-        case DglabCmdTone_Error: return kError;
-        default: return kText;
+        case DglabCmdTone_Warn: return theme->warn;
+        case DglabCmdTone_Error: return theme->error;
+        default: return theme->text;
     }
 }
 
-static void drawLine(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, const char* label,
-    const char* value, uint32_t color)
-{
-    dglabTextDraw(canvas, text, x, y, label, kMuted);
-    dglabTextDraw(canvas, text, x + 12 * 16, y, value, color);
-}
-
-// Line breaking comes from the text layer, which knows how wide a character is
-// and where a break is allowed (Chinese has no spaces to break at).
-static void drawWrapped(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, int width,
-    const char* value, uint32_t color)
-{
-    char line[192];
-
-    while (*value) {
-        size_t taken = dglabTextWrapLine(text, value, width, line, sizeof(line));
-
-        if (taken == 0)
-            break;
-
-        dglabTextDraw(canvas, text, x, y, line, color);
-
-        y += text->line_height;
-        value += taken;
-
-        while (*value == ' ')
-            value++;
-    }
-}
-
-// One channel's live row: whether that side is connected, how hard it is being
+// One channel's live line: whether that side is connected, how hard it is being
 // moved, and what the mapping is sending because of it.
-static void drawChannel(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, const char* which,
-    bool connected, bool moving, unsigned level, unsigned frequency, uint32_t color)
+static const char* channelText(const DglabMotionScreenState* state, bool left, char* buffer,
+    size_t size, bool* connected)
 {
-    char buffer[64];
+    bool is_connected = left ? state->left_connected : state->right_connected;
+    bool moving = left ? state->moving_a : state->moving_b;
+    unsigned level = left ? state->level_a : state->level_b;
+    unsigned frequency = left ? state->frequency_a : state->frequency_b;
 
-    if (!connected) {
-        snprintf(buffer, sizeof(buffer), "%s", dglabString(DglabString_MotionNotConnected));
+    *connected = is_connected;
+
+    if (!is_connected) {
+        snprintf(buffer, size, "%s", dglabString(DglabString_MotionNotConnected));
     } else if (!moving) {
-        snprintf(buffer, sizeof(buffer), "%s   %s 0   %ums",
-            dglabString(DglabString_MotionStill), dglabString(DglabString_MotionLevel), frequency);
+        snprintf(buffer, size, "%s   %s 0   %ums", dglabString(DglabString_MotionStill),
+            dglabString(DglabString_MotionLevel), frequency);
     } else {
-        snprintf(buffer, sizeof(buffer), "%s   %s %u   %ums",
-            dglabString(DglabString_MotionMoving), dglabString(DglabString_MotionLevel), level,
-            frequency);
+        snprintf(buffer, size, "%s   %s %u   %ums", dglabString(DglabString_MotionMoving),
+            dglabString(DglabString_MotionLevel), level, frequency);
     }
 
-    dglabTextDraw(canvas, text, x, y, which, kMuted);
-    dglabTextDraw(canvas, text, x + 32, y, buffer, connected ? color : kMuted);
+    return buffer;
 }
 
-void dglabMotionScreenDraw(DglabCanvas* canvas, DglabGlyphSource* text,
+void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     const DglabMotionScreenState* state)
 {
-    int x = MARGIN + 16;
-    int line = text->line_height;
-    int y = TITLE_HEIGHT + GAP + 24 + line * 2;
-    // Room for the two header lines, five rows and the two line description.
-    int panel_height = 20 + line * 10;
-    char buffer[512];
+    const DglabTheme* theme = dglabThemeGet();
+    DglabListFonts list_fonts = { fonts->body, fonts->value, fonts->note };
+    DglabRow rows[5];
+    DglabRowBox boxes[5];
+    DglabHint hints[4];
+    DglabHint adjust[2] = {
+        { DglabButton_Up, DglabButton_Down, dglabString(DglabString_HintAdjustA) },
+        { DglabButton_Left, DglabButton_Right, dglabString(DglabString_HintAdjustB) },
+    };
+    DglabTextStyle title = { fonts->title, theme->text };
+    DglabListStyle style;
+    char channel_a[96];
+    char channel_b[96];
+    char strength_a[32];
+    char strength_b[32];
+    char label_a[64];
+    char label_b[64];
+    bool connected_a;
+    bool connected_b;
+    int x = DGLAB_PAGE_CONTENT_X;
 
-    dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, kBackground);
-    dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, TITLE_HEIGHT, kPanel);
-    dglabTextDraw(canvas, text, MARGIN, (TITLE_HEIGHT - text->cell_height) / 2,
-        dglabString(DglabString_MotionTitle), kText);
+    snprintf(strength_a, sizeof(strength_a), "%u/100", state->channel_strength_a);
+    snprintf(strength_b, sizeof(strength_b), "%u/100", state->channel_strength_b);
+    // The two strengths this waveform is scaled by, one row each.
+    snprintf(label_a, sizeof(label_a), "%s A", dglabString(DglabString_MotionVolume));
+    snprintf(label_b, sizeof(label_b), "%s B", dglabString(DglabString_MotionVolume));
 
-    dglabCanvasFill(canvas, MARGIN, TITLE_HEIGHT + GAP, PANEL_WIDTH, panel_height, kPanel);
-    dglabCanvasFrame(canvas, MARGIN, TITLE_HEIGHT + GAP, PANEL_WIDTH, panel_height, 2,
-        kPanelBorder);
-    dglabTextDraw(canvas, text, MARGIN + 16, TITLE_HEIGHT + GAP + 10,
-        dglabString(DglabString_MotionChannels), kMuted);
+    dglabPageBegin(canvas);
+    dglabPageHeader(canvas, &title, dglabString(DglabString_MotionTitle), NULL, NULL);
+    dglabPageClipContent(canvas);
 
-    drawLine(canvas, text, x, y, dglabString(DglabString_MotionLink),
-        state->link ? state->link : "-", toneColor(state->link_tone));
-    y += line;
+    for (int i = 0; i < 2; i++) {
+        dglabHintDraw(canvas, fonts->note, &adjust[i], x, DGLAB_PAGE_CONTENT_TOP, theme->text);
+        x += dglabHintWidth(fonts->note, &adjust[i]) + DGLAB_PAGE_HINT_GAP;
+    }
 
-    drawChannel(canvas, text, x, y, "A", state->left_connected, state->moving_a, state->level_a,
-        state->frequency_a, kAccent);
-    y += line;
+    memset(rows, 0, sizeof(rows));
 
-    drawChannel(canvas, text, x, y, "B", state->right_connected, state->moving_b, state->level_b,
-        state->frequency_b, kAccent);
-    y += line;
+    rows[0] = (DglabRow){
+        .kind = DglabRow_Item,
+        .label = dglabString(DglabString_MotionLink),
+        .value = state->link ? state->link : "-",
+        .value_color = toneColor(state->link_tone),
+    };
+    rows[1] = (DglabRow){
+        .kind = DglabRow_Item,
+        .label = dglabString(DglabString_MotionChannelA),
+        .value = channelText(state, true, channel_a, sizeof(channel_a), &connected_a),
+        .value_color = connected_a ? theme->accent : theme->muted,
+    };
+    rows[2] = (DglabRow){
+        .kind = DglabRow_Item,
+        .label = dglabString(DglabString_MotionChannelB),
+        .value = channelText(state, false, channel_b, sizeof(channel_b), &connected_b),
+        .value_color = connected_b ? theme->accent : theme->muted,
+    };
+    rows[3] = (DglabRow){
+        .kind = DglabRow_Item,
+        .label = label_a,
+        .value = strength_a,
+        .value_color = theme->text,
+    };
+    rows[4] = (DglabRow){
+        .kind = DglabRow_Item,
+        .label = label_b,
+        .value = strength_b,
+        .value_color = theme->text,
+        // One block for the safety notes: this mode drives a device that is
+        // attached to a body, so they are not footnotes.
+        .note = dglabString(DglabString_MotionSafety),
+    };
 
-    // The channel strength is the volume this waveform is scaled by, so it sits
-    // on its own row.
-    snprintf(buffer, sizeof(buffer), "A %u/100   B %u/100", state->channel_strength_a,
-        state->channel_strength_b);
-    drawLine(canvas, text, x, y, dglabString(DglabString_MotionVolume), buffer, kMuted);
-    y += line;
+    dglabListMeasure(&list_fonts, rows, 5, DGLAB_PAGE_CONTENT_WIDTH, boxes, 5);
 
-    drawLine(canvas, text, x, y, dglabString(DglabString_MotionLastCmd),
-        (state->last_upload && state->last_upload[0]) ? state->last_upload : "-",
-        state->last_upload_tone == DglabCmdTone_Error ? kError :
-            (state->last_upload_tone == DglabCmdTone_Warn ? kWarn : kText));
-    y += line;
+    style = (DglabListStyle){
+        .x = DGLAB_PAGE_CONTENT_X,
+        .origin_y = DGLAB_PAGE_CONTENT_TOP + DGLAB_NOTE_LINE + 8,
+        .width = DGLAB_PAGE_CONTENT_WIDTH,
+        .focus = -1,
+        .navigation = false,
+    };
+    dglabListDraw(canvas, &list_fonts, &style, rows, boxes, 5);
 
-    drawWrapped(canvas, text, x, y, PANEL_WIDTH - 48, dglabString(DglabString_MotionDesc), kMuted);
+    dglabCanvasClearClip(canvas);
 
-    // One block for the safety notes: this mode drives a device that is attached
-    // to a body, so they are not footnotes.
-    snprintf(buffer, sizeof(buffer), "%s%s", dglabString(DglabString_MotionSafety),
-        state->server_running ? dglabString(DglabString_MotionSleepWarning) : "");
-
-    drawWrapped(canvas, text, MARGIN + 16, TITLE_HEIGHT + GAP + panel_height + 24,
-        SCREEN_WIDTH - 2 * MARGIN - 32, buffer, kWarn);
-
-    dglabTextDraw(canvas, text, MARGIN, SCREEN_HEIGHT - line * 2 - 16,
-        dglabString(DglabString_MotionClear), kText);
-    dglabTextDraw(canvas, text, MARGIN, SCREEN_HEIGHT - line - 16,
-        dglabString(DglabString_MotionBack), kText);
+    hints[0] = (DglabHint){ DglabButton_ZL, DglabButton_ZR,
+        dglabString(DglabString_ActionTestChannels), };
+    hints[1] = (DglabHint){ DglabButton_X, DglabButton_None,
+        dglabString(DglabString_ActionClear), };
+    hints[2] = (DglabHint){ DglabButton_B, DglabButton_None,
+        dglabString(DglabString_ActionBack), };
+    hints[3] = (DglabHint){ DglabButton_A, DglabButton_None,
+        state->server_running ? dglabString(DglabString_ActionStop)
+                              : dglabString(DglabString_ActionStart), };
+    dglabPageHints(canvas, fonts->body, hints, 4);
 }

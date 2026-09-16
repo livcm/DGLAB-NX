@@ -16,6 +16,7 @@
 #include <switch.h>
 
 #include <dglab/ipc.h>
+#include <dglab/platform/langfiles.h>
 #include <dglab/nro/joycon.h>
 #include <dglab/platform/font.h>
 #include <dglab/ui/about.h>
@@ -29,6 +30,7 @@
 #include <dglab/ui/advanced.h>
 #include <dglab/ui/menu.h>
 #include <dglab/ui/motion.h>
+#include <dglab/ui/page.h>
 #include <dglab/ui/screen.h>
 
 #define LOG_POLL_ROUNDS 2
@@ -38,14 +40,19 @@
 // are spread over a few frames instead of running 60 times a second.
 #define LOG_POLL_INTERVAL_FRAMES 3
 
+// Everything the front end writes lives under one directory on the SD card,
+// split by what it is: the language files it reads, the settings it writes and
+// the logs it mirrors (docs/nro-ui.md).
+#define DATA_DIR "sdmc:/switch/DGLAB-NX"
+#define CONFIG_DIR DATA_DIR "/config"
+#define LOG_DIR DATA_DIR "/logs"
 // The sysmodule log is mirrored to the SD card, so a test run can be reported
 // back as a file instead of as a photo of the screen.
-#define DATA_DIR "sdmc:/switch/DGLAB-NX"
-#define LOG_FILE_PATH DATA_DIR "/dglab-net.log"
+#define LOG_FILE_PATH LOG_DIR "/dglab-net.log"
 // The motion parameters, so a tuning session does not start over every reboot.
-#define MOTION_CONFIG_PATH DATA_DIR "/motion.cfg"
+#define MOTION_CONFIG_PATH CONFIG_DIR "/motion.cfg"
 // The app level settings (the UI language).
-#define APP_CONFIG_PATH DATA_DIR "/app.cfg"
+#define APP_CONFIG_PATH CONFIG_DIR "/app.cfg"
 
 typedef enum {
     DglabMenuResult_Exit = 0,
@@ -56,10 +63,11 @@ typedef enum {
     DglabMenuResult_BlePoc,
 } DglabMenuResult;
 
-// The glyph source every screen draws with: the system shared font at 24px
-// (docs/nro-ui.md), or libnx's bitmap font when that cannot be loaded - which
-// only has ASCII, so Chinese text would show as gaps.
-static DglabGlyphSource* g_text;
+// The four sizes every screen draws with: the system shared font at the sizes
+// the console's own UI uses (docs/nro-ui.md), or libnx's bitmap font when that
+// cannot be loaded - which only has ASCII, so Chinese text would show as gaps.
+static DglabFontSet g_fonts;
+static DglabFontSet g_bitmap_fonts;
 static DglabLanguage g_language_pref = DglabLanguage_Auto;
 static DglabLanguage g_language = DglabLanguage_English;
 
@@ -103,10 +111,22 @@ static void appLanguageApply(void)
     g_language = dglabLanguageResolve(g_language_pref, dglabFontSystemIsChinese());
     dglabStringsSetLanguage(g_language);
 
-    g_text = dglabFontOpen(g_language == DglabLanguage_ChineseSimplified, 24.0f);
+    {
+        const DglabFontSet* fonts =
+            dglabFontOpen(g_language == DglabLanguage_ChineseSimplified);
 
-    if (g_text == NULL)
-        g_text = dglabBitmapGlyphSource(dglabFramebufferFont());
+        if (fonts != NULL) {
+            g_fonts = *fonts;
+            return;
+        }
+    }
+
+    // The bitmap font has one size, so the fallback draws every size with it.
+    g_bitmap_fonts.title = dglabBitmapGlyphSource(dglabFramebufferFont());
+    g_bitmap_fonts.body = g_bitmap_fonts.title;
+    g_bitmap_fonts.value = g_bitmap_fonts.title;
+    g_bitmap_fonts.note = g_bitmap_fonts.title;
+    g_fonts = g_bitmap_fonts;
 }
 
 static char g_log_lines[DGLAB_SCREEN_LOG_LINES][DGLAB_SCREEN_LOG_LINE_LEN];
@@ -186,6 +206,8 @@ static void logFileOpen(void)
 {
     mkdir("sdmc:/switch", 0777);
     mkdir(DATA_DIR, 0777);
+    mkdir(CONFIG_DIR, 0777);
+    mkdir(LOG_DIR, 0777);
 
     g_log_file = fopen(LOG_FILE_PATH, "w");
 
@@ -360,8 +382,13 @@ static bool adjustStrength(Service* dglab, u32 channel, u32* value, int delta, R
     return true;
 }
 
-// The D-pad is the mixer: the vertical axis dials channel A, the horizontal one
-// dials channel B. Used for the first press and, at a slower rate, while held.
+// Whether the server held a socket as of the last status poll: what the A button
+// means on the socket and motion pages depends on it.
+static bool g_server_running;
+
+// The D-pad is the mixer: up and down dial channel A, left and right dial channel
+// B, one step per press and, at a slower rate, while held. The socket and motion
+// pages share it, because they show the same two strengths.
 static void adjustStrengthFromDirections(Service* dglab, u64 buttons)
 {
     Result rc;
@@ -413,24 +440,26 @@ static void repeatStrengthFromDirections(Service* dglab, u64 held, u64 now_ns)
     adjustStrengthFromDirections(dglab, held);
 }
 
-static void handleButtons(Service* dglab, u64 down, u64 held, u64 now_ns)
+// Starts or stops the server: what A does on the socket page and on the motion
+// page, where the bottom bar's own label follows this decision.
+static void toggleServer(Service* dglab)
 {
-    if (down & HidNpadButton_A) {
+    if (g_server_running) {
+        noteCommand(dglabString(DglabString_CmdStop), serviceDispatch(dglab, DGLAB_IPC_CMD_NET_STOP),
+            NULL);
+    } else {
         DglabNetStartRequest request = { 0 };
 
-        noteCommand(dglabString(DglabString_CmdStart), serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_START, request), NULL);
+        noteCommand(dglabString(DglabString_CmdStart),
+            serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_START, request), NULL);
     }
+}
 
-    if (down & HidNpadButton_Y)
-        noteCommand(dglabString(DglabString_CmdStop), serviceDispatch(dglab, DGLAB_IPC_CMD_NET_STOP), NULL);
-
-    if (down & HidNpadButton_B)
-        noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
-
-    // One trigger per channel: a waveform without a strength does nothing on the
-    // device, and a strength without a waveform is just as silent, so each button
-    // sends both for its own channel. A test at strength 0 is legal and answers
-    // ok, so it says why nothing came out instead of leaving the screen alone.
+// The two shortcuts both pages share: ZL and ZR fire one channel each (a
+// waveform without a strength does nothing, and the strength alone is just as
+// silent, so each button sends both), X clears what the last test left playing.
+static void testChannelButtons(Service* dglab, u64 down)
+{
     if (down & HidNpadButton_ZL)
         noteCommand(dglabString(DglabString_CmdTestA),
             testChannel(dglab, TEST_CHANNEL_A, g_test_strength_a),
@@ -441,8 +470,9 @@ static void handleButtons(Service* dglab, u64 down, u64 held, u64 now_ns)
             testChannel(dglab, TEST_CHANNEL_B, g_test_strength_b),
             g_test_strength_b ? NULL : dglabString(DglabString_CmdChannelZeroB));
 
-    adjustStrengthFromDirections(dglab, down);
-    repeatStrengthFromDirections(dglab, held, now_ns);
+    if (down & HidNpadButton_X)
+        noteCommand(dglabString(DglabString_CmdClear),
+            sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +494,8 @@ typedef struct {
     u32 last_command_tone;
     int log_count;
     u32 log_generation;
+    bool log_open;
+    int log_offset;
 } DglabScreenSnapshot;
 
 static void snapshotFromState(DglabScreenSnapshot* out, const DglabScreenState* state)
@@ -479,6 +511,8 @@ static void snapshotFromState(DglabScreenSnapshot* out, const DglabScreenState* 
     out->last_command_tone = state->last_command_tone;
     out->log_count = state->log_count;
     out->log_generation = g_log_generation;
+    out->log_open = state->log_open;
+    out->log_offset = state->log_offset;
 
     snprintf(out->last_command, sizeof(out->last_command), "%s",
         state->last_command ? state->last_command : "");
@@ -487,15 +521,76 @@ static void snapshotFromState(DglabScreenSnapshot* out, const DglabScreenState* 
         snprintf(out->url, sizeof(out->url), "%s", state->url);
 }
 
-// The socket test screen. Returns to the menu when `+` is pressed.
+// How far the log page can scroll: the lines that do not fit the view.
+static int logMaxOffset(int log_count)
+{
+    int view = DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP;
+    int content = log_count * DGLAB_SCREEN_LOG_PITCH;
+
+    return content > view ? content - view : 0;
+}
+
+// The log page scrolls one line per press and, like the strength keys, repeats
+// while a direction is held. It reuses the strength hold timing because the two
+// never run at the same time.
+static int logScrollFromDirections(int offset, int max_offset, u64 down, u64 held, u64 now_ns)
+{
+    int steps = 0;
+
+    if (down & HidNpadButton_Up)
+        steps -= 1;
+
+    if (down & HidNpadButton_Down)
+        steps += 1;
+
+    if (steps == 0) {
+        if (!(held & (HidNpadButton_Up | HidNpadButton_Down))) {
+            g_strength_hold_started_ns = 0;
+            return offset;
+        }
+
+        if (g_strength_hold_started_ns == 0) {
+            g_strength_hold_started_ns = now_ns ? now_ns : 1u;
+            g_strength_last_repeat_ns = 0;
+            return offset;
+        }
+
+        if (now_ns - g_strength_hold_started_ns < TEST_STRENGTH_HOLD_NS ||
+            (g_strength_last_repeat_ns != 0 &&
+                now_ns - g_strength_last_repeat_ns < TEST_STRENGTH_REPEAT_NS))
+            return offset;
+
+        g_strength_last_repeat_ns = now_ns;
+        steps = (held & HidNpadButton_Down) ? 1 : -1;
+    } else {
+        g_strength_hold_started_ns = now_ns ? now_ns : 1u;
+        g_strength_last_repeat_ns = 0;
+    }
+
+    offset += steps;
+
+    if (offset < 0)
+        offset = 0;
+
+    if (offset > max_offset)
+        offset = max_offset;
+
+    return offset;
+}
+
+// The socket page and its log page. B goes back to the menu; every action here
+// is a shortcut key, so there is nothing to focus and nothing to navigate.
 static void runSocketView(Service* dglab, PadState* pad)
 {
-    const DglabFont* font = dglabFramebufferFont();
     DglabIpcVersion version = { 0 };
     DglabScreenSnapshot snapshot;
     bool have_snapshot = false;
     char url[DGLAB_NET_QR_MAX];
     bool url_ok = false;
+    // The log page is part of this view: Y opens it and closes it again, and it
+    // opens on the newest line, which is what a log is read for.
+    bool log_open = false;
+    int log_offset = 0;
     u32 frame = 0;
 
     url[0] = '\0';
@@ -506,9 +601,11 @@ static void runSocketView(Service* dglab, PadState* pad)
         DglabScreenState state;
         DglabNetQrChunk chunk;
         u64 down;
+        u64 held;
 
         padUpdate(pad);
         down = padGetButtonsDown(pad);
+        held = padGetButtons(pad);
 
         memset(&state, 0, sizeof(state));
         memset(&chunk, 0, sizeof(chunk));
@@ -541,11 +638,32 @@ static void runSocketView(Service* dglab, PadState* pad)
         }
 
         state.url_ok = url_ok;
+        g_server_running = state.status_ok &&
+            (state.status.state == DglabNetState_Listening ||
+                state.status.state == DglabNetState_Paired);
 
-        if (down & HidNpadButton_Plus)
+        if (down & HidNpadButton_B)
             return;
 
-        handleButtons(dglab, down, padGetButtons(pad), armTicksToNs(armGetSystemTick()));
+        if (down & HidNpadButton_Y) {
+            log_open = !log_open;
+
+            if (log_open)
+                log_offset = logMaxOffset(g_log_filled);
+        } else if (log_open) {
+            log_offset = logScrollFromDirections(log_offset, logMaxOffset(g_log_filled), down, held,
+                armTicksToNs(armGetSystemTick()));
+        } else {
+            if (down & HidNpadButton_A)
+                toggleServer(dglab);
+
+            testChannelButtons(dglab, down);
+            adjustStrengthFromDirections(dglab, down);
+            repeatStrengthFromDirections(dglab, held, armTicksToNs(armGetSystemTick()));
+        }
+
+        state.log_open = log_open;
+        state.log_offset = log_offset;
 
         // Read after the buttons are handled, so a press shows up in the same
         // frame it happened.
@@ -562,7 +680,7 @@ static void runSocketView(Service* dglab, PadState* pad)
             DglabCanvas canvas;
 
             if (dglabFramebufferBegin(&canvas)) {
-                dglabScreenDraw(&canvas, g_text, font, &state);
+                dglabScreenDraw(&canvas, &g_fonts, &state);
                 dglabFramebufferEnd();
 
                 snapshot = candidate;
@@ -570,7 +688,6 @@ static void runSocketView(Service* dglab, PadState* pad)
             }
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -602,7 +719,9 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
         padUpdate(pad);
         down = padGetButtonsDown(pad);
 
-        if (down & HidNpadButton_Plus)
+        // B quits from the menu, the way the console's own home menu does; +
+        // stays as the shortcut it always was.
+        if (down & HidNpadButton_B)
             return DglabMenuResult_Exit;
 
         if (down & HidNpadButton_Up)
@@ -636,7 +755,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
             continue;
 
         if (dglabFramebufferBegin(&canvas)) {
-            dglabMenuDraw(&canvas, g_text, &state);
+            dglabMenuDraw(&canvas, &g_fonts, &state);
             dglabFramebufferEnd();
 
             drawn_selected = state.selected;
@@ -781,11 +900,20 @@ static void runMotionView(Service* dglab, PadState* pad)
         padUpdate(pad);
         down = padGetButtonsDown(pad);
 
-        if (down & HidNpadButton_Plus)
+        if (down & HidNpadButton_B)
             break;
 
-        if (down & HidNpadButton_B)
-            noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
+        // The same shortcuts as the socket page: A starts and stops the server,
+        // X clears what a test left playing, ZL and ZR fire one channel each,
+        // and the D-pad dials the two channel strengths (up/down A, left/right
+        // B). Nothing is focused here, so the D-pad has no other job.
+        if (down & HidNpadButton_A)
+            toggleServer(dglab);
+
+        testChannelButtons(dglab, down);
+        adjustStrengthFromDirections(dglab, down);
+        repeatStrengthFromDirections(dglab, padGetButtons(pad),
+            armTicksToNs(armGetSystemTick()));
 
         // Drain both sides every frame: the sensors run faster than this loop,
         // and a reading that is not collected now is gone.
@@ -849,7 +977,7 @@ static void runMotionView(Service* dglab, PadState* pad)
             state.last_upload_tone = g_last_command_tone;
 
             if (dglabFramebufferBegin(&canvas)) {
-                dglabMotionScreenDraw(&canvas, g_text, &state);
+                dglabMotionScreenDraw(&canvas, &g_fonts, &state);
                 dglabFramebufferEnd();
             }
         }
@@ -885,9 +1013,11 @@ static void runAboutView(Service* dglab, PadState* pad)
         padUpdate(pad);
         down = padGetButtonsDown(pad);
 
-        if (down & HidNpadButton_Plus)
+        if (down & HidNpadButton_B)
             return;
 
+        // Left and right switch the language, which is what the bottom bar says;
+        // there is nothing to focus on this page.
         if ((down & HidNpadButton_Left) || (down & HidNpadButton_Right)) {
             // Left and right both cycle: with three values there is no natural
             // direction, and the row shows what it became.
@@ -907,7 +1037,7 @@ static void runAboutView(Service* dglab, PadState* pad)
         state.github_url = "https://github.com/livcm/DGLAB-NX";
 
         if (dglabFramebufferBegin(&canvas)) {
-            dglabAboutDraw(&canvas, g_text, &state);
+            dglabAboutDraw(&canvas, &g_fonts, &state);
             dglabFramebufferEnd();
 
             redraw = false;
@@ -970,7 +1100,7 @@ static void runAdvancedView(Service* dglab, PadState* pad)
         down = padGetButtonsDown(pad);
         held = padGetButtons(pad);
 
-        if (down & HidNpadButton_Plus) {
+        if (down & HidNpadButton_B) {
             motionSettingsSave(&config);
             return;
         }
@@ -1018,7 +1148,7 @@ static void runAdvancedView(Service* dglab, PadState* pad)
             continue;
 
         if (dglabFramebufferBegin(&canvas)) {
-            dglabAdvancedDraw(&canvas, g_text, &state);
+            dglabAdvancedDraw(&canvas, &g_fonts, &state);
             dglabFramebufferEnd();
 
             drawn_selected = state.selected;
@@ -1059,16 +1189,52 @@ static void showNotice(PadState* pad, const char* headline, ...)
     consoleExit(NULL);
 }
 
+// The language files are checked before the first frame is drawn, so this is
+// the one screen that cannot be translated: it is plain ASCII on libnx's
+// console, which has no room for the CJK the UI itself uses (docs/nro-ui.md).
+static void showStartupNotice(PadState* pad, const char* text)
+{
+    consoleInit(NULL);
+
+    printf("DGLAB-NX\n\n");
+    printf("%s", text);
+    printf("\nPress + to exit.\n");
+    consoleUpdate(NULL);
+
+    while (appletMainLoop()) {
+        padUpdate(pad);
+
+        if (padGetButtonsDown(pad) & HidNpadButton_Plus)
+            break;
+
+        consoleUpdate(NULL);
+    }
+
+    consoleExit(NULL);
+}
+
 int main(int argc, char* argv[])
 {
     (void)argc;
     (void)argv;
 
+    // The UI text lives in lang/<code>.json on the SD card, so the files are
+    // read before anything else happens: without one there is nothing to draw
+    // (docs/nro-ui.md). One file is enough - a language without a file of its
+    // own follows the one that loaded.
+    DglabLangReport lang;
 
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
 
     PadState pad;
     padInitializeDefault(&pad);
+
+    dglabLangFilesLoad(DGLAB_LANG_DIR, &lang);
+
+    if (!lang.loaded) {
+        showStartupNotice(&pad, lang.error);
+        return 0;
+    }
 
     Service dglab;
     Result service_result = smGetService(&dglab, DGLAB_IPC_SERVICE_NAME);
@@ -1085,6 +1251,12 @@ int main(int argc, char* argv[])
     }
 
     logFileOpen();
+
+    // A file that loaded but is missing entries is not fatal: the entries fall
+    // back to the other language and the reason is reported in the log panel
+    // of the socket screen instead.
+    for (unsigned i = 0; i < lang.notes; i++)
+        logPushLine(lang.note[i]);
 
     appLanguageLoad();
     appLanguageApply();

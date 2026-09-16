@@ -260,11 +260,12 @@ sysmodule 的线程栈只有 16KB（主线程来自 NPDM 的 `main_thread_stack_
 
 ### 日志文件（SD 卡）
 
-排查实机问题全靠这三个文件：
+排查实机问题全靠这两个文件：
 
 | 文件 | 写入方 | 内容 |
 | --- | --- | --- |
-| `sdmc:/switch/DGLAB-NX/dglab-net.log` | NRO | `NET_LOG` 的增量副本（服务端日志的实际落盘处） |
+| `sdmc:/switch/DGLAB-NX/logs/dglab-net.log` | NRO | `NET_LOG` 的增量副本（服务端日志的实际落盘处） |
+| `sdmc:/switch/DGLAB-NX/logs/dglab-sys.log` | sysmodule | 服务端自己的日志副本（NRO 挂掉时仍有记录） |
 
 （曾经还有一个 `dglab-boot.log` 记录 NRO 的启动步骤，用来查"无 sysmodule 时黑屏"。
 经实机确认无 sysmodule 时 NRO 可以正常启动，该文件已按要求移除；黑屏那条留到以后完善
@@ -459,5 +460,5 @@ make -C tests/net        # 内存级协议测试 + 真实回环 TCP 端到端测
    `↑`/`↓`/`→`/`←` 调强度并立刻下发、`B` 清空；
 5. 观察 `NET_LOG` 里的收发记录。
 
-NRO 会把 `NET_LOG` 同步写到 `sdmc:/switch/DGLAB-NX/dglab-net.log`（打不开时退到
+NRO 会把 `NET_LOG` 同步写到 `sdmc:/switch/DGLAB-NX/logs/dglab-net.log`（打不开时退到
 `sdmc:/dglab-net.log`），实机测试后直接把这个文件发回来即可。

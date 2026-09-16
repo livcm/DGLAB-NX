@@ -143,7 +143,7 @@ size_t dglabTextWrapLine(DglabGlyphSource* source, const char* text, int max_wid
             advance = source->lookup(source, codepoint, &glyph) ? glyph.advance
                                                                 : missingAdvance(source);
 
-            if (width + advance > max_width && break_at > 0)
+            if (width + advance > max_width)
                 break;
 
             width += advance;
@@ -159,7 +159,13 @@ size_t dglabTextWrapLine(DglabGlyphSource* source, const char* text, int max_wid
             break_at = offset;
     }
 
-    if (break_at == 0)
+    // A line ends where the text really goes on: when everything that is left
+    // fits, or when a single word is wider than the line, the cut is wherever
+    // the characters stopped. Only a line that is full and has more text behind
+    // it is cut at a break. (Using the last break seen in every case is what
+    // turned the English sleep warning into three lines, one word each on the
+    // last two.)
+    if (text[offset] == '\0' || break_at == 0)
         break_at = offset;
 
     // Trailing spaces move to the next line instead of padding this one.

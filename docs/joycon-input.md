@@ -181,7 +181,7 @@
 
 上表这些值都能在 NRO 的 `Advanced (motion)` 里改，不用重新编译：`D-pad` 上下选、左右改
 （**按一下一格**，按住 0.5 秒后才连发、每 0.2 秒一格），`Y` 恢复默认，`+` 保存返回。
-改动即时写入 `sdmc:/switch/DGLAB-NX/motion.cfg`，体感玩法进入时读取（文件损坏或缺失就
+改动即时写入 `sdmc:/switch/DGLAB-NX/config/motion.cfg`，体感玩法进入时读取（文件损坏或缺失就
 回到默认值）。
 
 | 参数 | 默认 | 范围 | 一格 |

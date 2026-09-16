@@ -69,6 +69,71 @@ UI 风格可以模仿 HOS，但实现应与 HOS 系统 UI 解耦。
     Button
     Modal
 
+### 页面、行与文本（必须遵守）
+
+界面模仿 HOS（Switch 系统 UI）：**没有面板边框**，页面由页头、行列表、底栏三部分组成。
+规格与实测数据见 `docs/nro-ui.md` 的「HOS 风格页面」一节。
+
+- 每一屏的画法：`dglabPageBegin` 铺底与两条分隔线 → `dglabPageHeader` 画标题
+  （可带右侧状态）→ `dglabPageClipContent` 收裁剪 → `dglabListDraw` 画行 →
+  `dglabCanvasClearClip` → `dglabListScrollBar` → `dglabPageHints` 画底栏按键提示；
+- 两条横线都是**白色**（`theme->rule`，y=87 与 y=647）；`#4D4D4D` 只用于行与行之间。
+  内容裁剪区是 y 88..647，上边界必须在页头线下方——焦点框比行高，第一行的框上沿在 y≈122，
+  裁剪区从行顶开始就会把它切掉；
+- 行一律用 `nro/include/dglab/ui/list.h` 的 `DglabRow` 数组描述，**同一个数组**
+  交给 `dglabListMeasure` 与 `dglabListDraw`。高度、列宽、滚动位置都必须来自这次测量，
+  不要另写一份尺寸公式（历史上"量一遍、画一遍"对不上已经出过两次事故）；
+- 行类型只有三种：`DglabRow_Item`（左标签右值，可聚焦）、`DglabRow_Note`（灰色小字说明，
+  缩进、带 ◆）、`DglabRow_Paragraph`（页面自己的白色正文，24px，无 ◆，可换行）。
+  **界面里没有滑块**，数值一律用文字显示；
+- 行以外的控件（二维码、日志正文）由屏幕自己按列/按行距画在内容区里，位置必须来自
+  `dglabListMeasure` 之类的实测结果，不要另写常数；
+- 字号只能用 `text.h` 里的四个（`DGLAB_TEXT_TITLE` 28 / `BODY` 24 / `VALUE` 22 /
+  `NOTE` 18），由 `DglabFontSet` 一起传给屏幕。不要在屏幕里挑新字号，也不要假设
+  只有一个字体实例；
+- 按键提示只能是"**按键图标 + 动作文字**"（`dglab/ui/button.h` + `dglab/ui/page.h` 的
+  `DglabHint`，一个提示可以带两个图标，例如 ZL+ZR、←+→）。**按键名不进 `lang/`**：
+  图标不是可翻译内容，`lang/` 里只放"返回""启动服务端"这类动作；
+  新动作 = `strings.h` 加 `DglabString_Action*`；
+- 按键图标一律"**实心形状 + 字母挖空**"（字母用页面背景色画进实心盘里），不要画细圆环；
+- 退出规则：**Console 页（BLE PoC console、`showNotice`、`showStartupNotice`）用 `+`**，
+  **其余 framebuffer 页面一律 `B`**，`+` 在这些页面不响应。改按键语义必须同时改底栏提示，
+  两者不一致比没有提示更糟；
+- 需要多于一屏内容的页面必须给出滚动方式：有光标的页面用光标驱动，无光标的页面用
+  专门的滚动键（日志子页用 ↑↓）。**无光标又无滚动键的页面（连接测试、体感）必须把
+  内容排进一屏**，`tests/canvas` 的"内容不贴底"检查会守住这一条；
+- 新增或修改屏幕后跑 `make -C tests/canvas`：`testEveryPageStaysInItsRegions` 会用
+  两份语言文件把每一屏渲染一遍，检查没有任何像素画到页头/内容列/底栏/滚动条之外
+  （原委见 `docs/nro-ui.md`）。
+
+### 文案（必须遵守）
+
+- NRO 自绘界面的文字一律来自 `lang/*.json`，屏幕代码只写
+  `dglabString(DglabString_...)`，不要在 C 代码里放界面字面量。新增一条文案 =
+  `nro/include/dglab/ui/strings.h` 加枚举 + `nro/source/ui/strings.c` 的 `kKeys[]` 加 key
+  + `lang/en.json` 与 `lang/zh-Hans.json` 各加一条；`tests/lang` 会检查三方对得上；
+- `lang/` 在仓库根目录（与 `nro/` 同级），`make -C nro package` 复制到
+  `release/DGLAB-NX/lang/`。它是**运行期**读的：必须和 `DGLAB-NX.nro` 一起装到
+  `SD:/switch/DGLAB-NX/`，否则 NRO 启动即打印错误退出（有任意一个语言文件可用就继续
+  启动，缺的 key 回落到已加载的语言）；
+- console 输出（BLE PoC 控制台、启动失败提示）保持 ASCII 英文：libnx 的 console 用的是
+  256 字形位图字体，画不出汉字；sysmodule 的日志行同样不进 `lang/`；
+- 改文案不用重新编译 NRO，但排版按字体实测宽度算，改完要跑 `make -C tests/canvas` 和
+  `make -C tests/lang`。
+
+### SD 卡目录（必须遵守）
+
+NRO 的运行期文件只有一处，按用途分层，路径写在 `nro/source/main.c` 顶部：
+
+    SD:/switch/DGLAB-NX/DGLAB-NX.nro
+    SD:/switch/DGLAB-NX/lang/     界面文案（`DGLAB_LANG_DIR`，缺失即启动报错）
+    SD:/switch/DGLAB-NX/config/   app.cfg、motion.cfg、dglab-ble-address.txt
+    SD:/switch/DGLAB-NX/logs/     dglab-net.log、dglab-ble-poc.log（sysmodule 写 dglab-sys.log）
+
+- 新增设置文件放 `config/`，新增日志放 `logs/`，不要在 `DGLAB-NX/` 根目录或 SD 根目录
+  直接写文件（`config/`、`logs/` 由 NRO 启动时创建，sysmodule 自己创建 `logs/`）；
+- 不要在别处再找 `lang/`：`langfiles.c` 只读 `DGLAB_LANG_DIR` 一处。
+
 ## NRO Identity
 
 普通 NRO 不需要像 NSP/NCA 那样分配 Nintendo Title ID，

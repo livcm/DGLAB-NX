@@ -39,15 +39,19 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET		:=	DGLAB-NX
 BUILD		:=	build
-SOURCES		:=	source source/ui source/platform source/motion
+SOURCES		:=	source source/ui source/platform source/motion source/util
 DATA		:=	data
 INCLUDES	:=	include ../common/include ../third_party
 #ROMFS	:=	romfs
 
 # Release layout (see AGENTS.md): the NRO is copied next to the sysmodule
-# package under release/ at the repository root.
+# package under release/ at the repository root, in a directory of its own that
+# mirrors what goes on the SD card: the .nro and the lang/ it reads at run time.
 RELEASE_DIR	:=	$(CURDIR)/../release
-RELEASE_NRO	:=	$(RELEASE_DIR)/$(TARGET).nro
+RELEASE_APP_DIR	:=	$(RELEASE_DIR)/$(TARGET)
+RELEASE_NRO	:=	$(RELEASE_APP_DIR)/$(TARGET).nro
+LANG_DIR	:=	$(CURDIR)/../lang
+RELEASE_LANG_DIR	:=	$(RELEASE_APP_DIR)/lang
 
 #---------------------------------------------------------------------------------
 # options for code generation
@@ -167,9 +171,14 @@ all: package
 
 package: $(BUILD)
 	@test -f $(OUTPUT).nro || { echo "error: $(OUTPUT).nro not found"; exit 1; }
-	@mkdir -p $(RELEASE_DIR)
+	@test -n "$(wildcard $(LANG_DIR)/*.json)" || \
+		{ echo "error: no language files in $(LANG_DIR)"; exit 1; }
+	@mkdir -p $(RELEASE_APP_DIR)
 	@cp $(OUTPUT).nro $(RELEASE_NRO)
+	@mkdir -p $(RELEASE_LANG_DIR)
+	@cp $(LANG_DIR)/*.json $(RELEASE_LANG_DIR)
 	@echo "released ... $(RELEASE_NRO)"
+	@echo "released ... $(RELEASE_LANG_DIR)/*.json"
 
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
@@ -179,7 +188,8 @@ $(BUILD):
 clean:
 	@echo clean ...
 ifeq ($(strip $(APP_JSON)),)
-	@rm -fr $(BUILD) $(TARGET).nro $(TARGET).nacp $(TARGET).elf $(RELEASE_NRO)
+	@rm -fr $(BUILD) $(TARGET).nro $(TARGET).nacp $(TARGET).elf $(RELEASE_NRO) \
+		$(RELEASE_APP_DIR)
 else
 	@rm -fr $(BUILD) $(TARGET).nsp $(TARGET).nso $(TARGET).npdm $(TARGET).elf
 endif

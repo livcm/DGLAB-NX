@@ -15,14 +15,17 @@ ROOT     := ../..
 NRO      := $(ROOT)/nro
 COMMON   := $(ROOT)/common/include
 # hostshim supplies a stand in for <switch/types.h>, see tests/net/hostshim.
-INCLUDES := -I../net/hostshim -I$(NRO)/include -I$(COMMON) -I$(ROOT)/third_party
+# The screens draw the text of the files the NRO ships, so the tests read the
+# real lang/*.json (see tests/lang/lang_fixture.h).
+INCLUDES := -I../net/hostshim -I$(NRO)/include -I$(COMMON) -I$(ROOT)/third_party \
+	-DDGLAB_TEST_LANG_DIR='"$(abspath $(ROOT)/lang)"'
 BUILD    := build
 
 TESTS  := $(wildcard test_*.c)
 BINS   := $(patsubst test_%.c,$(BUILD)/test_%,$(TESTS))
 # joycon.c is left out on purpose: it is the one motion file that needs libnx.
 SOURCES := $(wildcard $(NRO)/source/ui/*.c) $(NRO)/source/motion/motion_feed.c \
-	$(NRO)/source/motion/motion_settings.c
+	$(NRO)/source/motion/motion_settings.c $(NRO)/source/util/json.c
 HEADERS := $(wildcard $(NRO)/include/dglab/ui/*.h) $(wildcard $(NRO)/include/dglab/nro/*.h) \
 	$(wildcard $(COMMON)/dglab/*.h)
 

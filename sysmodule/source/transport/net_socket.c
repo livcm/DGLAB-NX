@@ -68,7 +68,7 @@ static struct {
 // it, so once the server runs the sysmodule also writes its log to the SD card.
 // Nothing here may run at boot: a sysmodule has no filesystem mounted then, and
 // touching a path crashed the console at the logo once already.
-#define NET_SD_LOG_DIR "sdmc:/switch/DGLAB-NX"
+#define NET_SD_LOG_DIR "sdmc:/switch/DGLAB-NX/logs"
 #define NET_SD_LOG_PATH NET_SD_LOG_DIR "/dglab-sys.log"
 
 static FILE* g_sd_log;
@@ -89,6 +89,7 @@ static void netSdLog(void* context, const char* line)
         fsdevMountSdmc();
 
         mkdir("sdmc:/switch", 0777);
+        mkdir("sdmc:/switch/DGLAB-NX", 0777);
         mkdir(NET_SD_LOG_DIR, 0777);
         g_sd_log = fopen(NET_SD_LOG_PATH, "w");
 

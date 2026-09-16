@@ -27,6 +27,35 @@ typedef struct {
 
 typedef struct DglabGlyphSource DglabGlyphSource;
 
+// The four sizes the console's UI draws at 720p, measured off system settings
+// screenshots (docs/nro-ui.md): the page title, the rows, the values on the
+// right of a row, and the small grey explanation under one. Every screen picks
+// from these instead of inventing a size, which is what keeps the pages looking
+// like one system.
+#define DGLAB_TEXT_TITLE 28
+#define DGLAB_TEXT_BODY 24
+#define DGLAB_TEXT_VALUE 22
+#define DGLAB_TEXT_NOTE 18
+
+/// A font together with the colour it is drawn in. The components take these
+/// rather than a pair of arguments each, so a screen can describe a row without
+/// repeating the theme lookup.
+typedef struct {
+    DglabGlyphSource* font;
+    uint32_t color;
+} DglabTextStyle;
+
+/// The four sizes one face is rasterised at, as one bundle: a screen takes this
+/// and picks the size a piece of text calls for. The platform layer fills it in
+/// from the console's shared font, the host tools from a file or from the
+/// bitmap font.
+typedef struct {
+    DglabGlyphSource* title; ///< DGLAB_TEXT_TITLE
+    DglabGlyphSource* body;  ///< DGLAB_TEXT_BODY
+    DglabGlyphSource* value; ///< DGLAB_TEXT_VALUE
+    DglabGlyphSource* note;  ///< DGLAB_TEXT_NOTE
+} DglabFontSet;
+
 struct DglabGlyphSource {
     /// Looks one code point up. Returns false when the font has no glyph for it.
     bool (*lookup)(DglabGlyphSource* source, uint32_t codepoint, DglabGlyph* out);
@@ -48,7 +77,10 @@ int dglabTextWidth(DglabGlyphSource* source, const char* text);
 /// out (without any trailing space) and returns how many bytes of `text` that
 /// consumed. It prefers to break at a space, but Chinese has none, so it also
 /// breaks between characters - except inside a run of ASCII letters or digits,
-/// which are kept together. Returns 0 only for an empty string or no room.
+/// which are kept together unless the run is wider than the line, in which case
+/// it ends at the line's edge rather than running past it. A line is only cut
+/// when the text goes on: the last line of a paragraph is never shortened.
+/// Returns 0 only for an empty string or no room.
 size_t dglabTextWrapLine(DglabGlyphSource* source, const char* text, int max_width, char* out,
     size_t out_size);
 

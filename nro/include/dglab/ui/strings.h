@@ -1,29 +1,50 @@
 #pragma once
 
-// UI text, one table per language (nro/source/ui/strings.c). Screens ask for a
-// key, never for a literal, so adding a language is adding a column
-// (docs/nro-ui.md). Proper nouns (DGLAB, Joy-Con, sysmodule, BLE, PoC, Socket)
-// stay as they are.
+// UI text. Screens ask for a key, never for a literal: the text itself lives in
+// one .json file per language, next to the NRO, and is loaded at startup
+// (nro/source/ui/strings.c, docs/nro-ui.md). Proper nouns (DGLAB, Joy-Con,
+// sysmodule, BLE, PoC, Socket) stay as they are in every language.
 
 #include <dglab/ui/language.h>
 
+#include <stdbool.h>
+#include <stddef.h>
+
 typedef enum {
-    // menu
-    DglabString_MenuTitle = 0,
+    // The bottom bar. These are actions, never button names: the button is
+    // drawn as its own icon (dglab/ui/button.h), so "B 返回" is an icon and a
+    // word, and the word is the only half that can be translated.
+    DglabString_ActionEnter = 0,
+    DglabString_ActionConfirm,
+    DglabString_ActionBack,
+    DglabString_ActionExit,
+    DglabString_ActionStart,
+    DglabString_ActionStop,
+    DglabString_ActionClear,
+    DglabString_ActionLog,     ///< open the sysmodule log page
+    DglabString_ActionClose,   ///< and close it again
+    DglabString_ActionScroll,
+    DglabString_ActionTestChannels, ///< one hint, the ZL and ZR icons
+    DglabString_ActionAdjust,
+    DglabString_ActionLanguage,
+    DglabString_ActionReset,
+    // the two adjustment hints the pages put inside their own content
+    DglabString_HintAdjustA,
+    DglabString_HintAdjustB,
+
+    // menu: the only page whose title carries the app's name
+    DglabString_MenuTitle,
     DglabString_SysmoduleOk,
     DglabString_SysmoduleDown,
-    DglabString_ItemSocket,
-    DglabString_ItemMotion,
-    DglabString_ItemAdvanced,
-    DglabString_ItemAbout,
+    // The menu's entries are the pages' own titles (see menu.c): one string per
+    // page, so a list entry and the page it opens can never drift apart. The BLE
+    // PoC console is the exception - it has no page of its own in this UI.
     DglabString_ItemBlePoc,
     DglabString_DescSocket,
     DglabString_DescMotion,
     DglabString_DescAdvanced,
     DglabString_DescAbout,
     DglabString_DescBlePoc,
-    DglabString_MenuSelect,
-    DglabString_MenuStart,
 
     // about
     DglabString_AboutTitle,
@@ -34,13 +55,14 @@ typedef enum {
     DglabString_AboutLangAuto,
     DglabString_AboutLangZh,
     DglabString_AboutLangEn,
-    DglabString_AboutFooter,
 
     // motion screen
     DglabString_MotionTitle,
     DglabString_MotionChannels,
     DglabString_MotionLink,
     DglabString_MotionVolume,
+    DglabString_MotionChannelA,
+    DglabString_MotionChannelB,
     DglabString_MotionLastCmd,
     DglabString_MotionStill,
     DglabString_MotionMoving,
@@ -48,9 +70,6 @@ typedef enum {
     DglabString_MotionNotConnected,
     DglabString_MotionDesc,
     DglabString_MotionSafety,
-    DglabString_MotionSleepWarning,
-    DglabString_MotionClear,
-    DglabString_MotionBack,
     DglabString_LinkNotStarted,
     DglabString_LinkWaiting,
     DglabString_LinkPaired,
@@ -62,8 +81,6 @@ typedef enum {
     DglabString_AdvancedTitle,
     DglabString_AdvancedSaved,
     DglabString_AdvancedSaveFailed,
-    DglabString_AdvancedSelect,
-    DglabString_AdvancedReset,
 
     // the motion parameters (name then description, in order)
     DglabString_SetDeadzoneEnter,
@@ -93,7 +110,10 @@ typedef enum {
 
     // socket test screen
     DglabString_SocketTitle,
-    DglabString_PanelServer,
+    DglabString_RowServer,
+    DglabString_RowClear,
+    DglabString_LabelChannelA,
+    DglabString_LabelChannelB,
     DglabString_SocketPort,
     DglabString_LabelState,
     DglabString_LabelAddress,
@@ -118,8 +138,6 @@ typedef enum {
     DglabString_QrNoAddress,
     DglabString_QrTooLong,
     DglabString_LogTitle,
-    DglabString_SocketKeys,
-    DglabString_SocketValues,
     DglabString_SleepWarning,
 
     // what the buttons sent, and what came back
@@ -144,12 +162,65 @@ typedef enum {
     DglabString_Count,
 } DglabString;
 
+/// Longest value a language file may carry. The longest line the screens use is
+/// a description of about 200 bytes, so this only ever catches a file that is
+/// not a language file at all.
+#define DGLAB_STRING_VALUE_MAX 512
+
+/// Longest key (member name inside "strings").
+#define DGLAB_STRING_KEY_MAX 64
+
+/// What loading one file did.
+typedef enum {
+    DglabStringsLoad_Ok = 0,   ///< every key came from the file
+    DglabStringsLoad_Incomplete, ///< usable, but something about it is off
+    DglabStringsLoad_Failed,     ///< nothing was taken from this file
+} DglabStringsLoadResult;
+
+/// The first thing that was wrong with a file. Only the kinds the loader can
+/// name itself; a syntax mistake is reported with the reader's message.
+typedef enum {
+    DglabStringsProblem_None = 0,
+    DglabStringsProblem_Syntax,       ///< not valid JSON, see line
+    DglabStringsProblem_Structure,    ///< valid JSON, but not a language file
+    DglabStringsProblem_Language,     ///< the "language" field is not this file's code
+    DglabStringsProblem_MissingKeys,  ///< the file goes without some of the keys
+    DglabStringsProblem_UnknownKeys,  ///< the file carries keys the UI does not ask for
+    DglabStringsProblem_DuplicateKey, ///< the same key twice
+    DglabStringsProblem_OutOfMemory,
+    DglabStringsProblem_Unsupported, ///< not one of the languages that have files
+} DglabStringsProblem;
+
+typedef struct {
+    DglabStringsProblem problem; ///< the first thing that went wrong
+    unsigned line; ///< 1 based, set for a syntax mistake
+    unsigned count; ///< how many keys `problem` covers, 0 when it is not counted
+    unsigned missing; ///< keys the file does not carry at all
+    unsigned unknown; ///< keys the file carries that the UI never asks for
+    char detail[96]; ///< first missing or unknown key, or the reader's message
+    char language[16]; ///< the "language" field the file declared, "" when absent
+} DglabStringsReport;
+
+/// Reads one language out of the text of its .json file. `report` is optional
+/// and is written for every call, including the successful ones. A failed load
+/// leaves the language table exactly as it was.
+DglabStringsLoadResult dglabStringsLoadJson(DglabLanguage language, const char* text, size_t size,
+    DglabStringsReport* report);
+
+/// Drops every loaded language. For tests: the NRO loads once and keeps it.
+void dglabStringsReset(void);
+
 /// Switches the language the lookups use (never Auto; resolve it first).
 void dglabStringsSetLanguage(DglabLanguage language);
 
-/// The text for the current language. Falls back to English, and to "" for an
-/// out of range key, so a missing translation can never crash a screen.
+/// The text for the current language. Falls back to another loaded language,
+/// and to "" for an out of range key, so a language file that is missing an
+/// entry can never crash a screen.
 const char* dglabString(DglabString id);
 
 /// The text for a specific language, for tests and for the language row itself.
 const char* dglabStringFor(DglabLanguage language, DglabString id);
+
+/// The key `id` uses in the language files, e.g. "motion_title"; NULL when the
+/// id is out of range. Used by the loader and by tests.
+const char* dglabStringKeyName(DglabString id);

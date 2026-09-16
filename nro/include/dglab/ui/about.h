@@ -14,4 +14,4 @@ typedef struct {
     const char* github_url;
 } DglabAboutState;
 
-void dglabAboutDraw(DglabCanvas* canvas, DglabGlyphSource* text, const DglabAboutState* state);
+void dglabAboutDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabAboutState* state);

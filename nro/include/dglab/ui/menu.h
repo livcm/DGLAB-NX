@@ -22,7 +22,7 @@ typedef struct {
     bool sysmodule_ok;   ///< the last ping was answered
 } DglabMenuState;
 
-void dglabMenuDraw(DglabCanvas* canvas, DglabGlyphSource* text, const DglabMenuState* state);
+void dglabMenuDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabMenuState* state);
 
 /// Moves the selection by `delta` and wraps around, so the caller does not have
 /// to do signed modulo arithmetic on an unsigned index.

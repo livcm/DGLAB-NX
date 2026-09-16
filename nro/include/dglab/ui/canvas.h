@@ -21,6 +21,15 @@ typedef struct {
     int width;
     int height;
     int stride; // bytes per row, may be larger than width * 4
+
+    // On top of the buffer bounds, drawing is confined to this rectangle. It
+    // starts as the whole canvas; a page narrows it to its content column
+    // (dglabPageClipContent) so a row scrolled past the edge is cut there
+    // instead of drawn over the rules.
+    int clip_x;
+    int clip_y;
+    int clip_width;
+    int clip_height;
 } DglabCanvas;
 
 // Bitmap font. The glyph data is one bit per pixel, tile_width must be a
@@ -45,6 +54,30 @@ void dglabCanvasBlend(DglabCanvas* canvas, int x, int y, uint32_t color, uint8_t
 void dglabCanvasFill(DglabCanvas* canvas, int x, int y, int width, int height, uint32_t color);
 void dglabCanvasFrame(DglabCanvas* canvas, int x, int y, int width, int height, int thickness,
     uint32_t color);
+
+// The one pixel rule the console draws between list rows and under the header.
+// It is a fill of height 1, but the name keeps the screens from spelling out a
+// height that a later scale would have to change in twenty places.
+void dglabCanvasHLine(DglabCanvas* canvas, int x, int y, int width, uint32_t color);
+
+// Rounded rectangle, filled (`RoundFill`) and stroked (`RoundFrame`). The focus
+// box of every row in the console's UI is a stroked one of these, so its radius
+// and thickness are most of what makes the style recognisable (docs/nro-ui.md).
+void dglabCanvasRoundFill(DglabCanvas* canvas, int x, int y, int width, int height, int radius,
+    uint32_t color);
+void dglabCanvasRoundFrame(DglabCanvas* canvas, int x, int y, int width, int height, int radius,
+    int thickness, uint32_t color);
+
+// Filled disc and ring: the slider knob is the first and the footer's button
+// hints are the second ("A" inside a ring). Both are antialiased at the edge.
+void dglabCanvasDisc(DglabCanvas* canvas, int cx, int cy, int radius, uint32_t color);
+void dglabCanvasRing(DglabCanvas* canvas, int cx, int cy, int radius, int thickness,
+    uint32_t color);
+
+// Confines every later drawing call to `width x height` at (x, y), intersected
+// with the canvas. dglabCanvasClearClip() gives the whole canvas back.
+void dglabCanvasSetClip(DglabCanvas* canvas, int x, int y, int width, int height);
+void dglabCanvasClearClip(DglabCanvas* canvas);
 
 // Draws text with the given pixel scale. Unsupported characters are drawn as
 // blanks.

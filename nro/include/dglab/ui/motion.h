@@ -33,7 +33,8 @@ typedef struct {
     // The server holds a listening socket while it runs, and the console hangs
     // if that happens across a sleep - the same warning the socket screen shows.
     bool server_running;
+
 } DglabMotionScreenState;
 
-void dglabMotionScreenDraw(DglabCanvas* canvas, DglabGlyphSource* text,
+void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     const DglabMotionScreenState* state);

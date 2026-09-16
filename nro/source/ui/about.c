@@ -1,47 +1,20 @@
 #include <dglab/ui/about.h>
 
+#include <dglab/ui/list.h>
+#include <dglab/ui/page.h>
 #include <dglab/ui/strings.h>
 #include <dglab/ui/theme.h>
 
 #include <stdio.h>
 #include <string.h>
 
-#define SCREEN_WIDTH 1280
-#define SCREEN_HEIGHT 720
-#define MARGIN 24
-#define GAP 16
-#define TITLE_HEIGHT 56
-#define PANEL_WIDTH 900
-
-#define kBackground (dglabThemeGet()->background)
-#define kPanel (dglabThemeGet()->panel)
-#define kPanelBorder (dglabThemeGet()->panel_border)
-#define kText (dglabThemeGet()->text)
-#define kMuted (dglabThemeGet()->muted)
-#define kAccent (dglabThemeGet()->accent)
-
-// Draws the wrapped text and advances *y past it, so the caller does not have to
-// guess how many lines the wrap produced (it did guess, and overlapped).
-static void drawWrapped(DglabCanvas* canvas, DglabGlyphSource* text, int x, int* y, int width,
-    const char* value, uint32_t color)
-{
-    char line[192];
-
-    while (*value) {
-        size_t taken = dglabTextWrapLine(text, value, width, line, sizeof(line));
-
-        if (taken == 0)
-            break;
-
-        dglabTextDraw(canvas, text, x, *y, line, color);
-        *y += text->line_height;
-        value += taken;
-
-        while (*value == ' ')
-            value++;
-    }
-}
-
+// What this is, where the source lives, and the language - laid out the way the
+// console lays out a text page: the two prose lines are white paragraphs, not
+// grey bulleted notes, and the two things that are values (the source, the
+// language) are rows under them.
+//
+// Nothing is focused here: left and right switch the language, which is what the
+// bottom bar says.
 
 static const char* languageValue(const DglabAboutState* state, char* buffer, size_t size)
 {
@@ -68,45 +41,75 @@ static const char* languageValue(const DglabAboutState* state, char* buffer, siz
     return buffer;
 }
 
-void dglabAboutDraw(DglabCanvas* canvas, DglabGlyphSource* text, const DglabAboutState* state)
+void dglabAboutDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabAboutState* state)
 {
-    int line = text->line_height;
-    int x = MARGIN + 24;
-    int y = TITLE_HEIGHT + GAP + 32;
-    int wrap_width = PANEL_WIDTH - 48;
-    int panel_height = 40 + line * 6 +
-        line * (dglabTextCountLines(text, dglabString(DglabString_AboutLine1), wrap_width) +
-                dglabTextCountLines(text, dglabString(DglabString_AboutLine2), wrap_width));
-    char buffer[96];
+    const DglabTheme* theme = dglabThemeGet();
+    DglabListFonts list_fonts = { fonts->body, fonts->value, fonts->note };
+    DglabRow rows[4];
+    DglabRowBox boxes[4];
+    DglabHint hints[2];
+    DglabTextStyle title = { fonts->title, theme->text };
+    DglabListStyle style;
+    char version[32];
+    char language[96];
+    int count = 0;
+    int view_height = DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP;
+    int content_height;
+    int offset;
 
-    dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, kBackground);
-    dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, TITLE_HEIGHT, kPanel);
-    dglabTextDraw(canvas, text, MARGIN, 28, dglabString(DglabString_AboutTitle), kText);
-
-    dglabCanvasFill(canvas, MARGIN, TITLE_HEIGHT + GAP, PANEL_WIDTH, panel_height, kPanel);
-    dglabCanvasFrame(canvas, MARGIN, TITLE_HEIGHT + GAP, PANEL_WIDTH, panel_height, 2,
-        kPanelBorder);
-
-    drawWrapped(canvas, text, x, &y, PANEL_WIDTH - 48, dglabString(DglabString_AboutLine1),
-        kText);
-    y += line / 2;
-    drawWrapped(canvas, text, x, &y, PANEL_WIDTH - 48, dglabString(DglabString_AboutLine2),
-        kMuted);
-    y += line;
-
-    snprintf(buffer, sizeof(buffer), "IPC %u.%u.%u", (unsigned)state->version.major,
+    snprintf(version, sizeof(version), "IPC %u.%u.%u", (unsigned)state->version.major,
         (unsigned)state->version.minor, (unsigned)state->version.patch);
-    dglabTextDraw(canvas, text, x, y, buffer, kMuted);
-    y += line * 2;
+    languageValue(state, language, sizeof(language));
 
-    dglabTextDraw(canvas, text, x, y, dglabString(DglabString_AboutSource), kMuted);
-    y += line;
-    dglabTextDraw(canvas, text, x, y, state->github_url, kAccent);
-    y += line * 2;
+    memset(rows, 0, sizeof(rows));
 
-    dglabTextDraw(canvas, text, x, y, dglabString(DglabString_AboutLanguage), kMuted);
-    dglabTextDraw(canvas, text, x + 16 * 13, y, languageValue(state, buffer, sizeof(buffer)), kText);
+    rows[count++] = (DglabRow){
+        .kind = DglabRow_Paragraph,
+        .label = dglabString(DglabString_AboutLine1),
+    };
+    rows[count++] = (DglabRow){
+        .kind = DglabRow_Paragraph,
+        .label = dglabString(DglabString_AboutLine2),
+    };
+    rows[count++] = (DglabRow){
+        .kind = DglabRow_Item,
+        .label = dglabString(DglabString_AboutSource),
+        .value = state->github_url ? state->github_url : "",
+        .value_color = theme->accent,
+    };
+    rows[count++] = (DglabRow){
+        .kind = DglabRow_Item,
+        .label = dglabString(DglabString_AboutLanguage),
+        .value = language,
+        .value_color = theme->text,
+    };
 
-    dglabTextDraw(canvas, text, MARGIN, SCREEN_HEIGHT - 44,
-        dglabString(DglabString_AboutFooter), kText);
+    content_height = dglabListMeasure(&list_fonts, rows, count, DGLAB_PAGE_CONTENT_WIDTH, boxes,
+        (int)(sizeof(boxes) / sizeof(boxes[0])));
+    offset = 0;
+
+    dglabPageBegin(canvas);
+    dglabPageHeader(canvas, &title, dglabString(DglabString_AboutTitle),
+        &(DglabTextStyle){ fonts->value, theme->muted }, version);
+
+    dglabPageClipContent(canvas);
+
+    style = (DglabListStyle){
+        .x = DGLAB_PAGE_CONTENT_X,
+        .origin_y = DGLAB_PAGE_CONTENT_TOP - offset,
+        .width = DGLAB_PAGE_CONTENT_WIDTH,
+        .focus = -1,
+        .navigation = false,
+    };
+    dglabListDraw(canvas, &list_fonts, &style, rows, boxes, count);
+
+    dglabCanvasClearClip(canvas);
+
+    dglabListScrollBar(canvas, DGLAB_PAGE_CONTENT_TOP, view_height, content_height, offset);
+
+    hints[0] = (DglabHint){ DglabButton_Left, DglabButton_Right,
+        dglabString(DglabString_ActionLanguage), };
+    hints[1] = (DglabHint){ DglabButton_B, DglabButton_None,
+        dglabString(DglabString_ActionBack), };
+    dglabPageHints(canvas, fonts->body, hints, 2);
 }
