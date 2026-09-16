@@ -209,7 +209,10 @@ int main(int argc, char** argv)
                 size_t size = fread(font_data, 1, sizeof(font_data), font_file);
                 fclose(font_file);
 
-                if (dglabTtfFontInit(font_data, size, 24.0f)) {
+                const char* size_text = getenv("PREVIEW_TTF_SIZE");
+                float pixel_height = size_text ? (float)atof(size_text) : 24.0f;
+
+                if (dglabTtfFontInit(font_data, size, pixel_height)) {
                     source = dglabTtfFontSource();
                     dglabStringsSetLanguage(DglabLanguage_ChineseSimplified);
                 } else {
