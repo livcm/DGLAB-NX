@@ -242,7 +242,7 @@ static void testScreen(void)
     state.log_lines = log_lines;
     state.log_count = DGLAB_SCREEN_LOG_LINES;
 
-    dglabScreenDraw(&canvas, &kFont, &state);
+    dglabScreenDraw(&canvas, dglabBitmapGlyphSource(&kFont), &kFont, &state);
 
     changed = countChangedPixels(screen_pixels, sizeof(screen_pixels), blue);
 

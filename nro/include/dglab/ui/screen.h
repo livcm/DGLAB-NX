@@ -8,11 +8,15 @@
 
 #include <dglab/ipc.h>
 #include <dglab/ui/canvas.h>
+#include <dglab/ui/text.h>
 
 #include <stdbool.h>
 
 #define DGLAB_SCREEN_LOG_LINES 12
 #define DGLAB_SCREEN_LOG_LINE_LEN 40
+// How many of the ring the panel shows: 16px lines, and the panel only has room
+// for this many above the footer (the SD card gets all of them).
+#define DGLAB_SCREEN_LOG_VISIBLE 9
 
 // How the "last cmd" line is painted: it worked, it worked but there is nothing
 // to hear, or the sysmodule refused it.
@@ -35,6 +39,7 @@ typedef struct {
     u32 test_strength_a;
     u32 test_strength_b;
 
+
     // What the buttons last sent and what the sysmodule answered, e.g.
     // "A test  ok (A is 0)" or "clear  no app bound". Built in main.c, where
     // libnx's Result values are available; empty until the first command.
@@ -45,4 +50,9 @@ typedef struct {
     int log_count;
 } DglabScreenState;
 
-void dglabScreenDraw(DglabCanvas* canvas, const DglabFont* font, const DglabScreenState* state);
+/// The screen takes two text sources on purpose: the status panel, the QR panel
+/// and the footer use the localised font, while the sysmodule log keeps libnx's
+/// 16px bitmap font so that twelve dense lines still fit on screen
+/// (docs/nro-ui.md).
+void dglabScreenDraw(DglabCanvas* canvas, DglabGlyphSource* text, const DglabFont* log_font,
+    const DglabScreenState* state);

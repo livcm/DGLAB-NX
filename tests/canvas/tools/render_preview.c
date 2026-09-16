@@ -280,7 +280,7 @@ int main(int argc, char** argv)
 
         dglabAdvancedDraw(&canvas, g_text, &advanced);
     } else {
-        dglabScreenDraw(&canvas, &font, &state);
+        dglabScreenDraw(&canvas, g_text, &font, &state);
     }
 
     writeBmp(argv[2]);

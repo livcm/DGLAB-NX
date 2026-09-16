@@ -1,5 +1,6 @@
 #include <dglab/ui/screen.h>
 
+#include <dglab/ui/strings.h>
 #include <dglab/ui/theme.h>
 #include <dglab/ui/qr.h>
 
@@ -36,86 +37,80 @@
 #define QR_MAX_MODULE 10
 
 
-static const char* netStateName(u32 state)
-{
-    switch (state) {
-        case DglabNetState_Idle: return "not started";
-        case DglabNetState_Listening: return "waiting for the app";
-        case DglabNetState_Paired: return "app connected";
-        case DglabNetState_Stopped: return "stopped";
-        case DglabNetState_Failed: return "FAILED";
-        default: return "?";
-    }
-}
-
-static uint32_t netStateColor(u32 state)
-{
-    switch (state) {
-        case DglabNetState_Paired: return kAccent;
-        case DglabNetState_Listening: return kWarn;
-        case DglabNetState_Failed: return kError;
-        default: return kMuted;
-    }
-}
-
-static void drawPanel(DglabCanvas* canvas, const DglabFont* font, int x, int y, int width,
+static void drawPanel(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, int width,
     int height, const char* title)
 {
     dglabCanvasFill(canvas, x, y, width, height, kPanel);
     dglabCanvasFrame(canvas, x, y, width, height, 2, kPanelBorder);
 
     if (title)
-        dglabCanvasText(canvas, font, x + 12, y + 8, 1, title, kMuted);
+        dglabTextDraw(canvas, text, x + 12, y + 8, title, kMuted);
 }
 
-static void drawLine(DglabCanvas* canvas, const DglabFont* font, int x, int y, const char* label,
-    const char* value, uint32_t value_color)
+// A URL has no words to break at: it is cut exactly where the width ends.
+static void drawHardWrapped(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, int width,
+    const char* value, uint32_t color)
 {
-    dglabCanvasText(canvas, font, x, y, 1, label, kMuted);
-    // The longest label ("controller") is 10 characters; two more leave room for
-    // 21 characters of value, which is what "192.168.1.161:9999" needs.
-    dglabCanvasText(canvas, font, x + 12 * 16, y, 1, value, value_color);
-}
+    char line[192];
 
-// Wraps at spaces when there is one, and hard breaks otherwise (the socket URL
-// has no spaces and still has to fit).
-static void drawWrapped(DglabCanvas* canvas, const DglabFont* font, int x, int y, int columns,
-    const char* text, uint32_t color)
-{
-    char line[80];
-    size_t length = strlen(text);
-    size_t offset = 0;
+    while (*value) {
+        size_t take = 0;
+        size_t offset = 0;
 
-    if (columns <= 0 || columns >= (int)sizeof(line))
-        return;
+        while (value[offset]) {
+            size_t used = 0;
+            size_t next = offset;
 
-    while (offset < length) {
-        size_t take = length - offset;
+            // One character at a time, so the cut lands on a character
+            // boundary even for multi byte text.
+            do {
+                next++;
+            } while (((unsigned char)value[next] & 0xC0) == 0x80);
 
-        if (take > (size_t)columns) {
-            take = (size_t)columns;
+            if (dglabTextWidth(text, line) > width && offset > 0)
+                break;
 
-            if (offset + take < length && text[offset + take] != ' ') {
-                size_t back = take;
-
-                while (back > 0 && text[offset + back] != ' ')
-                    back--;
-
-                if (back > (size_t)columns / 3)
-                    take = back;
-            }
+            (void)used;
+            memcpy(line, value, next);
+            line[next] = '\0';
+            offset = next;
         }
 
-        memcpy(line, text + offset, take);
-        line[take] = '\0';
+        if (offset == 0)
+            break;
 
-        dglabCanvasText(canvas, font, x, y, 1, line, color);
+        take = offset;
 
-        y += LINE_HEIGHT;
-        offset += take;
+        if (take > sizeof(line) - 1)
+            break;
 
-        while (offset < length && text[offset] == ' ')
-            offset++;
+        dglabTextDraw(canvas, text, x, y, line, color);
+
+        y += text->line_height;
+        value += take;
+    }
+}
+
+// Wrapping comes from the text layer: it measures with real glyph widths and
+// knows that Chinese breaks between characters while "192.168.1.161" does not.
+static void drawWrapped(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, int width,
+    const char* value, uint32_t color)
+{
+    char line[192];
+
+    while (*value) {
+        size_t taken = dglabTextWrapLine(text, value, width, line, sizeof(line));
+
+        if (taken == 0)
+            break;
+
+        dglabTextDraw(canvas, text, x, y, line, color);
+
+        y += text->line_height;
+        value += taken;
+
+        while (*value == ' ')
+            value++;
     }
 }
 
@@ -128,140 +123,140 @@ static void formatShortId(const char* id, char* out, size_t out_size)
         snprintf(out, out_size, "%s", id);
 }
 
-static void drawTitle(DglabCanvas* canvas, const DglabFont* font, const DglabScreenState* state)
+static const char* stateText(u32 state)
 {
+    switch (state) {
+        case DglabNetState_Listening: return dglabString(DglabString_StateWaiting);
+        case DglabNetState_Paired: return dglabString(DglabString_StateConnected);
+        case DglabNetState_Stopped: return dglabString(DglabString_StateStopped);
+        case DglabNetState_Failed: return dglabString(DglabString_StateFailed);
+        default: return dglabString(DglabString_StateNotStarted);
+    }
+}
+
+static uint32_t stateColor(u32 state)
+{
+    switch (state) {
+        case DglabNetState_Paired: return kAccent;
+        case DglabNetState_Listening: return kWarn;
+        case DglabNetState_Failed: return kError;
+        default: return kMuted;
+    }
+}
+
+static void drawTitle(DglabCanvas* canvas, DglabGlyphSource* text,
+    const DglabScreenState* state)
+{
+    char port[64];
+    char title[128];
     char right[64];
-    char title[80];
 
     dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, TITLE_HEIGHT, kPanel);
 
-    snprintf(title, sizeof(title), "DGLAB-NX   DG-LAB socket server   port %u",
-        (unsigned)state->status.port);
-    dglabCanvasText(canvas, font, MARGIN, 20, 1, title, kText);
+    snprintf(port, sizeof(port), dglabString(DglabString_SocketPort), (unsigned)state->status.port);
+    snprintf(title, sizeof(title), "%s   %s", dglabString(DglabString_SocketTitle), port);
+    dglabTextDraw(canvas, text, MARGIN, (TITLE_HEIGHT - text->cell_height) / 2, title, kText);
 
     snprintf(right, sizeof(right), "IPC %u.%u.%u", state->version.major, state->version.minor,
         state->version.patch);
-
-    dglabCanvasText(canvas, font, SCREEN_WIDTH - MARGIN - dglabCanvasTextWidth(font, 1, right), 20,
-        1, right, kMuted);
+    dglabTextDraw(canvas, text, SCREEN_WIDTH - MARGIN - dglabTextWidth(text, right),
+        (TITLE_HEIGHT - text->cell_height) / 2, right, kMuted);
 }
 
-static void drawStatus(DglabCanvas* canvas, const DglabFont* font, const DglabScreenState* state)
+// Label column: wide enough for the longest label in either language, narrow
+// enough to leave room for the values.
+#define LABEL_COLUMN 200
+
+static void drawStatusLine(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, const char* label,
+    const char* value, uint32_t color)
+{
+    dglabTextDraw(canvas, text, x, y, label, kMuted);
+    dglabTextDraw(canvas, text, x + LABEL_COLUMN, y, value, color);
+}
+
+static void drawStatus(DglabCanvas* canvas, DglabGlyphSource* text,
+    const DglabScreenState* state)
 {
     const DglabNetStatus* status = &state->status;
+    int line = text->line_height;
     int x = MARGIN + 16;
-    int y = TITLE_HEIGHT + GAP + 12 + LINE_HEIGHT * 2;
-    char buffer[128];
+    int y = TITLE_HEIGHT + GAP + 24 + line;
+    // Header, eight rows and the one line sleep warning.
+    int panel_height = 24 + line * 10;
+    char buffer[160];
 
-    drawPanel(canvas, font, MARGIN, TITLE_HEIGHT + GAP, STATUS_WIDTH, STATUS_HEIGHT, "server");
+    drawPanel(canvas, text, MARGIN, TITLE_HEIGHT + GAP, STATUS_WIDTH, panel_height,
+        dglabString(DglabString_PanelServer));
 
     if (!state->status_ok) {
-        drawLine(canvas, font, x, y, "status", "IPC call failed", kError);
+        drawStatusLine(canvas, text, x, y, dglabString(DglabString_LabelState),
+            dglabString(DglabString_LinkIpcFailed), kError);
         return;
     }
 
-    drawLine(canvas, font, x, y, "state", netStateName(status->state),
-        netStateColor(status->state));
-    y += LINE_HEIGHT;
+    drawStatusLine(canvas, text, x, y, dglabString(DglabString_LabelState), stateText(status->state),
+        stateColor(status->state));
+    y += line;
 
     if (status->ip_text[0]) {
         snprintf(buffer, sizeof(buffer), "%s:%u", (const char*)status->ip_text,
             (unsigned)status->port);
     } else {
-        // The value column only has room for about 19 characters.
-        snprintf(buffer, sizeof(buffer), "no address yet");
+        snprintf(buffer, sizeof(buffer), "%s", dglabString(DglabString_NoAddress));
     }
 
-    drawLine(canvas, font, x, y, "address", buffer, status->ip_text[0] ? kText : kWarn);
-    y += LINE_HEIGHT;
-
-    formatShortId((const char*)status->controller_id, buffer, sizeof(buffer));
-    drawLine(canvas, font, x, y, "controller", buffer, kText);
-    y += LINE_HEIGHT;
+    drawStatusLine(canvas, text, x, y, dglabString(DglabString_LabelAddress), buffer,
+        status->ip_text[0] ? kText : kWarn);
+    y += line;
 
     if (status->peer_id[0])
         formatShortId((const char*)status->peer_id, buffer, sizeof(buffer));
     else
-        snprintf(buffer, sizeof(buffer), "(not bound)");
+        snprintf(buffer, sizeof(buffer), "-");
 
-    drawLine(canvas, font, x, y, "app id", buffer, status->peer_id[0] ? kAccent : kMuted);
-    y += LINE_HEIGHT;
+    drawStatusLine(canvas, text, x, y, dglabString(DglabString_LabelAppId), buffer,
+        status->peer_id[0] ? kAccent : kMuted);
+    y += line;
 
-    snprintf(buffer, sizeof(buffer), "%u sessions  %u commands  %u reports",
-        (unsigned)status->sessions, (unsigned)status->commands_sent,
-        (unsigned)status->reports_received);
-    dglabCanvasText(canvas, font, x, y, 1, buffer, kText);
-    y += LINE_HEIGHT;
+    snprintf(buffer, sizeof(buffer), "%u / %u / %u", (unsigned)status->sessions,
+        (unsigned)status->commands_sent, (unsigned)status->reports_received);
+    drawStatusLine(canvas, text, x, y, dglabString(DglabString_LabelCounters), buffer, kText);
+    y += line;
 
-    snprintf(buffer, sizeof(buffer), "%u heartbeats  %u in  %u out",
-        (unsigned)status->heartbeats_sent, (unsigned)status->messages_in,
-        (unsigned)status->messages_out);
-    dglabCanvasText(canvas, font, x, y, 1, buffer, kText);
-    y += LINE_HEIGHT;
+    snprintf(buffer, sizeof(buffer), "%u / %u / %u", (unsigned)status->heartbeats_sent,
+        (unsigned)status->messages_in, (unsigned)status->messages_out);
+    drawStatusLine(canvas, text, x, y, dglabString(DglabString_LabelHeartbeats), buffer, kText);
+    y += line;
 
-    // What the App says about the channel strengths. The 3.0 App never sends
-    // anything back, so this stays empty there; say so instead of showing a
-    // misleading 0/0.
     if (status->reports_received == 0)
-        snprintf(buffer, sizeof(buffer), "none");
+        snprintf(buffer, sizeof(buffer), "%s", dglabString(DglabString_NoReport));
     else
-        snprintf(buffer, sizeof(buffer), "%u/%u (limit %u/%u)", (unsigned)status->app_strength_a,
+        snprintf(buffer, sizeof(buffer), "%u/%u (%u/%u)", (unsigned)status->app_strength_a,
             (unsigned)status->app_strength_b, (unsigned)status->app_limit_a,
             (unsigned)status->app_limit_b);
 
-    drawLine(canvas, font, x, y, "app report", buffer, kText);
-    y += LINE_HEIGHT;
+    drawStatusLine(canvas, text, x, y, dglabString(DglabString_LabelAppReport), buffer, kMuted);
+    y += line;
 
-    if (status->last_result)
-        snprintf(buffer, sizeof(buffer), "0x%08X", (unsigned)status->last_result);
-    else if (status->last_error)
-        snprintf(buffer, sizeof(buffer), "protocol error %u", (unsigned)status->last_error);
-    else
-        snprintf(buffer, sizeof(buffer), "none");
+    drawStatusLine(canvas, text, x, y, dglabString(DglabString_CommandLabel), 
+        (state->last_command && state->last_command[0]) ? state->last_command : "-",
+        state->last_command_tone == DglabCmdTone_Error ? kError :
+            (state->last_command_tone == DglabCmdTone_Warn ? kWarn : kText));
+    y += line;
 
-    drawLine(canvas, font, x, y, "last issue", buffer,
-        (status->last_result || status->last_error) ? kWarn : kMuted);
-    y += LINE_HEIGHT;
+    snprintf(buffer, sizeof(buffer), "A %u/100   B %u/100", (unsigned)state->test_strength_a,
+        (unsigned)state->test_strength_b);
+    drawStatusLine(canvas, text, x, y, dglabString(DglabString_LabelStrength), buffer, kMuted);
+    y += line;
 
-    // What the buttons sent last. Without this line a press that never reached
-    // the App - no App bound, server stopped - was indistinguishable from a
-    // successful one, which is exactly how the first hardware runs were debugged
-    // the hard way.
-    if (state->last_command && state->last_command[0]) {
-        uint32_t tone = kText;
-
-        if (state->last_command_tone == DglabCmdTone_Warn)
-            tone = kWarn;
-        else if (state->last_command_tone == DglabCmdTone_Error)
-            tone = kError;
-
-        drawLine(canvas, font, x, y, "last cmd", state->last_command, tone);
-    } else {
-        drawLine(canvas, font, x, y, "last cmd", "-", kMuted);
-    }
-
-    y += LINE_HEIGHT;
-
-    // The channel strengths the test buttons send. Raw device values, the same
-    // numbers the App shows: 0..100, above which the official documentation only
-    // allows special cases. Labelled "strength" rather than after the buttons:
-    // these are the channels' values, and the buttons only happen to be how they
-    // are set here.
-    snprintf(buffer, sizeof(buffer), "A %u/100  B %u/100",
-        (unsigned)state->test_strength_a, (unsigned)state->test_strength_b);
-    drawLine(canvas, font, x, y, "strength", buffer, kMuted);
-
-    // While the server is up the sysmodule holds a listening socket, and this
-    // console hangs if that happens across a sleep. Say so on screen: one line,
-    // the panel has no room for the full explanation (docs/dglab-socket.md).
     if (status->state == DglabNetState_Listening || status->state == DglabNetState_Paired) {
-        y += LINE_HEIGHT;
-        drawWrapped(canvas, font, x, y, (STATUS_WIDTH - 32) / 16,
-            "do not sleep: press Y first", kWarn);
+        y += line / 2;
+        drawWrapped(canvas, text, x, y, STATUS_WIDTH - 32,
+            dglabString(DglabString_SleepWarning), kWarn);
     }
 }
 
-static void drawQr(DglabCanvas* canvas, const DglabFont* font, const DglabScreenState* state)
+static void drawQr(DglabCanvas* canvas, DglabGlyphSource* text, const DglabScreenState* state)
 {
     // Encoding costs a handful of matrix builds, so the result is cached until
     // the payload changes.
@@ -271,41 +266,30 @@ static void drawQr(DglabCanvas* canvas, const DglabFont* font, const DglabScreen
     int panel_x = MARGIN * 2 + STATUS_WIDTH;
     int panel_y = TITLE_HEIGHT + GAP;
     int panel_w = SCREEN_WIDTH - panel_x - MARGIN;
-    int panel_h = SCREEN_HEIGHT - panel_y - TITLE_HEIGHT - GAP;
+    int panel_h = SCREEN_HEIGHT - panel_y - text->line_height * 2 - 32;
     int total;
     int module;
     int qr_size;
 
-    drawPanel(canvas, font, panel_x, panel_y, panel_w, panel_h, "scan this with the DG-LAB app");
+    drawPanel(canvas, text, panel_x, panel_y, panel_w, panel_h, dglabString(DglabString_QrHint));
 
     if (state->status.state != DglabNetState_Listening &&
         state->status.state != DglabNetState_Paired) {
-        char message[192];
-
-        // The server is not running yet, which is a different situation from a
-        // console that has no LAN address.
-        snprintf(message, sizeof(message),
-            "the socket server is not running. press A to start it on port %u (it stops itself "
-            "after 55 s so the console can sleep).",
-            (unsigned)state->status.port);
-        drawWrapped(canvas, font, panel_x + 20, panel_y + 60, (panel_w - 40) / 16, message, kWarn);
+        drawWrapped(canvas, text, panel_x + 20, panel_y + 60, panel_w - 40,
+            dglabString(DglabString_QrNotRunning), kWarn);
         return;
     }
 
     if (!state->url_ok || !state->url || state->url[0] == '\0') {
-        // Wrapped, because the panel is 41 characters wide and the message is
-        // longer than that.
-        drawWrapped(canvas, font, panel_x + 20, panel_y + 60, (panel_w - 40) / 16,
-            "no QR code yet: the server has no LAN address. Join the same Wi-Fi network as the "
-            "phone.",
-            kWarn);
+        drawWrapped(canvas, text, panel_x + 20, panel_y + 60, panel_w - 40,
+            dglabString(DglabString_QrNoAddress), kWarn);
         return;
     }
 
     if (!cached || strcmp(cached_url, state->url) != 0) {
         if (!dglabQrEncodeString(&cached_code, state->url, DglabQrEcc_M)) {
-            dglabCanvasText(canvas, font, panel_x + 20, panel_y + 60, 1,
-                "the socket url does not fit a QR code", kError);
+            dglabTextDraw(canvas, text, panel_x + 20, panel_y + 60,
+                dglabString(DglabString_QrTooLong), kError);
             return;
         }
 
@@ -313,80 +297,84 @@ static void drawQr(DglabCanvas* canvas, const DglabFont* font, const DglabScreen
         cached = true;
     }
 
-    total = (int)cached_code.size + QR_QUIET_ZONE * 2;
-
-    // The payload is long, so it is wrapped under the symbol: how much room it
-    // needs decides how large the modules can be.
-    {
-        int columns = (panel_w - 32) / 16;
-        int text_lines = (int)((strlen(state->url) + (size_t)columns - 1) / (size_t)columns);
-        int reserved = text_lines * LINE_HEIGHT + 12;
-        int available = panel_h - 40 - reserved - 12;
-
-        if (columns <= 0) {
-            dglabCanvasText(canvas, font, panel_x + 20, panel_y + 60, 1,
-                "the socket url does not fit a QR code", kError);
-            return;
-        }
-
-        module = available / total;
-    }
+    // The code takes the space above the wrapped url text, and the module size
+    // follows from that.
+    module = (panel_h - 160) / (cached_code.size + QR_QUIET_ZONE * 2);
 
     if (module > QR_MAX_MODULE)
         module = QR_MAX_MODULE;
 
-    if (module < 1)
-        module = 1;
+    if (module < 2)
+        module = 2;
 
-    qr_size = total * module;
+    qr_size = (cached_code.size + QR_QUIET_ZONE * 2) * module;
+    total = (panel_w - qr_size) / 2;
 
-    dglabCanvasQr(canvas, &cached_code, panel_x + (panel_w - qr_size) / 2, panel_y + 40, module,
-        QR_QUIET_ZONE, kBlack, kWhite);
+    dglabCanvasQr(canvas, &cached_code, panel_x + total, panel_y + 40, module, QR_QUIET_ZONE,
+        kBlack, kWhite);
 
-    drawWrapped(canvas, font, panel_x + 16, panel_y + 40 + qr_size + 16,
-        (panel_w - 32) / 16, state->url, kMuted);
+    drawHardWrapped(canvas, text, panel_x + 20, panel_y + 40 + qr_size + 16, panel_w - 40,
+        state->url, kMuted);
 }
 
-static void drawLog(DglabCanvas* canvas, const DglabFont* font, const DglabScreenState* state)
+// The log keeps libnx's 16px bitmap font: twelve dense lines fit at that size,
+// and the sysmodule writes English, so nothing here needs the CJK font. The
+// panel shows the newest DGLAB_SCREEN_LOG_VISIBLE lines of the ring.
+static void drawLog(DglabCanvas* canvas, DglabGlyphSource* text, const DglabFont* font,
+    const DglabScreenState* state, int y, int height)
 {
-    int x = MARGIN;
-    int y = TITLE_HEIGHT + GAP + STATUS_HEIGHT + GAP;
-    char line[LOG_CHARS + 1];
-    int text_y = y + 12 + LINE_HEIGHT;
+    int x = MARGIN + 16;
+    char line[DGLAB_SCREEN_LOG_LINE_LEN + 1];
+    int fits = (height - 40) / 20;
+    int shown = state->log_count < fits ? state->log_count : fits;
+    int first = state->log_count - shown;
+    int text_y = y + 40;
 
-    drawPanel(canvas, font, x, y, STATUS_WIDTH, LOG_HEIGHT, "sysmodule log");
+    if (shown < 0)
+        shown = 0;
 
-    for (int i = 0; i < state->log_count && i < DGLAB_SCREEN_LOG_LINES; i++) {
-        const char* text = state->log_lines[i];
-        size_t length = strlen(text);
+    dglabCanvasFill(canvas, MARGIN, y, STATUS_WIDTH, height, kPanel);
+    dglabCanvasFrame(canvas, MARGIN, y, STATUS_WIDTH, height, 2, kPanelBorder);
+    dglabTextDraw(canvas, text, MARGIN + 12, y + 6, dglabString(DglabString_LogTitle), kMuted);
 
-        if (length > LOG_CHARS)
-            length = LOG_CHARS;
+    for (int i = 0; i < shown; i++) {
+        const char* source = state->log_lines[first + i];
+        size_t length = strlen(source);
 
-        memcpy(line, text, length);
+        if (length > DGLAB_SCREEN_LOG_LINE_LEN)
+            length = DGLAB_SCREEN_LOG_LINE_LEN;
+
+        memcpy(line, source, length);
         line[length] = '\0';
 
-        dglabCanvasText(canvas, font, x + 16, text_y + i * LINE_HEIGHT, 1, line, kMuted);
+        dglabCanvasText(canvas, font, x, text_y + i * 20, 1, line, kMuted);
     }
 }
 
-static void drawFooter(DglabCanvas* canvas, const DglabFont* font)
+static void drawFooter(DglabCanvas* canvas, DglabGlyphSource* text)
 {
-    // Two lines: one line of hints is wider than the screen at 16 pixels per
-    // character, which used to push the trailing "+ exit" off the edge.
-    dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 56, 1,
-        "A start    Y stop    B clear    ZL test ch A    ZR test ch B", kText);
-    dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 32, 1,
-        "D-pad up/down ch A    left/right ch B    - BLE poc    + exit", kText);
+    dglabTextDraw(canvas, text, MARGIN, SCREEN_HEIGHT - text->line_height * 2 - 16,
+        dglabString(DglabString_SocketKeys), kText);
+    dglabTextDraw(canvas, text, MARGIN, SCREEN_HEIGHT - text->line_height - 16,
+        dglabString(DglabString_SocketValues), kText);
 }
 
-void dglabScreenDraw(DglabCanvas* canvas, const DglabFont* font, const DglabScreenState* state)
+void dglabScreenDraw(DglabCanvas* canvas, DglabGlyphSource* text, const DglabFont* log_font,
+    const DglabScreenState* state)
 {
+    int log_y;
+    int log_height;
+
     dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, kBackground);
 
-    drawTitle(canvas, font, state);
-    drawStatus(canvas, font, state);
-    drawQr(canvas, font, state);
-    drawLog(canvas, font, state);
-    drawFooter(canvas, font);
+    drawTitle(canvas, text, state);
+    drawStatus(canvas, text, state);
+    drawQr(canvas, text, state);
+
+    // The log takes what is left of the left column, above the footer.
+    log_y = TITLE_HEIGHT + GAP + 24 + text->line_height * 10 + GAP;
+    log_height = SCREEN_HEIGHT - text->line_height * 2 - 32 - log_y;
+    drawLog(canvas, text, log_font, state, log_y, log_height);
+
+    drawFooter(canvas, text);
 }

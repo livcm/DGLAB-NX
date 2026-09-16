@@ -93,6 +93,7 @@ typedef enum {
 
     // socket test screen
     DglabString_SocketTitle,
+    DglabString_PanelServer,
     DglabString_SocketPort,
     DglabString_LabelState,
     DglabString_LabelAddress,
@@ -102,6 +103,7 @@ typedef enum {
     DglabString_LabelHeartbeats,
     DglabString_LabelAppReport,
     DglabString_LabelLastIssue,
+    DglabString_CommandLabel,
     DglabString_LabelStrength,
     DglabString_StateNotStarted,
     DglabString_StateWaiting,

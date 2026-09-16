@@ -128,6 +128,7 @@ static const char* const kEnglish[DglabString_Count] = {
         "test. The device multiplies the two.",
 
     [DglabString_SocketTitle] = "DGLAB-NX   socket server",
+    [DglabString_PanelServer] = "server",
     [DglabString_SocketPort] = "port %u",
     [DglabString_LabelState] = "state",
     [DglabString_LabelAddress] = "address",
@@ -137,6 +138,7 @@ static const char* const kEnglish[DglabString_Count] = {
     [DglabString_LabelHeartbeats] = "heartbeats",
     [DglabString_LabelAppReport] = "app report",
     [DglabString_LabelLastIssue] = "last issue",
+    [DglabString_CommandLabel] = "last cmd",
     [DglabString_LabelStrength] = "strength",
     [DglabString_StateNotStarted] = "not started",
     [DglabString_StateWaiting] = "waiting for the app",
@@ -275,6 +277,7 @@ static const char* const kChinese[DglabString_Count] = {
         "满强度时的波形值，在「连接测试」里设的通道强度之上。设备会把两者相乘。",
 
     [DglabString_SocketTitle] = "DGLAB-NX   Socket 服务端",
+    [DglabString_PanelServer] = "服务端",
     [DglabString_SocketPort] = "端口 %u",
     [DglabString_LabelState] = "状态",
     [DglabString_LabelAddress] = "地址",
@@ -284,6 +287,7 @@ static const char* const kChinese[DglabString_Count] = {
     [DglabString_LabelHeartbeats] = "心跳",
     [DglabString_LabelAppReport] = "App 上报",
     [DglabString_LabelLastIssue] = "最近错误",
+    [DglabString_CommandLabel] = "最近指令",
     [DglabString_LabelStrength] = "通道强度",
     [DglabString_StateNotStarted] = "未启动",
     [DglabString_StateWaiting] = "等待 App",

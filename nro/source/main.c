@@ -562,7 +562,7 @@ static void runSocketView(Service* dglab, PadState* pad)
             DglabCanvas canvas;
 
             if (dglabFramebufferBegin(&canvas)) {
-                dglabScreenDraw(&canvas, font, &state);
+                dglabScreenDraw(&canvas, g_text, font, &state);
                 dglabFramebufferEnd();
 
                 snapshot = candidate;
