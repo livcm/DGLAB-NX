@@ -72,15 +72,19 @@ void dglabTextDraw(DglabCanvas* canvas, DglabGlyphSource* source, int x, int y, 
             continue;
         }
 
-        // Ink is stamped on whole pixels: the canvas has no alpha blending, and
-        // half covered pixels would be the one place the UI looked smooth.
+        // Coverage is blended, which is what makes the glyphs antialiased; the
+        // bitmap font's 1-bit glyphs come through as full or no coverage.
         for (int row = 0; row < glyph.height; row++) {
-            const uint8_t* bits = glyph.bitmap + (size_t)row * (size_t)glyph.stride;
+            const uint8_t* bits = glyph.pixels + (size_t)row * (size_t)glyph.stride;
 
             for (int col = 0; col < glyph.width; col++) {
-                if (bits[col >> 3] & (uint8_t)(0x80u >> (col & 7))) {
-                    dglabCanvasFill(canvas, pen + glyph.bearing_x + col,
-                        y + source->ascent - glyph.bearing_y + row, 1, 1, color);
+                uint8_t alpha = glyph.coverage ? bits[col]
+                                               : (uint8_t)((bits[col >> 3] &
+                                                     (uint8_t)(0x80u >> (col & 7))) ? 255u : 0u);
+
+                if (alpha) {
+                    dglabCanvasBlend(canvas, pen + glyph.bearing_x + col,
+                        y + source->ascent - glyph.bearing_y + row, color, alpha);
                 }
             }
         }
@@ -131,7 +135,8 @@ static bool bitmapLookup(DglabGlyphSource* source, uint32_t codepoint, DglabGlyp
     tile_bytes = font->tile_width * font->tile_height / 8;
     row_bytes = font->tile_width / 8;
 
-    out->bitmap = font->glyphs + (size_t)index * (size_t)tile_bytes;
+    out->pixels = font->glyphs + (size_t)index * (size_t)tile_bytes;
+    out->coverage = false;
     out->stride = row_bytes;
     out->width = font->tile_width;
     out->height = font->tile_height;

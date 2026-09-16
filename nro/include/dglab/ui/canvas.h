@@ -37,6 +37,10 @@ typedef struct {
 
 void dglabCanvasInit(DglabCanvas* canvas, uint8_t* pixels, int width, int height, int stride);
 
+// Blends one pixel: alpha 0 keeps what is there, 255 replaces it. This is what
+// glyph coverage needs - everything else in the canvas simply overwrites.
+void dglabCanvasBlend(DglabCanvas* canvas, int x, int y, uint32_t color, uint8_t alpha);
+
 // All drawing clips to the canvas, so a layout mistake cannot corrupt memory.
 void dglabCanvasFill(DglabCanvas* canvas, int x, int y, int width, int height, uint32_t color);
 void dglabCanvasFrame(DglabCanvas* canvas, int x, int y, int width, int height, int thickness,

@@ -21,6 +21,33 @@ static void putPixel(DglabCanvas* canvas, int x, int y, uint32_t color)
     canvas->pixels[offset + 3] = (uint8_t)color;
 }
 
+void dglabCanvasBlend(DglabCanvas* canvas, int x, int y, uint32_t color, uint8_t alpha)
+{
+    uint8_t* pixel;
+    int shift;
+
+    if (!canvas->pixels || x < 0 || y < 0 || x >= canvas->width || y >= canvas->height)
+        return;
+
+    if (alpha == 0)
+        return;
+
+    pixel = (uint8_t*)canvas->pixels + (size_t)y * (size_t)canvas->stride + (size_t)x * 4;
+
+    if (alpha == 255) {
+        putPixel(canvas, x, y, color);
+        return;
+    }
+
+    // Straight (non premultiplied) blend, one channel at a time.
+    for (shift = 24; shift >= 0; shift -= 8) {
+        uint32_t src = (color >> shift) & 0xFFu;
+
+        pixel[(3 - (size_t)(shift / 8))] = (uint8_t)((src * alpha +
+            (uint32_t)pixel[3 - (size_t)(shift / 8)] * (255u - alpha)) / 255u);
+    }
+}
+
 void dglabCanvasFill(DglabCanvas* canvas, int x, int y, int width, int height, uint32_t color)
 {
     if (!canvas->pixels || width <= 0 || height <= 0)

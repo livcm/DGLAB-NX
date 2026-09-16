@@ -4,10 +4,9 @@
 //
 // The screens used to draw one byte per fixed 16x16 tile, which cannot express
 // Chinese at all (a UTF-8 character is three bytes and would come out as three
-// unrelated symbols). Here a glyph source hands out 1-bit glyphs - either from a
-// bitmap font or rasterised on demand from a TTF - and this layer decodes UTF-8,
-// measures and blits them on whole pixels, so the result keeps the hard edged
-// look the UI already has (docs/nro-ui.md).
+// unrelated symbols). Here a glyph source hands out glyphs - coverage from a
+// rasterised TTF, or libnx's 1-bit bitmap font - and this layer decodes UTF-8,
+// measures and blends them, so text can be drawn antialiased (docs/nro-ui.md).
 
 #include <dglab/ui/canvas.h>
 
@@ -16,7 +15,8 @@
 #include <stdint.h>
 
 typedef struct {
-    const uint8_t* bitmap; ///< 1 bit per pixel, row major, MSB is the leftmost
+    const uint8_t* pixels; ///< coverage (8 bit) or one bit per pixel, see below
+    bool coverage;         ///< true: one byte per pixel, 0..255; false: 1 bit, MSB left
     int stride;            ///< bytes per row of the bitmap
     int width;             ///< ink box
     int height;

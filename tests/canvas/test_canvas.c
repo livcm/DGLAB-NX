@@ -357,11 +357,43 @@ static void testAdvancedScreen(void)
     CHECK(changed > 1280 * 720 / 2);
 }
 
+// The blend the antialiased text needs: coverage must mix, not overwrite.
+static void testBlend(void)
+{
+    const uint32_t black = DGLAB_RGBA(0, 0, 0, 0xFF);
+    const uint32_t white = DGLAB_RGBA(0xFF, 0xFF, 0xFF, 0xFF);
+    DglabCanvas canvas;
+
+    memset(g_pixels, 0, sizeof(g_pixels));
+    dglabCanvasInit(&canvas, g_pixels, TEST_WIDTH, TEST_HEIGHT, TEST_WIDTH * 4);
+    dglabCanvasFill(&canvas, 0, 0, 16, 16, black);
+
+    dglabCanvasBlend(&canvas, 4, 4, white, 0);
+    CHECK(pixelAt(4, 4) == black);
+
+    dglabCanvasBlend(&canvas, 4, 4, white, 255);
+    CHECK(pixelAt(4, 4) == white);
+
+    dglabCanvasFill(&canvas, 4, 4, 1, 1, black);
+    dglabCanvasBlend(&canvas, 4, 4, white, 128);
+    {
+        uint32_t mixed = pixelAt(4, 4);
+        unsigned level = (mixed >> 24) & 0xFFu;
+
+        CHECK(level >= 126 && level <= 130);
+    }
+
+    // Out of bounds is ignored, like every other canvas call.
+    dglabCanvasBlend(&canvas, -1, 4, white, 128);
+    dglabCanvasBlend(&canvas, TEST_WIDTH, 4, white, 128);
+}
+
 int main(void)
 {
     testFillAndClip();
     testFrame();
     testText();
+    testBlend();
     testQr();
     testScreen();
     testMenu();
