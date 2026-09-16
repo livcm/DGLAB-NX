@@ -15,7 +15,7 @@ ROOT     := ../..
 NRO      := $(ROOT)/nro
 COMMON   := $(ROOT)/common/include
 # hostshim supplies a stand in for <switch/types.h>, see tests/net/hostshim.
-INCLUDES := -I../net/hostshim -I$(NRO)/include -I$(COMMON)
+INCLUDES := -I../net/hostshim -I$(NRO)/include -I$(COMMON) -I$(ROOT)/third_party
 BUILD    := build
 
 TESTS  := $(wildcard test_*.c)

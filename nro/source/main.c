@@ -17,6 +17,11 @@
 
 #include <dglab/ipc.h>
 #include <dglab/nro/joycon.h>
+#include <dglab/platform/font.h>
+#include <dglab/ui/about.h>
+#include <dglab/ui/language.h>
+#include <dglab/ui/strings.h>
+#include <dglab/ui/text.h>
 #include <dglab/nro/motion_feed.h>
 #include <dglab/nro/motion_settings.h>
 #include <dglab/nro/ble_poc_view.h>
@@ -39,14 +44,70 @@
 #define LOG_FILE_PATH DATA_DIR "/dglab-net.log"
 // The motion parameters, so a tuning session does not start over every reboot.
 #define MOTION_CONFIG_PATH DATA_DIR "/motion.cfg"
+// The app level settings (the UI language).
+#define APP_CONFIG_PATH DATA_DIR "/app.cfg"
 
 typedef enum {
     DglabMenuResult_Exit = 0,
     DglabMenuResult_Socket,
     DglabMenuResult_Motion,
     DglabMenuResult_Advanced,
+    DglabMenuResult_About,
     DglabMenuResult_BlePoc,
 } DglabMenuResult;
+
+// The glyph source every screen draws with: the system shared font at 24px
+// (docs/nro-ui.md), or libnx's bitmap font when that cannot be loaded - which
+// only has ASCII, so Chinese text would show as gaps.
+static DglabGlyphSource* g_text;
+static DglabLanguage g_language_pref = DglabLanguage_Auto;
+static DglabLanguage g_language = DglabLanguage_English;
+
+static void appLanguageSave(void)
+{
+    char text[64];
+    FILE* file;
+
+    dglabLanguageSerialize(g_language_pref, text, sizeof(text));
+
+    file = fopen(APP_CONFIG_PATH, "w");
+
+    if (file == NULL)
+        return;
+
+    fputs(text, file);
+    fclose(file);
+}
+
+static void appLanguageLoad(void)
+{
+    char text[128];
+    size_t size;
+    FILE* file = fopen(APP_CONFIG_PATH, "r");
+
+    g_language_pref = DglabLanguage_Auto;
+
+    if (file == NULL)
+        return;
+
+    size = fread(text, 1, sizeof(text) - 1, file);
+    text[size] = '\0';
+    fclose(file);
+
+    g_language_pref = dglabLanguageParse(text);
+}
+
+// Resolves the preference, tells the string tables, and loads the matching face.
+static void appLanguageApply(void)
+{
+    g_language = dglabLanguageResolve(g_language_pref, dglabFontSystemIsChinese());
+    dglabStringsSetLanguage(g_language);
+
+    g_text = dglabFontOpen(g_language == DglabLanguage_ChineseSimplified, 24.0f);
+
+    if (g_text == NULL)
+        g_text = dglabBitmapGlyphSource(dglabFramebufferFont());
+}
 
 static char g_log_lines[DGLAB_SCREEN_LOG_LINES][DGLAB_SCREEN_LOG_LINE_LEN];
 static const char* g_log_pointers[DGLAB_SCREEN_LOG_LINES];
@@ -521,7 +582,6 @@ static unsigned g_menu_selected = DglabMenu_ItemSocket;
 
 static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
 {
-    const DglabFont* font = dglabFramebufferFont();
     DglabMenuState state;
     unsigned drawn_selected = 0;
     bool drawn_liveness = false;
@@ -551,6 +611,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
             switch (g_menu_selected) {
                 case DglabMenu_ItemMotion: return DglabMenuResult_Motion;
                 case DglabMenu_ItemAdvanced: return DglabMenuResult_Advanced;
+                case DglabMenu_ItemAbout: return DglabMenuResult_About;
                 case DglabMenu_ItemBlePoc: return DglabMenuResult_BlePoc;
                 default: return DglabMenuResult_Socket;
             }
@@ -571,7 +632,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
             continue;
 
         if (dglabFramebufferBegin(&canvas)) {
-            dglabMenuDraw(&canvas, font, &state);
+            dglabMenuDraw(&canvas, g_text, &state);
             dglabFramebufferEnd();
 
             drawn_selected = state.selected;
@@ -802,6 +863,57 @@ static void runMotionView(Service* dglab, PadState* pad)
 // there is nothing to draw anyway, and an empty window tells the user nothing.
 
 // ---------------------------------------------------------------------------
+// The about screen
+// ---------------------------------------------------------------------------
+
+static void runAboutView(Service* dglab, PadState* pad)
+{
+    DglabIpcVersion version = { 0 };
+    DglabAboutState state;
+    bool redraw = true;
+    bool have_drawn = false;
+
+    serviceDispatchOut(dglab, DGLAB_IPC_CMD_GET_VERSION, version);
+
+    while (appletMainLoop()) {
+        DglabCanvas canvas;
+        u64 down;
+
+        padUpdate(pad);
+        down = padGetButtonsDown(pad);
+
+        if (down & HidNpadButton_Plus)
+            return;
+
+        if ((down & HidNpadButton_Left) || (down & HidNpadButton_Right)) {
+            // Left and right both cycle: with three values there is no natural
+            // direction, and the row shows what it became.
+            g_language_pref = dglabLanguageNext(g_language_pref);
+            appLanguageSave();
+            appLanguageApply();
+            redraw = true;
+        }
+
+        if (!redraw && have_drawn)
+            continue;
+
+        memset(&state, 0, sizeof(state));
+        state.preference = g_language_pref;
+        state.resolved = g_language;
+        state.version = version;
+        state.github_url = "https://github.com/livcm/DGLAB-NX";
+
+        if (dglabFramebufferBegin(&canvas)) {
+            dglabAboutDraw(&canvas, g_text, &state);
+            dglabFramebufferEnd();
+
+            redraw = false;
+            have_drawn = true;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The advanced screen
 // ---------------------------------------------------------------------------
 
@@ -972,6 +1084,9 @@ int main(int argc, char* argv[])
 
     logFileOpen();
 
+    appLanguageLoad();
+    appLanguageApply();
+
     while (true) {
         DglabMenuResult selection = runMenuView(&dglab, &pad);
 
@@ -993,9 +1108,15 @@ int main(int argc, char* argv[])
             continue;
         }
 
+        if (selection == DglabMenuResult_About) {
+            runAboutView(&dglab, &pad);
+            continue;
+        }
+
         // The BLE PoC view takes the console and the screen over, so the
         // framebuffer is released while it runs and created again afterwards.
-        dglabFramebufferClose();
+        dglabFontClose();
+    dglabFramebufferClose();
         dglabBlePocViewRun();
 
         if (!dglabFramebufferOpen())

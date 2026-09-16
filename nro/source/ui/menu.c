@@ -1,5 +1,6 @@
 #include <dglab/ui/menu.h>
 
+#include <dglab/ui/strings.h>
 #include <dglab/ui/theme.h>
 #include <stdio.h>
 #include <string.h>
@@ -32,37 +33,38 @@
 // Same palette as screen.c. The two screens are drawn independently, so they
 // each carry their own copy rather than sharing a theme header.
 
+// Names and descriptions live in the string tables (nro/source/ui/strings.c), so
+// this only maps a menu entry to its keys.
+static const DglabString kItemKeys[DglabMenu_ItemCount] = {
+    [DglabMenu_ItemSocket] = DglabString_ItemSocket,
+    [DglabMenu_ItemMotion] = DglabString_ItemMotion,
+    [DglabMenu_ItemAdvanced] = DglabString_ItemAdvanced,
+    [DglabMenu_ItemAbout] = DglabString_ItemAbout,
+    [DglabMenu_ItemBlePoc] = DglabString_ItemBlePoc,
+};
+
+static const DglabString kDescKeys[DglabMenu_ItemCount] = {
+    [DglabMenu_ItemSocket] = DglabString_DescSocket,
+    [DglabMenu_ItemMotion] = DglabString_DescMotion,
+    [DglabMenu_ItemAdvanced] = DglabString_DescAdvanced,
+    [DglabMenu_ItemAbout] = DglabString_DescAbout,
+    [DglabMenu_ItemBlePoc] = DglabString_DescBlePoc,
+};
+
 const char* dglabMenuItemName(unsigned item)
 {
-    switch (item) {
-        case DglabMenu_ItemSocket: return "Socket test";
-        case DglabMenu_ItemMotion: return "Motion (Joy-Con)";
-        case DglabMenu_ItemAdvanced: return "Advanced (motion)";
-        case DglabMenu_ItemBlePoc: return "BLE PoC console";
-        default: return "?";
-    }
+    if (item >= (unsigned)DglabMenu_ItemCount)
+        return "?";
+
+    return dglabString(kItemKeys[item]);
 }
 
 const char* dglabMenuItemDescription(unsigned item)
 {
-    switch (item) {
-        case DglabMenu_ItemSocket:
-            return "Start the socket server, show the QR code the DG-LAB app scans, and test both "
-                   "channels by hand. The server stops itself 55 s after the last app leaves.";
-        case DglabMenu_ItemMotion:
-            return "Drive the waveform with the Joy-Cons: the more one moves, the stronger and "
-                   "denser its channel gets. Left Joy-Con is channel A, right is B. Start the "
-                   "socket server in Socket test first.";
-        case DglabMenu_ItemAdvanced:
-            return "Every motion parameter on one page - dead zone, sensitivity, envelope, "
-                   "frequency and the waveform strength - edited one step at a time and saved "
-                   "to the SD card, so a tuning session survives a restart.";
-        case DglabMenu_ItemBlePoc:
-            return "Console view from the abandoned host side BLE experiments. Kept because it is "
-                   "the rendering path that is known to work on real hardware.";
-        default:
-            return "";
-    }
+    if (item >= (unsigned)DglabMenu_ItemCount)
+        return "";
+
+    return dglabString(kDescKeys[item]);
 }
 
 unsigned dglabMenuMove(unsigned selected, int delta)
@@ -81,11 +83,11 @@ unsigned dglabMenuMove(unsigned selected, int delta)
 
 // Wraps at spaces when there is one (the descriptions have them), the same way
 // the socket screen's log panel wraps its URLs.
-static void drawWrapped(DglabCanvas* canvas, const DglabFont* font, int x, int y, int columns,
-    const char* text, uint32_t color)
+static void drawWrapped(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, int columns,
+    const char* value, uint32_t color)
 {
     char line[128];
-    size_t length = strlen(text);
+    size_t length = strlen(value);
     size_t offset = 0;
 
     if (columns <= 0 || columns >= (int)sizeof(line))
@@ -97,10 +99,10 @@ static void drawWrapped(DglabCanvas* canvas, const DglabFont* font, int x, int y
         if (take > (size_t)columns) {
             take = (size_t)columns;
 
-            if (offset + take < length && text[offset + take] != ' ') {
+            if (offset + take < length && value[offset + take] != ' ') {
                 size_t back = take;
 
-                while (back > 0 && text[offset + back] != ' ')
+                while (back > 0 && value[offset + back] != ' ')
                     back--;
 
                 if (back > (size_t)columns / 3)
@@ -108,25 +110,29 @@ static void drawWrapped(DglabCanvas* canvas, const DglabFont* font, int x, int y
             }
         }
 
-        memcpy(line, text + offset, take);
+        memcpy(line, value + offset, take);
         line[take] = '\0';
 
-        dglabCanvasText(canvas, font, x, y, 1, line, color);
+        dglabTextDraw(canvas, text, x, y, line, color);
 
-        y += 20;
+        y += text->line_height;
         offset += take;
 
-        while (offset < length && text[offset] == ' ')
+        while (offset < length && value[offset] == ' ')
             offset++;
     }
 }
 
-void dglabMenuDraw(DglabCanvas* canvas, const DglabFont* font, const DglabMenuState* state)
+void dglabMenuDraw(DglabCanvas* canvas, DglabGlyphSource* text, const DglabMenuState* state)
 {
     unsigned selected = state ? state->selected : 0;
     int panel_width = SCREEN_WIDTH - MARGIN * 2;
+    // Rows and the description follow the font, so the same code works for the
+    // 16px bitmap font and the 24px system font (docs/nro-ui.md).
+    int row_height = text->line_height + 8;
     int row_y = PANEL_TOP + 24;
-    char right[48];
+    int panel_height = 24 + (int)DglabMenu_ItemCount * row_height + 32 + 4 * text->line_height;
+    char right[64];
 
     dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, kBackground);
 
@@ -134,36 +140,42 @@ void dglabMenuDraw(DglabCanvas* canvas, const DglabFont* font, const DglabMenuSt
     // depends on it, and finding out only after entering one wastes a trip
     // through the menu.
     dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, TITLE_HEIGHT, kPanel);
-    dglabCanvasText(canvas, font, MARGIN, 20, 1, "DGLAB-NX   modes", kText);
+    dglabTextDraw(canvas, text, MARGIN, (TITLE_HEIGHT - text->cell_height) / 2,
+        dglabString(DglabString_MenuTitle), kText);
 
     snprintf(right, sizeof(right), "%s",
-        (state && state->sysmodule_ok) ? "sysmodule ok" : "sysmodule not answering");
-    dglabCanvasText(canvas, font, SCREEN_WIDTH - MARGIN - dglabCanvasTextWidth(font, 1, right), 20,
-        1, right, (state && state->sysmodule_ok) ? kAccent : kError);
+        (state && state->sysmodule_ok) ? dglabString(DglabString_SysmoduleOk)
+                                       : dglabString(DglabString_SysmoduleDown));
+    dglabTextDraw(canvas, text, SCREEN_WIDTH - MARGIN - dglabTextWidth(text, right),
+        (TITLE_HEIGHT - text->cell_height) / 2, right,
+        (state && state->sysmodule_ok) ? kAccent : kError);
 
-    dglabCanvasFill(canvas, MARGIN, PANEL_TOP, panel_width, PANEL_HEIGHT, kPanel);
-    dglabCanvasFrame(canvas, MARGIN, PANEL_TOP, panel_width, PANEL_HEIGHT, 2, kPanelBorder);
+    dglabCanvasFill(canvas, MARGIN, PANEL_TOP, panel_width, panel_height, kPanel);
+    dglabCanvasFrame(canvas, MARGIN, PANEL_TOP, panel_width, panel_height, 2, kPanelBorder);
 
     for (unsigned item = 0; item < (unsigned)DglabMenu_ItemCount; item++) {
-        int y = row_y + (int)item * ROW_HEIGHT;
+        int y = row_y + (int)item * row_height;
         bool is_selected = (item == selected);
 
         if (is_selected) {
-            dglabCanvasFill(canvas, MARGIN + 8, y - 8, panel_width - 16, ROW_HEIGHT - 4,
-                kSelected);
-            dglabCanvasText(canvas, font, MARGIN + 20, y, 1, ">", kAccent);
+            dglabCanvasFill(canvas, MARGIN + 8, y - 6, panel_width - 16, row_height - 2, kSelected);
+            dglabTextDraw(canvas, text, MARGIN + 20, y + 4, ">", kAccent);
         }
 
-        dglabCanvasText(canvas, font, MARGIN + 48, y, 1, dglabMenuItemName(item),
+        dglabTextDraw(canvas, text, MARGIN + 56, y + 4, dglabMenuItemName(item),
             is_selected ? kText : kMuted);
     }
 
     // What the highlighted mode actually does.
-    drawWrapped(canvas, font, MARGIN + 20, row_y + (int)DglabMenu_ItemCount * ROW_HEIGHT + 40,
-        (panel_width - 40) / 16, dglabMenuItemDescription(selected), kMuted);
+    drawWrapped(canvas, text, MARGIN + 24,
+        row_y + (int)DglabMenu_ItemCount * row_height + 28, (panel_width - 48) / 14,
+        dglabMenuItemDescription(selected), kMuted);
 
-    dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 56, 1,
-        "D-pad up/down select", kText);
-    dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 32, 1,
-        "A start mode    + exit", kText);
+    // Two footer lines placed from the bottom, using the font's own line height:
+    // the fixed 56/24 offsets were sized for the 16px bitmap font and clip the
+    // 24px system font.
+    dglabTextDraw(canvas, text, MARGIN, SCREEN_HEIGHT - text->line_height * 2 - 16,
+        dglabString(DglabString_MenuSelect), kText);
+    dglabTextDraw(canvas, text, MARGIN, SCREEN_HEIGHT - text->line_height - 16,
+        dglabString(DglabString_MenuStart), kText);
 }

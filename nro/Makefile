@@ -41,7 +41,7 @@ TARGET		:=	DGLAB-NX
 BUILD		:=	build
 SOURCES		:=	source source/ui source/platform source/motion
 DATA		:=	data
-INCLUDES	:=	include ../common/include
+INCLUDES	:=	include ../common/include ../third_party
 #ROMFS	:=	romfs
 
 # Release layout (see AGENTS.md): the NRO is copied next to the sysmodule

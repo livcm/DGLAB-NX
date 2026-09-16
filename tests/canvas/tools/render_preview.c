@@ -29,6 +29,10 @@
 #include <dglab/ui/menu.h>
 #include <dglab/ui/motion.h>
 #include <dglab/nro/motion_settings.h>
+#include <dglab/ui/about.h>
+#include <dglab/ui/text_ttf.h>
+#include <dglab/ui/language.h>
+#include <dglab/ui/strings.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +43,7 @@
 
 static uint8_t g_font_data[8192];
 static uint8_t g_pixels[WIDTH * HEIGHT * 4];
+static DglabGlyphSource* g_text;
 
 static void writeBmp(const char* path)
 {
@@ -190,14 +195,53 @@ int main(int argc, char** argv)
 
     dglabCanvasInit(&canvas, g_pixels, WIDTH, HEIGHT, WIDTH * 4);
 
-    if (argc >= 4 && strcmp(argv[3], "menu") == 0) {
+    // PREVIEW_TTF=/path/to/font.ttf renders the localised screens with the real
+    // glyph source; without it the bitmap font is used, which is ASCII only.
+    {
+        const char* ttf = getenv("PREVIEW_TTF");
+        DglabGlyphSource* source = NULL;
+
+        if (ttf) {
+            FILE* font_file = fopen(ttf, "rb");
+
+            if (font_file) {
+                static uint8_t font_data[32 * 1024 * 1024];
+                size_t size = fread(font_data, 1, sizeof(font_data), font_file);
+                fclose(font_file);
+
+                if (dglabTtfFontInit(font_data, size, 24.0f)) {
+                    source = dglabTtfFontSource();
+                    dglabStringsSetLanguage(DglabLanguage_ChineseSimplified);
+                } else {
+                    fprintf(stderr, "not a usable font: %s\n", ttf);
+                }
+            }
+        }
+
+        if (!source)
+            source = dglabBitmapGlyphSource(&font);
+
+        g_text = source;
+    }
+
+    if (argc >= 4 && strcmp(argv[3], "about") == 0) {
+        DglabAboutState about;
+
+        memset(&about, 0, sizeof(about));
+        about.preference = DglabLanguage_Auto;
+        about.resolved = DglabLanguage_ChineseSimplified;
+        about.version = state.version;
+        about.github_url = "https://github.com/livcm/DGLAB-NX";
+
+        dglabAboutDraw(&canvas, g_text, &about);
+    } else if (argc >= 4 && strcmp(argv[3], "menu") == 0) {
         DglabMenuState menu;
 
         memset(&menu, 0, sizeof(menu));
         menu.selected = DglabMenu_ItemMotion;
         menu.sysmodule_ok = true;
 
-        dglabMenuDraw(&canvas, &font, &menu);
+        dglabMenuDraw(&canvas, g_text, &menu);
     } else if (argc >= 4 && strcmp(argv[3], "motion") == 0) {
         DglabMotionScreenState motion;
 

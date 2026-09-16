@@ -257,6 +257,7 @@ static void testMenu(void)
 {
     static uint8_t screen_pixels[1280 * 720 * 4];
     const uint32_t blue = DGLAB_RGBA(0, 0, 0xFF, 0xFF);
+    DglabGlyphSource* source = dglabBitmapGlyphSource(&kFont);
     DglabMenuState menu;
     DglabCanvas canvas;
 
@@ -277,7 +278,7 @@ static void testMenu(void)
 
         dglabCanvasInit(&canvas, screen_pixels, 1280, 720, 1280 * 4);
         dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
-        dglabMenuDraw(&canvas, &kFont, &menu);
+        dglabMenuDraw(&canvas, source, &menu);
 
         changed = countChangedPixels(screen_pixels, sizeof(screen_pixels), blue);
         CHECK(changed > 1280 * 720 / 2);
