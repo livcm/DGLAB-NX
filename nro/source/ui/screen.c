@@ -163,15 +163,19 @@ static void drawTitle(DglabCanvas* canvas, DglabGlyphSource* text,
         (TITLE_HEIGHT - text->cell_height) / 2, right, kMuted);
 }
 
-// Label column: wide enough for the longest label in either language, narrow
-// enough to leave room for the values.
+// Label column: a floor, not a rule. The label is measured as well, because the
+// console's font is wider than the one the layout was drawn against - "channel
+// strength" used to run straight into its value.
 #define LABEL_COLUMN 200
 
 static void drawStatusLine(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, const char* label,
     const char* value, uint32_t color)
 {
+    int measured = dglabTextWidth(text, label) + 24;
+
     dglabTextDraw(canvas, text, x, y, label, kMuted);
-    dglabTextDraw(canvas, text, x + LABEL_COLUMN, y, value, color);
+    dglabTextDraw(canvas, text, x + (measured > LABEL_COLUMN ? measured : LABEL_COLUMN), y, value,
+        color);
 }
 
 static void drawStatus(DglabCanvas* canvas, DglabGlyphSource* text,

@@ -22,45 +22,26 @@
 
 // Draws the wrapped text and advances *y past it, so the caller does not have to
 // guess how many lines the wrap produced (it did guess, and overlapped).
-static void drawWrapped(DglabCanvas* canvas, DglabGlyphSource* text, int x, int* y, int columns,
+static void drawWrapped(DglabCanvas* canvas, DglabGlyphSource* text, int x, int* y, int width,
     const char* value, uint32_t color)
 {
     char line[192];
-    size_t length = strlen(value);
-    size_t offset = 0;
 
-    if (columns <= 0 || columns >= (int)sizeof(line))
-        return;
+    while (*value) {
+        size_t taken = dglabTextWrapLine(text, value, width, line, sizeof(line));
 
-    while (offset < length) {
-        size_t take = length - offset;
-
-        if (take > (size_t)columns) {
-            take = (size_t)columns;
-
-            if (offset + take < length && value[offset + take] != ' ') {
-                size_t back = take;
-
-                while (back > 0 && value[offset + back] != ' ')
-                    back--;
-
-                if (back > (size_t)columns / 3)
-                    take = back;
-            }
-        }
-
-        memcpy(line, value + offset, take);
-        line[take] = '\0';
+        if (taken == 0)
+            break;
 
         dglabTextDraw(canvas, text, x, *y, line, color);
-
         *y += text->line_height;
-        offset += take;
+        value += taken;
 
-        while (offset < length && value[offset] == ' ')
-            offset++;
+        while (*value == ' ')
+            value++;
     }
 }
+
 
 static const char* languageValue(const DglabAboutState* state, char* buffer, size_t size)
 {
@@ -92,7 +73,7 @@ void dglabAboutDraw(DglabCanvas* canvas, DglabGlyphSource* text, const DglabAbou
     int line = text->line_height;
     int x = MARGIN + 24;
     int y = TITLE_HEIGHT + GAP + 32;
-    int panel_height = line * 8 + 40;
+    int panel_height = line * 10 + 40;
     char buffer[96];
 
     dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, kBackground);
@@ -103,10 +84,10 @@ void dglabAboutDraw(DglabCanvas* canvas, DglabGlyphSource* text, const DglabAbou
     dglabCanvasFrame(canvas, MARGIN, TITLE_HEIGHT + GAP, PANEL_WIDTH, panel_height, 2,
         kPanelBorder);
 
-    drawWrapped(canvas, text, x, &y, (PANEL_WIDTH - 48) / 13, dglabString(DglabString_AboutLine1),
+    drawWrapped(canvas, text, x, &y, PANEL_WIDTH - 48, dglabString(DglabString_AboutLine1),
         kText);
     y += line / 2;
-    drawWrapped(canvas, text, x, &y, (PANEL_WIDTH - 48) / 13, dglabString(DglabString_AboutLine2),
+    drawWrapped(canvas, text, x, &y, PANEL_WIDTH - 48, dglabString(DglabString_AboutLine2),
         kMuted);
     y += line;
 
