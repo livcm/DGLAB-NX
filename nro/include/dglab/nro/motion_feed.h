@@ -138,12 +138,17 @@ typedef struct {
 /// one poll, not twenty, so a hitch cannot look like a disconnect.
 #define DGLAB_MOTION_SENSOR_QUIET_POLLS 20u
 
-/// The side's connection state after a poll. Samples are the strongest evidence
-/// - a reading only reaches the feed when it said it was connected, so "output
-/// works but the screen says not connected" cannot happen. `quiet_polls` is how
-/// many polls in a row produced no readings at all: while that is below
-/// DGLAB_MOTION_SENSOR_QUIET_POLLS an empty poll keeps `previous` (the first
-/// frames after the mode starts have nothing to show yet), and past it the side
-/// counts as disconnected.
+/// The side's connection state after a poll.
+///
+/// Readings are the only proof: a reading reaches the feed only when it said it
+/// was connected, and a connected sensor fills the system's LIFO every frame. So
+/// "output works but the screen says not connected" cannot happen, and - the
+/// case that mattered on hardware - neither can a side that says "connected"
+/// while handing over nothing: the state follows what actually arrived.
+///
+/// `quiet_polls` is how many polls in a row produced no readings at all. Below
+/// DGLAB_MOTION_SENSOR_QUIET_POLLS it keeps `previous` (the first frames after
+/// the mode starts have nothing to show yet); past it the side counts as
+/// disconnected.
 bool dglabMotionSensorConnected(bool previous, const DglabMotionSensorPoll* poll,
     unsigned quiet_polls);

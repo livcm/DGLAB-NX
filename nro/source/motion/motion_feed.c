@@ -235,20 +235,13 @@ bool dglabMotionSensorConnected(bool previous, const DglabMotionSensorPoll* poll
     if (poll->samples > 0)
         return true;
 
-    if (poll->connected)
-        return true;
-
-    // A handle answered and none of it was connected: the controller is gone or
-    // asleep. That is the only case that may turn the row to "not connected".
-    if (poll->answered)
-        return false;
-
-    // Nothing answered at all. That used to mean "keep the last state", which
-    // was wrong in the one case that matters: a Joy-Con that is turned off or
-    // plugged back into the console simply stops delivering readings, so the row
-    // stayed on "connected" forever (hardware report, 2026-09-17). A live sensor
-    // fills the LIFO every frame, so a run of empty polls is a controller that
-    // went away.
+    // Nothing else counts. A handle that says IsConnected but hands over no
+    // readings, a batch of nothing but placeholders, and a handle that says
+    // nothing at all are all the same thing for the row: no readings, so nothing
+    // is driving the channel. The "connected" bit alone used to be enough, and
+    // that is what kept a side on 挥动中 for the rest of the session once it had
+    // been there (hardware report, 2026-09-17) - a live sensor fills the LIFO
+    // every frame, so silence is a controller that went away.
     if (quiet_polls >= DGLAB_MOTION_SENSOR_QUIET_POLLS)
         return false;
 

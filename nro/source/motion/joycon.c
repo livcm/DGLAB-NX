@@ -34,6 +34,10 @@
 // connection state (see docs/joycon-input.md).
 typedef struct {
     HidSixAxisSensorHandle handles[HANDLES_MAX];
+    // The Npad style each handle belongs to: the pair handle is the one the mode
+    // is built on, the single style handle is only a fallback, and whether that
+    // fallback may be used depends on the style the console says is active.
+    u32 handle_style[HANDLES_MAX];
     size_t handle_count;
     bool started;
     bool connected;
@@ -49,6 +53,7 @@ typedef struct {
     // out loud: "no readings" and "not asked" are different answers.
     struct {
         bool polled;
+        bool style_off; ///< the console does not have this handle's style active
         size_t states;
         size_t samples;
         bool connected;
@@ -57,10 +62,23 @@ typedef struct {
 
 static JoyconState g_joycon[2];
 
-static void addHandle(JoyconState* state, HidSixAxisSensorHandle handle)
+// The styles the console reports for player 1 right now, refreshed a few times a
+// second: attaching a Joy-Con or re-syncing one changes them, and that decides
+// whether the single style fallback handle may be used at all. Zero means "this
+// console is not telling us" (nothing is connected, or the service has no
+// answer), and the poll then falls back to trying every handle, as before.
+static u32 g_active_styles;
+static unsigned g_styles_age;
+
+// How many polls a style reading is used for (about a quarter of a second).
+#define STYLES_REFRESH_POLLS 15u
+
+static void addHandle(JoyconState* state, HidSixAxisSensorHandle handle, u32 style)
 {
-    if (state->handle_count < sizeof(state->handles) / sizeof(state->handles[0]))
+    if (state->handle_count < sizeof(state->handles) / sizeof(state->handles[0])) {
+        state->handle_style[state->handle_count] = style;
         state->handles[state->handle_count++] = handle;
+    }
 }
 
 // Stops whatever this side has running and forgets the handles. The connection
@@ -93,10 +111,10 @@ static bool acquireSide(JoyconState* state, DglabJoyconSide side)
     // nothing here is fatal.
     if (R_SUCCEEDED(hidGetSixAxisSensorHandles(pair, 2, HidNpadIdType_No1,
             HidNpadStyleTag_NpadJoyDual)))
-        addHandle(state, pair[side == DglabJoycon_Left ? 0 : 1]);
+        addHandle(state, pair[side == DglabJoycon_Left ? 0 : 1], HidNpadStyleTag_NpadJoyDual);
 
     if (R_SUCCEEDED(hidGetSixAxisSensorHandles(&single, 1, HidNpadIdType_No1, single_style)))
-        addHandle(state, single);
+        addHandle(state, single, single_style);
 
     for (size_t i = 0; i < state->handle_count; i++) {
         if (R_SUCCEEDED(hidStartSixAxisSensor(state->handles[i]))) {
@@ -211,6 +229,11 @@ size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max)
     state = &g_joycon[side];
     memset(&totals, 0, sizeof(totals));
 
+    if (g_styles_age == 0)
+        g_active_styles = hidGetNpadStyleSet(HidNpadIdType_No1);
+
+    g_styles_age = (g_styles_age + 1u) % STYLES_REFRESH_POLLS;
+
     for (size_t i = 0; i < state->handle_count; i++)
         memset(&state->last[i], 0, sizeof(state->last[i]));
 
@@ -218,6 +241,17 @@ size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max)
         size_t states = 0;
         size_t samples = 0;
         bool connected = false;
+
+        // The fallback handle belongs to a single style, and a Joy-Con that was
+        // plugged back into the console switches the system to handheld: the
+        // pair handle goes quiet (placeholders), and without this the single
+        // handle left the side looking alive - which is why a side that had once
+        // been 挥动中 never went back to 未连接. The pair handle is always polled:
+        // its readings are the proof of life, gate or no gate.
+        if (i > 0 && g_active_styles != 0 && !(g_active_styles & state->handle_style[i])) {
+            state->last[i].style_off = true;
+            continue;
+        }
 
         pollHandle(state->handles[i], out, max, &totals, &states, &samples, &connected);
 
@@ -283,7 +317,9 @@ size_t dglabJoyconDescribe(DglabJoyconSide side, char* out, size_t size)
     used = (size_t)written;
 
     for (size_t i = 0; i < state->handle_count; i++) {
-        if (!state->last[i].polled)
+        if (state->last[i].style_off)
+            written = snprintf(out + used, size - used, ", #%u style off", (unsigned)i);
+        else if (!state->last[i].polled)
             written = snprintf(out + used, size - used, ", #%u not polled", (unsigned)i);
         else
             written = snprintf(out + used, size - used,
@@ -319,7 +355,10 @@ size_t dglabJoyconStyleText(char* out, size_t size)
     if (!out || size == 0)
         return 0;
 
-    styles = hidGetNpadStyleSet(HidNpadIdType_No1);
+    // Refresh it here as well: the line is written just after a poll, and it has
+    // to describe the same style set the poll gated the fallback handle with.
+    g_active_styles = hidGetNpadStyleSet(HidNpadIdType_No1);
+    styles = g_active_styles;
 
     written = snprintf(out, size, "0x%08X", (unsigned)styles);
 

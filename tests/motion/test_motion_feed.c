@@ -255,25 +255,29 @@ static void testFrequencyGetterMatchesTheSlots(void)
 
 // The rule behind the motion page's two Joy-Con rows (docs/joycon-input.md).
 // Readings only reach the feed when they reported being connected, so a sample
-// is proof that the side is alive - and the row cannot say "not connected" while
-// the waveform the user feels is coming from that side.
+// is proof that the side is alive; and since a live sensor fills the LIFO every
+// frame, no readings for a while is proof that it is gone. Nothing else is
+// evidence - which is the point: a handle that claims to be connected while
+// handing over nothing used to keep the row on 挥动中 forever.
 static void testSensorSideConnection(void)
 {
     DglabMotionSensorPoll poll;
 
     memset(&poll, 0, sizeof(poll));
 
-    // Samples arrived even though the *other* handle for the same side called
-    // itself disconnected: the placeholder must not undo the readings.
+    // Samples arrived, even though the other handle's placeholders are counted
+    // in the same poll: readings win.
     poll.answered = true;
     poll.connected = false;
     poll.samples = 5;
     CHECK(dglabMotionSensorConnected(false, &poll, 0));
 
-    // The case that used to decide the whole side: a handle answered, nothing in
-    // it was connected, and it produced no readings.
+    // A handle answered with placeholders. That is not proof on its own: a
+    // placeholder can turn up in the middle of a working session, so the row
+    // waits for the quiet threshold instead of flipping on one poll.
     poll.samples = 0;
-    CHECK(!dglabMotionSensorConnected(true, &poll, 0));
+    CHECK(dglabMotionSensorConnected(true, &poll, 0));
+    CHECK(!dglabMotionSensorConnected(true, &poll, DGLAB_MOTION_SENSOR_QUIET_POLLS));
 
     // Nothing answered at all, and not for long: the first frames after the mode
     // starts have nothing to show yet, so the row keeps what it had instead of
@@ -297,12 +301,14 @@ static void testSensorSideConnection(void)
     poll.samples = 1;
     CHECK(dglabMotionSensorConnected(false, &poll, 0));
 
-    // Connected, but everything it produced was interpolated (no samples): still
-    // connected.
+    // The "connected" bit alone is not enough either (a handle that says it is
+    // connected while everything it hands over is interpolated, or nothing at
+    // all): no readings means the row is not going to stay on 挥动中.
     poll.answered = true;
     poll.connected = true;
     poll.samples = 0;
-    CHECK(dglabMotionSensorConnected(false, &poll, 0));
+    CHECK(dglabMotionSensorConnected(true, &poll, DGLAB_MOTION_SENSOR_QUIET_POLLS - 1));
+    CHECK(!dglabMotionSensorConnected(true, &poll, DGLAB_MOTION_SENSOR_QUIET_POLLS));
 
     // And no poll at all is not evidence either.
     CHECK(dglabMotionSensorConnected(true, NULL, 999));
