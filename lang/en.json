@@ -19,6 +19,7 @@
     "action_adjust": "adjust",
     "action_language": "switch language",
     "action_reset": "restore the defaults",
+    "action_rescan": "rescan controllers",
     "menu_title": "DGLAB-NX",
     "sysmodule_ok": "sysmodule ok",
     "sysmodule_down": "sysmodule not answering",

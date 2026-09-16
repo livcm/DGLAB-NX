@@ -982,6 +982,15 @@ static void runMotionView(Service* dglab, PadState* pad)
         if (down & HidNpadButton_A)
             toggleServer(dglab);
 
+        // Y takes a fresh set of sensor handles. The mode's handles describe the
+        // assignment the console had when they were taken, so a Joy-Con that was
+        // turned off or plugged back in keeps its row on "not connected" until
+        // they are taken again - this is that, without leaving the page.
+        if (down & HidNpadButton_Y) {
+            dglabJoyconRescan();
+            logPushLine("motion rescan (Y)");
+        }
+
         testChannelButtons(dglab, down);
         adjustStrengthFromDirections(dglab, down);
         repeatStrengthFromDirections(dglab, padGetButtons(pad),
@@ -1003,16 +1012,14 @@ static void runMotionView(Service* dglab, PadState* pad)
         // this is what makes "the row says not connected while the waveform
         // plays" answerable from a log instead of a guess.
         if (!described) {
-            char styles[64];
             char left[160];
             char right[160];
-            char line[448];
+            char line[384];
 
             described = true;
-            dglabJoyconStyleText(styles, sizeof(styles));
             dglabJoyconDescribe(DglabJoycon_Left, left, sizeof(left));
             dglabJoyconDescribe(DglabJoycon_Right, right, sizeof(right));
-            snprintf(line, sizeof(line), "motion styles %s | %s | %s", styles, left, right);
+            snprintf(line, sizeof(line), "motion %s | %s", left, right);
             logPushLine(line);
         }
 

@@ -19,6 +19,7 @@
     "action_adjust": "调整",
     "action_language": "切换语言",
     "action_reset": "恢复默认",
+    "action_rescan": "重新扫描手柄",
     "menu_title": "DGLAB-NX",
     "sysmodule_ok": "sysmodule 正常",
     "sysmodule_down": "sysmodule 无响应",

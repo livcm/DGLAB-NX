@@ -28,6 +28,7 @@ typedef enum {
     DglabString_ActionAdjust,
     DglabString_ActionLanguage,
     DglabString_ActionReset,
+    DglabString_ActionRescan, ///< take the Joy-Con sensor handles again
     // the two adjustment hints the pages put inside their own content
     DglabString_HintAdjustA,
     DglabString_HintAdjustB,

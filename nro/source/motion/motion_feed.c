@@ -155,6 +155,7 @@ size_t dglabMotionFeedAdvance(DglabMotionFeed* feed, uint32_t elapsed_ns,
         // swing inside 25ms has to be felt, not diluted by the quiet samples
         // around it.
         float target = feed->moving ? feed->window_peak : 0.0f;
+        bool saw_peak = feed->window_peak > 0.0f;
         float level;
         float frequency;
 
@@ -170,13 +171,21 @@ size_t dglabMotionFeedAdvance(DglabMotionFeed* feed, uint32_t elapsed_ns,
         feed->window_peak = 0.0f;
 
         level = clamp01(feed->level);
-
         slots[written].strength = (u8)(level * (float)feed->config.strength_max + 0.5f);
         frequency = (float)feed->config.frequency_still_ms +
                     ((float)feed->config.frequency_fast_ms - (float)feed->config.frequency_still_ms) * level;
         slots[written].frequency_ms = (u16)(frequency + 0.5f);
         slots[written].pad = 0;
         written++;
+
+        // A hand that stops being sampled at all - the controller was turned off,
+        // or plugged back into the console - used to leave `moving` set, so the
+        // row kept saying 挥动中 with a waveform value of 0 and the still
+        // frequency until the mode was left. Once the release has finished (the
+        // quantised strength is zero, the same measure the streaming rule uses)
+        // and nothing came in during the window, the movement is over.
+        if (!saw_peak && slots[written - 1].strength == 0)
+            feed->moving = false;
 
         // Once the hand has been still past idle_stop_ms *and* the release has
         // decayed all the way down to a zero strength, there is nothing left to

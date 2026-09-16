@@ -56,7 +56,7 @@ void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     DglabListFonts list_fonts = { fonts->body, fonts->value, fonts->note };
     DglabRow rows[5];
     DglabRowBox boxes[5];
-    DglabHint hints[4];
+    DglabHint hints[5];
     DglabHint adjust[2] = {
         { DglabButton_Up, DglabButton_Down, dglabString(DglabString_HintAdjustA) },
         { DglabButton_Left, DglabButton_Right, dglabString(DglabString_HintAdjustB) },
@@ -139,10 +139,16 @@ void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
         dglabString(DglabString_ActionTestChannels), };
     hints[1] = (DglabHint){ DglabButton_X, DglabButton_None,
         dglabString(DglabString_ActionClear), };
-    hints[2] = (DglabHint){ DglabButton_B, DglabButton_None,
+    // Rescanning is what brings a side back after its Joy-Con was turned off or
+    // plugged back in: the mode's handles describe the assignment the console had
+    // when it took them, and this is how one gets taken again without leaving the
+    // page (docs/joycon-input.md).
+    hints[2] = (DglabHint){ DglabButton_Y, DglabButton_None,
+        dglabString(DglabString_ActionRescan), };
+    hints[3] = (DglabHint){ DglabButton_B, DglabButton_None,
         dglabString(DglabString_ActionBack), };
-    hints[3] = (DglabHint){ DglabButton_A, DglabButton_None,
+    hints[4] = (DglabHint){ DglabButton_A, DglabButton_None,
         state->server_running ? dglabString(DglabString_ActionStop)
                               : dglabString(DglabString_ActionStart), };
-    dglabPageHints(canvas, fonts->icon, fonts->body, hints, 4);
+    dglabPageHints(canvas, fonts->icon, fonts->body, hints, 5);
 }

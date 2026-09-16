@@ -69,6 +69,34 @@ static size_t stepOne(DglabMotionSample sample, DglabNetWaveformSlot* out)
     return dglabMotionFeedAdvance(&g_feed, SLOT_NS, out, 1);
 }
 
+// A controller that stops being sampled altogether - turned off, or plugged back
+// into the console - must not leave the row saying 挥动中 with a waveform value of
+// 0: with no readings coming in, the envelope releases and the movement is over
+// (hardware report, 2026-09-17: the rows showed 挥动中 / 0 / 100ms and stayed
+// there).
+static void testSilenceEndsTheMovement(void)
+{
+    DglabNetWaveformSlot slot;
+
+    resetFeed();
+
+    for (int i = 0; i < 8; i++)
+        CHECK(stepOne(swingSample(), &slot) == 1);
+
+    CHECK(dglabMotionFeedIsMoving(&g_feed));
+
+    // Time passes and nothing at all arrives.
+    for (int i = 0; i < 80 && dglabMotionFeedIsMoving(&g_feed); i++)
+        (void)dglabMotionFeedAdvance(&g_feed, SLOT_NS, &slot, 1);
+
+    CHECK(!dglabMotionFeedIsMoving(&g_feed));
+    CHECK(!dglabMotionFeedIsStreaming(&g_feed));
+    CHECK(slot.strength == 0);
+    // The envelope is an exponential, so it approaches zero instead of hitting
+    // it; the row shows the quantised value, which is 0.
+    CHECK(dglabMotionFeedLevel(&g_feed) < 0.01f);
+}
+
 static void testStillHandIsSilent(void)
 {
     DglabNetWaveformSlot slot;
@@ -317,6 +345,7 @@ static void testSensorSideConnection(void)
 int main(void)
 {
     testStillHandIsSilent();
+    testSilenceEndsTheMovement();
     testSingleSwingPeaksThenDecays();
     testSustainedMotionReachesFullScale();
     testDeadZoneHysteresis();

@@ -31,6 +31,7 @@ static const char* const kKeys[DglabString_Count] = {
     [DglabString_ActionAdjust] = "action_adjust",
     [DglabString_ActionLanguage] = "action_language",
     [DglabString_ActionReset] = "action_reset",
+    [DglabString_ActionRescan] = "action_rescan",
     [DglabString_HintAdjustA] = "hint_adjust_a",
     [DglabString_HintAdjustB] = "hint_adjust_b",
 
