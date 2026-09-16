@@ -145,11 +145,11 @@
 停止**。否则同一只手柄的读数会被送进 feed 两次，而"重复的一条"看起来正好是"没有变化"，
 会把加速度差分那一路稀释掉。
 
-**连接状态是整侧判断的，不由某一个句柄说了算。** 单只风格的句柄在这套玩法里常常是"存在但
-没有数据"的（系统按 JoyDual 分给玩家 1），它会给出 `IsConnected=0` 的占位读数；早期实现把
-"最后一个回答的句柄的最后一条读数"直接当成整侧状态，于是出现**实机现象（2026-09-16）：
-一对拆下的 Joy-Con、波形输出正常，界面两行却都是"未连接"**。现在的规则（`nro/source/motion/motion_feed.c`
-的 `dglabMotionSensorConnected()`，`tests/motion` 覆盖）：
+**连接状态是整侧判断的，不由某一个句柄说了算。** 早期实现把"最后一个回答的句柄的最后一条
+读数"直接当成整侧状态：只要有一个句柄回的是 `IsConnected=0` 的占位读数，整侧就显示
+"未连接"——而**实机现象（2026-09-16）**正是"一对拆下的 Joy-Con、波形输出正常，界面两行却
+都是未连接"。现在的规则（`nro/source/motion/motion_feed.c` 的
+`dglabMotionSensorConnected()`，`tests/motion` 覆盖）：
 
 1. 这一轮有任何采样 → **已连接**（读数只有在自称已连接时才会进入 feed，所以"显示未连接"
    与"正在输出"不可能同时成立）；
@@ -157,9 +157,25 @@
 3. 否则有句柄回答、但都不算已连接 → 未连接（手柄断开/休眠就是这一条）；
 4. 这一轮谁都没回答 → 保持上一次（空闲的传感器没话可说，抖着刷新更糟）。
 
-进入玩法时 NRO 会把每侧的句柄数与上一轮的 states/采样/connected 写一行日志到
-`sdmc:/switch/DGLAB-NX/logs/dglab-net.log`（形如 `motion left: handles 2, states 17, samples 5,
-connected 1 ...`）：一台主机究竟交出几个句柄、哪些在回答，是实机事实，这行日志是唯一的答案。
+进入玩法时 NRO 会把每侧的句柄数与本轮每个句柄的 states/采样/connected 写一行日志到
+`sdmc:/switch/DGLAB-NX/logs/dglab-net.log`；没轮到的句柄会写成 `#n not polled`（"没有读数"
+和"没问它"是两件事）。**实机实测（2026-09-17，一对拆下的 Joy-Con，进去就挥）**：
+
+    motion left: handles 2, #0 states 16, samples 16, connected 1, #1 not polled
+      | right: handles 2, #0 states 16, samples 16, connected 1, #1 not polled
+
+由此确定的实机事实：
+
+- **每侧确实拿到两个句柄**（`NpadJoyDual` 的一个 + 单只风格的一个），顺序如设计；
+- **真正给数据的是 `NpadJoyDual` 那个**：一次轮询 16 条，全部 `IsConnected`，没有插值样本；
+  它的采样深度正好是系统 LIFO 的上限附近（17 条），所以每帧都把环形缓冲取空；
+- **单只风格的句柄在这套玩法下没有数据**（新规则下根本不去轮询它）——这也解释了为什么
+  "一个句柄判整侧"的旧规则会出错；
+- 连接状态变化时会另写一行 `motion left connected` / `motion left disconnected`（只在变化时
+  写，静止会话不刷屏），`sdmc:/switch/DGLAB-NX/logs/dglab-net.log` 里能直接看到手柄掉没掉。
+
+注意：这个文件是 **NRO** 落盘的，而 NRO 只在**服务端页**轮询 sysmodule 日志；直接进体感页
+时文件里就只有上面这几行（sysmodule 自己的 `dglab-sys.log` 不受影响）。
 
 **左右坐标轴方向不需要标定**：强度用的是 `|ω|` 和 `|Δa|` 的模长，左右手柄镜像的坐标系
 对模长没有影响（原来的待确认清单里有一条，现在可以划掉）。
@@ -261,9 +277,13 @@ connected 1 ...`）：一台主机究竟交出几个句柄、哪些在回答，�
 ## 待实机确认（写进文档前不许猜）
 
 1. `acceleration` / `angular_velocity` / `angle` 的**单位**；
-2. 实际采样率，以及每帧能读到几条（决定一个 25ms 窗口里有几条样本）；
+2. ~~实际采样率，以及每帧能读到几条~~：**部分回答**——进入玩法后第一次轮询拿到 16 条
+   （LIFO 深度 17，所以每帧基本取空），按 60fps 算大约每秒 960 条；稳态数值与是否有丢失
+   还没统计（要看多帧的 states 计数）；
 3. ~~左右 Joy-Con 的坐标轴方向~~：不需要——强度用模长，左右镜像不影响；
-4. `IsInterpolated` 出现的频率；
+4. `IsInterpolated` 出现的频率：**部分回答**——目前抓到的轮询里一条都没有（所以实测频率
+   很低，但还没有长时间统计）；
 5. `hidIsSixAxisSensorAtRest` 的判据是否够稳（能否用来做零偏归零）；
 6. NRO 在 applet 模式下读六轴的可用性与开销（每帧 60 次读是否明显耗电）；
-7. Joy-Con 断开/休眠时 `attributes` 的变化时机。
+7. Joy-Con 断开/休眠时 `attributes` 的变化时机：现在有 `motion left/right connected /
+   disconnected` 的行，把一只 Joy-Con 收起来或让它休眠，再看 `dglab-net.log` 就是答案。

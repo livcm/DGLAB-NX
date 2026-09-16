@@ -936,6 +936,12 @@ static void runMotionView(Service* dglab, PadState* pad)
     u32 frame = 0;
     u32 drawn_generation = 0;
     bool described = false;
+    // The connection the row is showing, so only a change writes a log line. The
+    // first poll fills them in without logging: the describe line above already
+    // carries the state the mode started in.
+    bool link_known = false;
+    bool left_connected = false;
+    bool right_connected = false;
 
     motionSettingsLoad(&config);
     dglabMotionFeedInit(&feed_a, &config);
@@ -1006,6 +1012,28 @@ static void runMotionView(Service* dglab, PadState* pad)
             dglabJoyconDescribe(DglabJoycon_Right, right, sizeof(right));
             snprintf(line, sizeof(line), "motion %s | %s", left, right);
             logPushLine(line);
+        }
+
+        // A side going away or coming back is worth a line of its own: whether a
+        // sleeping or removed Joy-Con really clears IsConnected is one of the
+        // things only hardware can answer (docs/joycon-input.md), and it is the
+        // state the row is about. Only changes are logged, so a still session
+        // writes nothing.
+        {
+            bool left_now = dglabJoyconIsConnected(DglabJoycon_Left);
+            bool right_now = dglabJoyconIsConnected(DglabJoycon_Right);
+
+            if (link_known) {
+                if (left_now != left_connected)
+                    logPushLine(left_now ? "motion left connected" : "motion left disconnected");
+
+                if (right_now != right_connected)
+                    logPushLine(right_now ? "motion right connected" : "motion right disconnected");
+            }
+
+            left_connected = left_now;
+            right_connected = right_now;
+            link_known = true;
         }
 
         // A batch that is all silence is dropped instead of uploaded: that is

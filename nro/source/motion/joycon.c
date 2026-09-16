@@ -28,9 +28,12 @@ typedef struct {
     size_t handle_count;
     bool started;
     bool connected;
-    // What the last poll got out of each handle, oldest first, for the log line
-    // dglabJoyconDescribe() builds.
+    // What the last poll asked each handle and what it answered, oldest first,
+    // for the log line dglabJoyconDescribe() builds. A handle the poll did not
+    // reach (see the order rule below) keeps polled=false, which the log says
+    // out loud: "no readings" and "not asked" are different answers.
     struct {
+        bool polled;
         size_t states;
         size_t samples;
         bool connected;
@@ -176,6 +179,9 @@ size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max)
     state = &g_joycon[side];
     memset(&totals, 0, sizeof(totals));
 
+    for (size_t i = 0; i < state->handle_count; i++)
+        memset(&state->last[i], 0, sizeof(state->last[i]));
+
     for (size_t i = 0; i < state->handle_count; i++) {
         size_t states = 0;
         size_t samples = 0;
@@ -183,6 +189,7 @@ size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max)
 
         pollHandle(state->handles[i], out, max, &totals, &states, &samples, &connected);
 
+        state->last[i].polled = true;
         state->last[i].states = states;
         state->last[i].samples = samples;
         state->last[i].connected = connected;
@@ -228,9 +235,13 @@ size_t dglabJoyconDescribe(DglabJoyconSide side, char* out, size_t size)
     used = (size_t)written;
 
     for (size_t i = 0; i < state->handle_count; i++) {
-        written = snprintf(out + used, size - used, ", states %u, samples %u, connected %u",
-            (unsigned)state->last[i].states, (unsigned)state->last[i].samples,
-            state->last[i].connected ? 1u : 0u);
+        if (!state->last[i].polled)
+            written = snprintf(out + used, size - used, ", #%u not polled", (unsigned)i);
+        else
+            written = snprintf(out + used, size - used,
+                ", #%u states %u, samples %u, connected %u", (unsigned)i,
+                (unsigned)state->last[i].states, (unsigned)state->last[i].samples,
+                state->last[i].connected ? 1u : 0u);
 
         if (written <= 0 || (size_t)written >= size - used)
             return used;
