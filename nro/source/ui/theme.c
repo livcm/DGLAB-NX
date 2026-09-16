@@ -1,0 +1,27 @@
+#include <dglab/ui/theme.h>
+
+const DglabTheme dglabThemeDark = {
+    .background = DGLAB_RGBA(0x10, 0x14, 0x18, 0xFF),
+    .panel = DGLAB_RGBA(0x1C, 0x22, 0x30, 0xFF),
+    .panel_border = DGLAB_RGBA(0x2E, 0x38, 0x4C, 0xFF),
+    .selected = DGLAB_RGBA(0x24, 0x2E, 0x40, 0xFF),
+    .text = DGLAB_RGBA(0xE8, 0xEA, 0xF0, 0xFF),
+    .muted = DGLAB_RGBA(0x9A, 0xA4, 0xB8, 0xFF),
+    .accent = DGLAB_RGBA(0x6F, 0xE3, 0x8A, 0xFF),
+    .warn = DGLAB_RGBA(0xFF, 0xC9, 0x4D, 0xFF),
+    .error = DGLAB_RGBA(0xFF, 0x6B, 0x6B, 0xFF),
+    .white = DGLAB_RGBA(0xFF, 0xFF, 0xFF, 0xFF),
+    .black = DGLAB_RGBA(0x00, 0x00, 0x00, 0xFF),
+};
+
+static const DglabTheme* g_active = &dglabThemeDark;
+
+const DglabTheme* dglabThemeGet(void)
+{
+    return g_active;
+}
+
+void dglabThemeSet(const DglabTheme* theme)
+{
+    g_active = theme ? theme : &dglabThemeDark;
+}

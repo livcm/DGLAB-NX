@@ -1,9 +1,24 @@
 #include <dglab/ui/screen.h>
 
+#include <dglab/ui/theme.h>
 #include <dglab/ui/qr.h>
 
 #include <stdio.h>
 #include <string.h>
+
+// Colours come from the active theme (nro/include/dglab/ui/theme.h); the names
+// below are only there to keep the drawing code readable.
+#define kBackground (dglabThemeGet()->background)
+#define kPanel (dglabThemeGet()->panel)
+#define kPanelBorder (dglabThemeGet()->panel_border)
+#define kSelected (dglabThemeGet()->selected)
+#define kText (dglabThemeGet()->text)
+#define kMuted (dglabThemeGet()->muted)
+#define kAccent (dglabThemeGet()->accent)
+#define kWarn (dglabThemeGet()->warn)
+#define kError (dglabThemeGet()->error)
+#define kWhite (dglabThemeGet()->white)
+#define kBlack (dglabThemeGet()->black)
 
 #define SCREEN_WIDTH 1280
 #define SCREEN_HEIGHT 720
@@ -20,16 +35,6 @@
 #define QR_QUIET_ZONE 4
 #define QR_MAX_MODULE 10
 
-static const uint32_t kBackground = DGLAB_RGBA(0x10, 0x14, 0x18, 0xFF);
-static const uint32_t kPanel = DGLAB_RGBA(0x1C, 0x22, 0x30, 0xFF);
-static const uint32_t kPanelBorder = DGLAB_RGBA(0x2E, 0x38, 0x4C, 0xFF);
-static const uint32_t kText = DGLAB_RGBA(0xE8, 0xEA, 0xF0, 0xFF);
-static const uint32_t kMuted = DGLAB_RGBA(0x9A, 0xA4, 0xB8, 0xFF);
-static const uint32_t kAccent = DGLAB_RGBA(0x6F, 0xE3, 0x8A, 0xFF);
-static const uint32_t kWarn = DGLAB_RGBA(0xFF, 0xC9, 0x4D, 0xFF);
-static const uint32_t kError = DGLAB_RGBA(0xFF, 0x6B, 0x6B, 0xFF);
-static const uint32_t kWhite = DGLAB_RGBA(0xFF, 0xFF, 0xFF, 0xFF);
-static const uint32_t kBlack = DGLAB_RGBA(0x00, 0x00, 0x00, 0xFF);
 
 static const char* netStateName(u32 state)
 {
