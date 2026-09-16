@@ -23,10 +23,15 @@ INCLUDES	:=	include ../common/include
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
+# Which binary got installed has to be answerable from the log: see
+# include/dglab/build.h. `git describe` is the most precise answer available and
+# is empty only outside a checkout, in which case the header's default stands.
+BUILD_STAMP	:=	$(shell git describe --always --dirty 2>/dev/null || echo unknown)
+
 CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 			$(ARCH) $(DEFINES)
 
-CFLAGS	+=	$(INCLUDE) -D__SWITCH__
+CFLAGS	+=	$(INCLUDE) -D__SWITCH__ '-DDGLAB_BUILD_STAMP="$(BUILD_STAMP)"'
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 

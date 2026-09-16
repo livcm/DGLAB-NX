@@ -1,5 +1,6 @@
 #include <dglab/transport/net_socket.h>
 
+#include <dglab/build.h>
 #include <dglab/net/net_server.h>
 
 #include <errno.h>
@@ -191,18 +192,36 @@ static bool netGetIp(void* context, uint32_t* address, char* text, size_t text_s
 // Socket helpers
 // ---------------------------------------------------------------------------
 
-static void netLog(const char* fmt, ...)
+// The one place the transport's own lines are formatted. Callers hold no lock;
+// this takes the transport lock, which is why nothing may call it from inside a
+// critical section (the core's dglabNetServerLog is the one to use there).
+static void netLogV(const char* fmt, va_list args)
 {
-    char line[160];
-    va_list args;
+    char line[192];
 
-    va_start(args, fmt);
     vsnprintf(line, sizeof(line), fmt, args);
-    va_end(args);
 
     mutexLock(&g_net.mutex);
     dglabNetServerLog(&g_net.server, "%s", line);
     mutexUnlock(&g_net.mutex);
+}
+
+static void netLog(const char* fmt, ...)
+{
+    va_list args;
+
+    va_start(args, fmt);
+    netLogV(fmt, args);
+    va_end(args);
+}
+
+void dglabNetSocketLogNote(const char* fmt, ...)
+{
+    va_list args;
+
+    va_start(args, fmt);
+    netLogV(fmt, args);
+    va_end(args);
 }
 
 // Creates the server core on first use (defined below, next to the public API).
@@ -711,6 +730,11 @@ void dglabNetSocketInitialize(void)
     mutexLock(&g_net.mutex);
     netCoreEnsureReady((u16)DGLAB_NET_DEFAULT_PORT);
     mutexUnlock(&g_net.mutex);
+
+    // The first line of the in-memory ring, and the answer to "which binary is
+    // installed?" before anything else runs. It stays in the ring only: the SD
+    // mirror switches on when the server starts, and the start logs it again.
+    dglabNetSocketLogNote("dglab %s", DGLAB_BUILD_STAMP);
 }
 
 static Result netOpenListenSocket(u16 port, int* out_fd)
@@ -884,6 +908,10 @@ Result dglabNetSocketStart(u16 port)
     g_net.tick_valid = true;
 
     mutexUnlock(&g_net.mutex);
+
+    // The SD mirror is on from here, so this one line ends up at the top of
+    // dglab-sys.log: whoever reads that file can tell which build wrote it.
+    dglabNetSocketLogNote("server start, dglab %s", DGLAB_BUILD_STAMP);
 
     // The power state watch needs its own IPC and a thread, so it is started
     // here rather than at boot: the watch only matters while the server runs.

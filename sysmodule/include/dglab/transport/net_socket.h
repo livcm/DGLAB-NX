@@ -46,3 +46,8 @@ Result dglabNetSocketUploadWaveform(const DglabNetWaveformRequest* request);
 
 // Reads the log ring. Returns the cursor to pass in next time.
 u32 dglabNetSocketReadLog(u32 cursor, char* out, size_t out_size);
+
+// Appends one line to the log ring (and to the SD mirror once the server runs).
+// For callers outside the transport that need to say something the core cannot
+// know - the build stamp being the one that matters: see dglab/build.h.
+void dglabNetSocketLogNote(const char* fmt, ...);
