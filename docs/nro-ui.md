@@ -717,13 +717,13 @@ Socket 服务端页的两栏直接采用实测数字：左栏 `DGLAB_SOCKET_QR_X
 - 标签改成 `左 Joy-Con` / `右 Joy-Con`（key `motion_joycon_left` / `motion_joycon_right`），
   行序不变：连接 / 左 Joy-Con / 右 Joy-Con / 通道强度 A / 通道强度 B —— 前两行是输入，
   后两行是输出，一眼分开；
-- 判定同时修掉：每侧最多持有两个 HID 句柄（`NpadJoyDual` 的一个 + 单只风格的一个），而
-  "最后一个回答的句柄的最后一条读数"曾经直接决定整侧状态；单只风格的句柄只回
-  `IsConnected=0` 的占位读数时，整侧被判成未连接，而采样早已进了映射——正是截图里的现象。
-  现在每侧只用一个句柄（`NpadJoyDual` 优先，只有它没给出采样才回退），状态用
-  `dglabMotionSensorConnected()` 判定："有采样 → 已连接；连续 20 次轮询没有读数 → 未连接；
-  再否则保持上一次"——句柄自称的 `IsConnected` 不算数（2026-09-17 两轮实机反馈：相信那个位
-  会让"挥动中"再也回不到"未连接"），细节见 `docs/joycon-input.md`；
+- 连接判定同时修过两轮（2026-09-17）：先是"最后一个回答的句柄的最后一条读数"决定整侧（占位
+  读数会误判），再是只按读数判断（跟键插回主机、关掉后六轴句柄**照样有读数**，于是一直停在
+  "挥动中"）。现在以**主机自己的控制器状态**为准——`hidGetNpadDeviceType` 的按侧设备类型，
+  其次是 `padGetStyleSet` / `padGetAttributes` / `padIsHandheld`：拆下来的对应侧 Joy-Con 才
+  跟读数走，夹回主机、被关掉或不在的一侧显示未连接、并且**根本不轮询句柄**（所以"显示未连接"
+  与"通道有输出"互斥）；六轴句柄的读数只决定波形值与频率，不作连接依据。细节见
+  `docs/joycon-input.md`；
 - 进入玩法时会往日志写一行 `motion left: handles 2, #0 states … | motion right: …`（落到
   `dglab-net.log`），把主机实际交出的句柄布局记下来；连接状态变化时另写一行
   `motion left connected` / `motion left disconnected`。实机结果与解读见

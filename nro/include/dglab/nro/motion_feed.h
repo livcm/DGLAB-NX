@@ -122,6 +122,13 @@ typedef struct {
     bool answered;     ///< at least one handle had readings to hand over
     bool connected;    ///< at least one of those readings said IsConnected
     unsigned samples;  ///< readings that were handed to the feed
+    // The console does not present this side as a usable detached Joy-Con: it is
+    // attached to the console (handheld), switched off, or simply not there. The
+    // six-axis handle is no help here - it keeps handing over readings for a
+    // Joy-Con that is attached or switched off (hardware report, 2026-09-17),
+    // which is why the rows never changed - so the caller asks the pad API and
+    // says so. A side that is not usable is not polled at all.
+    bool not_usable;
 } DglabMotionSensorPoll;
 
 /// How many polls in a row a side may deliver nothing before it counts as gone.

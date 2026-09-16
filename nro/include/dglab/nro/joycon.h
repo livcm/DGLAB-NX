@@ -44,7 +44,13 @@ bool dglabJoyconStarted(void);
 /// runs faster than the frame loop, so this is a small batch, newest last).
 /// Interpolated and disconnected readings are dropped here. Returns how many
 /// samples were written, never more than `max`.
-size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max);
+///
+/// `usable` comes from the pad API (the same PadState the buttons come from):
+/// false when the console is being used handheld or that side's controller is not
+/// connected. Such a side is not polled at all - the six-axis handle happily
+/// hands over readings for a Joy-Con that is attached or switched off, and those
+/// readings are what used to keep the row on 挥动中 forever.
+size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max, bool usable);
 
 /// Whether a reading for this side was connected the last time we looked.
 bool dglabJoyconIsConnected(DglabJoyconSide side);

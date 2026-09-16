@@ -338,6 +338,17 @@ static void testSensorSideConnection(void)
     CHECK(dglabMotionSensorConnected(true, &poll, DGLAB_MOTION_SENSOR_QUIET_POLLS - 1));
     CHECK(!dglabMotionSensorConnected(true, &poll, DGLAB_MOTION_SENSOR_QUIET_POLLS));
 
+    // A side the console does not present as a usable detached Joy-Con (clipped
+    // onto the console, switched off, or gone) is not connected whatever the
+    // handles have to say: they are not even asked (hardware report, 2026-09-17 -
+    // they happily hand over readings for a Joy-Con that is attached or off, and
+    // that is what kept the rows on 挥动中).
+    poll.not_usable = true;
+    poll.answered = true;
+    poll.connected = true;
+    poll.samples = 9;
+    CHECK(!dglabMotionSensorConnected(true, &poll, 0));
+
     // And no poll at all is not evidence either.
     CHECK(dglabMotionSensorConnected(true, NULL, 999));
 }

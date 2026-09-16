@@ -208,7 +208,7 @@ static void pollHandle(HidSixAxisSensorHandle handle, DglabMotionSample* out, si
     *out_connected = connected;
 }
 
-size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max)
+size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max, bool usable)
 {
     PollTotals totals;
     JoyconState* state;
@@ -221,6 +221,18 @@ size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max)
 
     for (size_t i = 0; i < state->handle_count; i++)
         memset(&state->last[i], 0, sizeof(state->last[i]));
+
+    // The caller has already asked the console (pad API) whether this side is a
+    // usable detached Joy-Con. When it is not, the handles are left alone: they
+    // would still report readings for an attached or switched-off Joy-Con, and
+    // that is what kept the row alive (hardware report, 2026-09-17).
+    if (!usable) {
+        totals.poll.not_usable = true;
+        state->connected = dglabMotionSensorConnected(state->connected, &totals.poll,
+            state->quiet_polls);
+
+        return 0;
+    }
 
     for (size_t i = 0; i < state->handle_count; i++) {
         size_t states = 0;

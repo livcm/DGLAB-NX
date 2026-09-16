@@ -238,6 +238,11 @@ bool dglabMotionSensorConnected(bool previous, const DglabMotionSensorPoll* poll
     if (!poll)
         return previous;
 
+    // The console does not present this side as a usable detached Joy-Con (it is
+    // attached, switched off, or gone): nothing to wait for.
+    if (poll->not_usable)
+        return false;
+
     // Readings only get this far when they reported being connected, so a sample
     // is proof that the side is alive - and the row can never contradict the
     // output the user is feeling.

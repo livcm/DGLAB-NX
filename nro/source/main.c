@@ -942,6 +942,11 @@ static void runMotionView(Service* dglab, PadState* pad)
     bool link_known = false;
     bool left_connected = false;
     bool right_connected = false;
+    // The pad's own report for this frame, kept for the log line below.
+    u32 pad_device = 0;
+    u32 pad_styles = 0;
+    u32 pad_attributes = 0;
+    bool pad_handheld = false;
 
     motionSettingsLoad(&config);
     dglabMotionFeedInit(&feed_a, &config);
@@ -996,15 +1001,60 @@ static void runMotionView(Service* dglab, PadState* pad)
         repeatStrengthFromDirections(dglab, padGetButtons(pad),
             armTicksToNs(armGetSystemTick()));
 
-        // Drain both sides every frame: the sensors run faster than this loop,
-        // and a reading that is not collected now is gone.
-        for (size_t i = 0, count = dglabJoyconPoll(DglabJoycon_Left, samples, MOTION_DRAIN_MAX);
-             i < count; i++)
-            dglabMotionFeedAddSample(&feed_a, &samples[i]);
+        // Which sides this mode can read at all, from the pad the buttons come
+        // from: the six-axis handles keep handing over readings for a Joy-Con
+        // that is attached to the console or switched off, so they are not a
+        // connection signal (hardware report, 2026-09-17 - and the reason the two
+        // rows never went back to 未连接). `padIsHandheld` covers "plugged back
+        // in", the two attribute bits cover "switched off / not there".
+        {
+            // The per-side answer, when the console gives one: JoyLeft/JoyRight
+            // mean the controller is detached and usable as this mode's input,
+            // HandheldLeft/Right mean it is clipped onto the console (moving it
+            // moves the console, which is not this mode), and a bit that is clear
+            // means that side is switched off or gone.
+            u32 device = hidGetNpadDeviceType(HidNpadIdType_No1);
+            u32 styles = padGetStyleSet(pad);
+            u32 attributes = padGetAttributes(pad);
+            bool handheld = padIsHandheld(pad);
+            bool left_ok;
+            bool right_ok;
 
-        for (size_t i = 0, count = dglabJoyconPoll(DglabJoycon_Right, samples, MOTION_DRAIN_MAX);
-             i < count; i++)
-            dglabMotionFeedAddSample(&feed_b, &samples[i]);
+            if (device != 0) {
+                left_ok = (device & HidDeviceTypeBits_JoyLeft) != 0;
+                right_ok = (device & HidDeviceTypeBits_JoyRight) != 0;
+            } else if (styles != 0 || (attributes & HidNpadAttribute_IsConnected) != 0) {
+                // No device type: the pad state the buttons come from still says
+                // whether the console is handheld and which halves are there.
+                left_ok = !handheld &&
+                    (styles & (HidNpadStyleTag_NpadJoyDual | HidNpadStyleTag_NpadJoyLeft)) != 0 &&
+                    (attributes & HidNpadAttribute_IsLeftConnected) != 0;
+                right_ok = !handheld &&
+                    (styles & (HidNpadStyleTag_NpadJoyDual | HidNpadStyleTag_NpadJoyRight)) != 0 &&
+                    (attributes & HidNpadAttribute_IsRightConnected) != 0;
+            } else {
+                // Nothing is answering, not even the pad: keep the old behaviour,
+                // which judges each side by its readings alone.
+                left_ok = true;
+                right_ok = true;
+            }
+
+            pad_device = device;
+            pad_styles = styles;
+            pad_attributes = attributes;
+            pad_handheld = handheld;
+
+            // Drain both sides every frame: the sensors run faster than this
+            // loop, and a reading that is not collected now is gone.
+            for (size_t i = 0, count = dglabJoyconPoll(DglabJoycon_Left, samples,
+                     MOTION_DRAIN_MAX, left_ok); i < count; i++)
+                dglabMotionFeedAddSample(&feed_a, &samples[i]);
+
+            for (size_t i = 0, count = dglabJoyconPoll(DglabJoycon_Right, samples,
+                     MOTION_DRAIN_MAX, right_ok); i < count; i++)
+                dglabMotionFeedAddSample(&feed_b, &samples[i]);
+
+        }
 
         // One line about the sensor handles, once per visit (the log page shows
         // it, and the whole line goes to the file on the SD card). Which handles
@@ -1014,12 +1064,15 @@ static void runMotionView(Service* dglab, PadState* pad)
         if (!described) {
             char left[160];
             char right[160];
-            char line[384];
+            char line[448];
 
             described = true;
             dglabJoyconDescribe(DglabJoycon_Left, left, sizeof(left));
             dglabJoyconDescribe(DglabJoycon_Right, right, sizeof(right));
-            snprintf(line, sizeof(line), "motion %s | %s", left, right);
+            snprintf(line, sizeof(line),
+                "motion device 0x%08X styles 0x%08X attrs 0x%08X handheld %u | %s | %s",
+                (unsigned)pad_device, (unsigned)pad_styles, (unsigned)pad_attributes,
+                pad_handheld ? 1u : 0u, left, right);
             logPushLine(line);
         }
 
