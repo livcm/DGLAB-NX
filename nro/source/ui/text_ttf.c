@@ -115,8 +115,20 @@ bool dglabTtfFontInit(const void* data, size_t size, float pixel_height)
 
     g_source.lookup = ttfLookup;
     g_source.ascent = (int)ceilf((float)ascent * g_scale);
-    g_source.line_height = (int)ceilf((float)(ascent - descent + line_gap) * g_scale);
     g_source.cell_height = g_source.ascent + (int)ceilf((float)-descent * g_scale);
+    g_source.line_height = (int)ceilf((float)(ascent - descent + line_gap) * g_scale);
+
+    // The font's own line spacing is not a layout: the console's system font
+    // reports ~27px for a 24px em, which stacks Chinese lines until they touch
+    // (the host font reports 36). Keep a floor proportional to the em so any
+    // font gets room to breathe.
+    {
+        int minimum = (int)ceilf(pixel_height * 1.4f);
+
+        if (g_source.line_height < minimum)
+            g_source.line_height = minimum;
+    }
+
     g_source.context = NULL;
 
     g_loaded = true;
