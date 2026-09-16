@@ -316,7 +316,7 @@ static void testMotionScreen(void)
 
     dglabCanvasInit(&canvas, screen_pixels, 1280, 720, 1280 * 4);
     dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
-    dglabMotionScreenDraw(&canvas, &kFont, &state);
+    dglabMotionScreenDraw(&canvas, dglabBitmapGlyphSource(&kFont), &state);
 
     changed = countChangedPixels(screen_pixels, sizeof(screen_pixels), blue);
     CHECK(changed > 1280 * 720 / 2);
@@ -351,7 +351,7 @@ static void testAdvancedScreen(void)
 
     dglabCanvasInit(&canvas, screen_pixels, 1280, 720, 1280 * 4);
     dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
-    dglabAdvancedDraw(&canvas, &kFont, &state);
+    dglabAdvancedDraw(&canvas, dglabBitmapGlyphSource(&kFont), &state);
 
     changed = countChangedPixels(screen_pixels, sizeof(screen_pixels), blue);
     CHECK(changed > 1280 * 720 / 2);

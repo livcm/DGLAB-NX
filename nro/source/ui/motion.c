@@ -1,5 +1,6 @@
 #include <dglab/ui/motion.h>
 
+#include <dglab/ui/strings.h>
 #include <dglab/ui/theme.h>
 #include <stdio.h>
 #include <string.h>
@@ -38,133 +39,116 @@ static uint32_t toneColor(u32 tone)
     }
 }
 
-static void drawLine(DglabCanvas* canvas, const DglabFont* font, int x, int y, const char* label,
+static void drawLine(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, const char* label,
     const char* value, uint32_t color)
 {
-    dglabCanvasText(canvas, font, x, y, 1, label, kMuted);
-    dglabCanvasText(canvas, font, x + 12 * 16, y, 1, value, color);
+    dglabTextDraw(canvas, text, x, y, label, kMuted);
+    dglabTextDraw(canvas, text, x + 12 * 16, y, value, color);
 }
 
-static void drawWrapped(DglabCanvas* canvas, const DglabFont* font, int x, int y, int columns,
-    const char* text, uint32_t color)
+// Line breaking comes from the text layer, which knows how wide a character is
+// and where a break is allowed (Chinese has no spaces to break at).
+static void drawWrapped(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, int width,
+    const char* value, uint32_t color)
 {
-    char line[128];
-    size_t length = strlen(text);
-    size_t offset = 0;
+    char line[192];
 
-    if (columns <= 0 || columns >= (int)sizeof(line))
-        return;
+    while (*value) {
+        size_t taken = dglabTextWrapLine(text, value, width, line, sizeof(line));
 
-    while (offset < length) {
-        size_t take = length - offset;
+        if (taken == 0)
+            break;
 
-        if (take > (size_t)columns) {
-            take = (size_t)columns;
+        dglabTextDraw(canvas, text, x, y, line, color);
 
-            if (offset + take < length && text[offset + take] != ' ') {
-                size_t back = take;
+        y += text->line_height;
+        value += taken;
 
-                while (back > 0 && text[offset + back] != ' ')
-                    back--;
-
-                if (back > (size_t)columns / 3)
-                    take = back;
-            }
-        }
-
-        memcpy(line, text + offset, take);
-        line[take] = '\0';
-
-        dglabCanvasText(canvas, font, x, y, 1, line, color);
-
-        y += LINE_HEIGHT;
-        offset += take;
-
-        while (offset < length && text[offset] == ' ')
-            offset++;
+        while (*value == ' ')
+            value++;
     }
 }
 
 // One channel's live row: whether that side is connected, how hard it is being
 // moved, and what the mapping is sending because of it.
-static void drawChannel(DglabCanvas* canvas, const DglabFont* font, int x, int y, const char* which,
+static void drawChannel(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, const char* which,
     bool connected, bool moving, unsigned level, unsigned frequency, uint32_t color)
 {
     char buffer[64];
 
-    if (!connected)
-        snprintf(buffer, sizeof(buffer), "not connected");
-    else if (!moving)
-        snprintf(buffer, sizeof(buffer), "still      level 0    %ums", frequency);
-    else
-        snprintf(buffer, sizeof(buffer), "moving     level %u    %ums", level, frequency);
+    if (!connected) {
+        snprintf(buffer, sizeof(buffer), "%s", dglabString(DglabString_MotionNotConnected));
+    } else if (!moving) {
+        snprintf(buffer, sizeof(buffer), "%s   %s 0   %ums",
+            dglabString(DglabString_MotionStill), dglabString(DglabString_MotionLevel), frequency);
+    } else {
+        snprintf(buffer, sizeof(buffer), "%s   %s %u   %ums",
+            dglabString(DglabString_MotionMoving), dglabString(DglabString_MotionLevel), level,
+            frequency);
+    }
 
-    dglabCanvasText(canvas, font, x, y, 1, which, kMuted);
-    dglabCanvasText(canvas, font, x + 32, y, 1, buffer, connected ? color : kMuted);
+    dglabTextDraw(canvas, text, x, y, which, kMuted);
+    dglabTextDraw(canvas, text, x + 32, y, buffer, connected ? color : kMuted);
 }
 
-void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFont* font,
+void dglabMotionScreenDraw(DglabCanvas* canvas, DglabGlyphSource* text,
     const DglabMotionScreenState* state)
 {
     int x = MARGIN + 16;
-    int y = TITLE_HEIGHT + GAP + 12 + LINE_HEIGHT * 2;
+    int line = text->line_height;
+    int y = TITLE_HEIGHT + GAP + 24 + line * 2;
+    // Room for the two header lines, five rows and the two line description.
+    int panel_height = 20 + line * 10;
     char buffer[512];
 
     dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, kBackground);
     dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, TITLE_HEIGHT, kPanel);
-    dglabCanvasText(canvas, font, MARGIN, 20, 1, "DGLAB-NX   motion (Joy-Con)", kText);
+    dglabTextDraw(canvas, text, MARGIN, (TITLE_HEIGHT - text->cell_height) / 2,
+        dglabString(DglabString_MotionTitle), kText);
 
-    dglabCanvasFill(canvas, MARGIN, TITLE_HEIGHT + GAP, PANEL_WIDTH, PANEL_HEIGHT, kPanel);
-    dglabCanvasFrame(canvas, MARGIN, TITLE_HEIGHT + GAP, PANEL_WIDTH, PANEL_HEIGHT, 2,
+    dglabCanvasFill(canvas, MARGIN, TITLE_HEIGHT + GAP, PANEL_WIDTH, panel_height, kPanel);
+    dglabCanvasFrame(canvas, MARGIN, TITLE_HEIGHT + GAP, PANEL_WIDTH, panel_height, 2,
         kPanelBorder);
-    dglabCanvasText(canvas, font, MARGIN + 12, TITLE_HEIGHT + GAP + 8, 1, "channels", kMuted);
+    dglabTextDraw(canvas, text, MARGIN + 16, TITLE_HEIGHT + GAP + 10,
+        dglabString(DglabString_MotionChannels), kMuted);
 
-    drawLine(canvas, font, x, y, "link", state->link ? state->link : "-", toneColor(state->link_tone));
-    y += LINE_HEIGHT;
+    drawLine(canvas, text, x, y, dglabString(DglabString_MotionLink),
+        state->link ? state->link : "-", toneColor(state->link_tone));
+    y += line;
 
-    drawChannel(canvas, font, x, y, "A", state->left_connected, state->moving_a, state->level_a,
+    drawChannel(canvas, text, x, y, "A", state->left_connected, state->moving_a, state->level_a,
         state->frequency_a, kAccent);
-    y += LINE_HEIGHT;
+    y += line;
 
-    drawChannel(canvas, font, x, y, "B", state->right_connected, state->moving_b, state->level_b,
+    drawChannel(canvas, text, x, y, "B", state->right_connected, state->moving_b, state->level_b,
         state->frequency_b, kAccent);
-    y += LINE_HEIGHT;
+    y += line;
 
     // The channel strength is the volume this waveform is scaled by, so it sits
-    // on its own row rather than being crammed into the moving rows.
-    snprintf(buffer, sizeof(buffer), "A %u/100  B %u/100", state->channel_strength_a,
+    // on its own row.
+    snprintf(buffer, sizeof(buffer), "A %u/100   B %u/100", state->channel_strength_a,
         state->channel_strength_b);
-    drawLine(canvas, font, x, y, "volume", buffer, kMuted);
-    y += LINE_HEIGHT;
+    drawLine(canvas, text, x, y, dglabString(DglabString_MotionVolume), buffer, kMuted);
+    y += line;
 
-    drawLine(canvas, font, x, y, "last cmd",
+    drawLine(canvas, text, x, y, dglabString(DglabString_MotionLastCmd),
         (state->last_upload && state->last_upload[0]) ? state->last_upload : "-",
         state->last_upload_tone == DglabCmdTone_Error ? kError :
             (state->last_upload_tone == DglabCmdTone_Warn ? kWarn : kText));
-    y += LINE_HEIGHT;
+    y += line;
 
-    // What to do with it, in one sentence each.
-    y += LINE_HEIGHT;
-    drawWrapped(canvas, font, x, y, (PANEL_WIDTH - 32) / 16,
-        "Move a Joy-Con: the harder it is moved, the stronger and denser its channel becomes. "
-        "Both fall back to silence when it is still.",
-        kMuted);
+    drawWrapped(canvas, text, x, y, PANEL_WIDTH - 48, dglabString(DglabString_MotionDesc), kMuted);
 
     // One block for the safety notes: this mode drives a device that is attached
-    // to a body, so they are not footnotes. The sleep warning is part of the same
-    // text, otherwise the two would overlap depending on how the wrapping falls.
-    snprintf(buffer, sizeof(buffer),
-        "This mode sets the waveform only: the volume row above is the channel strength it is "
-        "scaled by, and that is set in Socket test. The device really does output current.%s",
-        state->server_running
-            ? " Do not sleep while the server holds its socket: press Y in Socket test first."
-            : "");
+    // to a body, so they are not footnotes.
+    snprintf(buffer, sizeof(buffer), "%s%s", dglabString(DglabString_MotionSafety),
+        state->server_running ? dglabString(DglabString_MotionSleepWarning) : "");
 
-    drawWrapped(canvas, font, MARGIN + 16, TITLE_HEIGHT + GAP + PANEL_HEIGHT + 40,
-        (SCREEN_WIDTH - 2 * MARGIN - 32) / 16, buffer, kWarn);
+    drawWrapped(canvas, text, MARGIN + 16, TITLE_HEIGHT + GAP + panel_height + 24,
+        SCREEN_WIDTH - 2 * MARGIN - 32, buffer, kWarn);
 
-    dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 56, 1,
-        "B clear both channels", kText);
-    dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 32, 1,
-        "+ back to the menu", kText);
+    dglabTextDraw(canvas, text, MARGIN, SCREEN_HEIGHT - line * 2 - 16,
+        dglabString(DglabString_MotionClear), kText);
+    dglabTextDraw(canvas, text, MARGIN, SCREEN_HEIGHT - line - 16,
+        dglabString(DglabString_MotionBack), kText);
 }

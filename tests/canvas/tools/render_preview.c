@@ -256,13 +256,13 @@ int main(int argc, char** argv)
         motion.frequency_b = 100;
         motion.channel_strength_a = 20;
         motion.channel_strength_b = 0;
-        motion.link = "app connected";
+        motion.link = dglabString(DglabString_LinkPaired);
         motion.link_tone = DglabCmdTone_Ok;
-        motion.last_upload = "waveform A  ok";
+        motion.last_upload = "\u6ce2\u5f62 A  \u6b63\u5e38";
         motion.last_upload_tone = DglabCmdTone_Ok;
         motion.server_running = true;
 
-        dglabMotionScreenDraw(&canvas, &font, &motion);
+        dglabMotionScreenDraw(&canvas, g_text, &motion);
     } else if (argc >= 4 && strcmp(argv[3], "advanced") == 0) {
         DglabMotionFeedConfig motion_config;
         DglabAdvancedState advanced;
@@ -278,7 +278,7 @@ int main(int argc, char** argv)
         advanced.selected = DglabMotionSetting_FrequencyFast;
         advanced.saved = true;
 
-        dglabAdvancedDraw(&canvas, &font, &advanced);
+        dglabAdvancedDraw(&canvas, g_text, &advanced);
     } else {
         dglabScreenDraw(&canvas, &font, &state);
     }

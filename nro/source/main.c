@@ -265,16 +265,18 @@ static void noteCommand(const char* what, Result result, const char* success_not
 
     if (R_SUCCEEDED(result)) {
         if (success_note)
-            snprintf(g_last_command, sizeof(g_last_command), "%s  ok (%s)", what, success_note);
+            snprintf(g_last_command, sizeof(g_last_command), "%s  %s (%s)", what,
+                dglabString(DglabString_CmdOk), success_note);
         else
-            snprintf(g_last_command, sizeof(g_last_command), "%s  ok", what);
+            snprintf(g_last_command, sizeof(g_last_command), "%s  %s", what,
+                dglabString(DglabString_CmdOk));
     } else {
         if (R_DESCRIPTION(result) == LibnxError_NotFound)
-            outcome = "no app bound";
+            outcome = dglabString(DglabString_CmdNoApp);
         else if (R_DESCRIPTION(result) == LibnxError_BadInput)
-            outcome = "rejected";
+            outcome = dglabString(DglabString_CmdRejected);
         else if (R_DESCRIPTION(result) == LibnxError_IoError)
-            outcome = "socket error";
+            outcome = dglabString(DglabString_CmdSocketError);
 
         if (outcome)
             snprintf(g_last_command, sizeof(g_last_command), "%s  %s", what, outcome);
@@ -366,19 +368,19 @@ static void adjustStrengthFromDirections(Service* dglab, u64 buttons)
 
     if (buttons & HidNpadButton_Up &&
         adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, (int)TEST_STRENGTH_STEP, &rc))
-        noteCommand("A up", rc, NULL);
+        noteCommand(dglabString(DglabString_CmdUpA), rc, NULL);
 
     if (buttons & HidNpadButton_Down &&
         adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, -(int)TEST_STRENGTH_STEP, &rc))
-        noteCommand("A down", rc, NULL);
+        noteCommand(dglabString(DglabString_CmdDownA), rc, NULL);
 
     if (buttons & HidNpadButton_Right &&
         adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, (int)TEST_STRENGTH_STEP, &rc))
-        noteCommand("B up", rc, NULL);
+        noteCommand(dglabString(DglabString_CmdUpB), rc, NULL);
 
     if (buttons & HidNpadButton_Left &&
         adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, -(int)TEST_STRENGTH_STEP, &rc))
-        noteCommand("B down", rc, NULL);
+        noteCommand(dglabString(DglabString_CmdDownB), rc, NULL);
 }
 
 // Repeats a held direction: nothing for the first TEST_STRENGTH_HOLD_NS, then one
@@ -416,26 +418,28 @@ static void handleButtons(Service* dglab, u64 down, u64 held, u64 now_ns)
     if (down & HidNpadButton_A) {
         DglabNetStartRequest request = { 0 };
 
-        noteCommand("start", serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_START, request), NULL);
+        noteCommand(dglabString(DglabString_CmdStart), serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_START, request), NULL);
     }
 
     if (down & HidNpadButton_Y)
-        noteCommand("stop", serviceDispatch(dglab, DGLAB_IPC_CMD_NET_STOP), NULL);
+        noteCommand(dglabString(DglabString_CmdStop), serviceDispatch(dglab, DGLAB_IPC_CMD_NET_STOP), NULL);
 
     if (down & HidNpadButton_B)
-        noteCommand("clear", sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
+        noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
 
     // One trigger per channel: a waveform without a strength does nothing on the
     // device, and a strength without a waveform is just as silent, so each button
     // sends both for its own channel. A test at strength 0 is legal and answers
     // ok, so it says why nothing came out instead of leaving the screen alone.
     if (down & HidNpadButton_ZL)
-        noteCommand("A test", testChannel(dglab, TEST_CHANNEL_A, g_test_strength_a),
-            g_test_strength_a ? NULL : "A is 0");
+        noteCommand(dglabString(DglabString_CmdTestA),
+            testChannel(dglab, TEST_CHANNEL_A, g_test_strength_a),
+            g_test_strength_a ? NULL : dglabString(DglabString_CmdChannelZeroA));
 
     if (down & HidNpadButton_ZR)
-        noteCommand("B test", testChannel(dglab, TEST_CHANNEL_B, g_test_strength_b),
-            g_test_strength_b ? NULL : "B is 0");
+        noteCommand(dglabString(DglabString_CmdTestB),
+            testChannel(dglab, TEST_CHANNEL_B, g_test_strength_b),
+            g_test_strength_b ? NULL : dglabString(DglabString_CmdChannelZeroB));
 
     adjustStrengthFromDirections(dglab, down);
     repeatStrengthFromDirections(dglab, held, now_ns);
@@ -730,17 +734,16 @@ static Result uploadSlots(Service* dglab, u32 channel, const DglabNetWaveformSlo
 static const char* netStateText(u32 state)
 {
     switch (state) {
-        case DglabNetState_Listening: return "waiting for the app";
-        case DglabNetState_Paired: return "app connected";
-        case DglabNetState_Stopped: return "server stopped";
-        case DglabNetState_Failed: return "server failed";
-        default: return "server not started";
+        case DglabNetState_Listening: return dglabString(DglabString_LinkWaiting);
+        case DglabNetState_Paired: return dglabString(DglabString_LinkPaired);
+        case DglabNetState_Stopped: return dglabString(DglabString_LinkStopped);
+        case DglabNetState_Failed: return dglabString(DglabString_LinkFailed);
+        default: return dglabString(DglabString_LinkNotStarted);
     }
 }
 
 static void runMotionView(Service* dglab, PadState* pad)
 {
-    const DglabFont* font = dglabFramebufferFont();
     DglabMotionFeedConfig config;
     DglabMotionFeed feed_a;
     DglabMotionFeed feed_b;
@@ -754,12 +757,12 @@ static void runMotionView(Service* dglab, PadState* pad)
     dglabMotionFeedInit(&feed_b, &config);
 
     memset(&state, 0, sizeof(state));
-    state.link = "server not started";
+    state.link = dglabString(DglabString_LinkNotStarted);
     state.last_upload = "";
 
     // Whatever the test buttons left queued should not play underneath the
     // motion stream.
-    noteCommand("clear", sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
+    noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
 
     dglabJoyconStart();
 
@@ -782,7 +785,7 @@ static void runMotionView(Service* dglab, PadState* pad)
             break;
 
         if (down & HidNpadButton_B)
-            noteCommand("clear", sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
+            noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
 
         // Drain both sides every frame: the sensors run faster than this loop,
         // and a reading that is not collected now is gone.
@@ -801,7 +804,7 @@ static void runMotionView(Service* dglab, PadState* pad)
                 DGLAB_NET_WAVEFORM_MAX_SLOTS);
 
             if (produced > 0 && slotsHaveStrength(slots, produced))
-                noteCommand("waveform A",
+                noteCommand(dglabString(DglabString_CmdWaveformA),
                     uploadSlots(dglab, MOTION_CHANNEL_A, slots, produced), NULL);
         }
 
@@ -810,7 +813,7 @@ static void runMotionView(Service* dglab, PadState* pad)
                 DGLAB_NET_WAVEFORM_MAX_SLOTS);
 
             if (produced > 0 && slotsHaveStrength(slots, produced))
-                noteCommand("waveform B",
+                noteCommand(dglabString(DglabString_CmdWaveformB),
                     uploadSlots(dglab, MOTION_CHANNEL_B, slots, produced), NULL);
         }
 
@@ -834,7 +837,7 @@ static void runMotionView(Service* dglab, PadState* pad)
                 (status.state == DglabNetState_Listening || status.state == DglabNetState_Paired);
 
             if (!status_ok) {
-                state.link = "IPC call failed";
+                state.link = dglabString(DglabString_LinkIpcFailed);
                 state.link_tone = DglabCmdTone_Error;
             } else {
                 state.link = netStateText(status.state);
@@ -846,7 +849,7 @@ static void runMotionView(Service* dglab, PadState* pad)
             state.last_upload_tone = g_last_command_tone;
 
             if (dglabFramebufferBegin(&canvas)) {
-                dglabMotionScreenDraw(&canvas, font, &state);
+                dglabMotionScreenDraw(&canvas, g_text, &state);
                 dglabFramebufferEnd();
             }
         }
@@ -855,7 +858,7 @@ static void runMotionView(Service* dglab, PadState* pad)
     // Stop the stream before leaving: the sensors go quiet and the queued
     // waveform is cleared, so nothing keeps playing from the menu.
     dglabJoyconStop();
-    noteCommand("clear", sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
+    noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
 }
 
 // Error path: the console is used instead of the framebuffer, because it is the
@@ -938,7 +941,6 @@ static int horizontalDirection(u64 buttons)
 
 static void runAdvancedView(Service* dglab, PadState* pad)
 {
-    const DglabFont* font = dglabFramebufferFont();
     DglabMotionFeedConfig config;
     DglabAdvancedState state;
     u64 hold_started_ns = 0;
@@ -1016,7 +1018,7 @@ static void runAdvancedView(Service* dglab, PadState* pad)
             continue;
 
         if (dglabFramebufferBegin(&canvas)) {
-            dglabAdvancedDraw(&canvas, font, &state);
+            dglabAdvancedDraw(&canvas, g_text, &state);
             dglabFramebufferEnd();
 
             drawn_selected = state.selected;

@@ -1,5 +1,6 @@
 #include <dglab/ui/advanced.h>
 
+#include <dglab/ui/strings.h>
 #include <dglab/ui/theme.h>
 #include <stdio.h>
 #include <string.h>
@@ -35,94 +36,118 @@
 
 // Same palette as screen.c.
 
-static void drawWrapped(DglabCanvas* canvas, const DglabFont* font, int x, int y, int columns,
-    const char* text, uint32_t color)
+// Line breaking comes from the text layer, which knows how wide a character is
+// and where a break is allowed (Chinese has no spaces to break at).
+static void drawWrapped(DglabCanvas* canvas, DglabGlyphSource* text, int x, int y, int width,
+    const char* value, uint32_t color)
 {
-    char line[160];
-    size_t length = strlen(text);
-    size_t offset = 0;
+    char line[192];
 
-    if (columns <= 0 || columns >= (int)sizeof(line))
-        return;
+    while (*value) {
+        size_t taken = dglabTextWrapLine(text, value, width, line, sizeof(line));
 
-    while (offset < length) {
-        size_t take = length - offset;
+        if (taken == 0)
+            break;
 
-        if (take > (size_t)columns) {
-            take = (size_t)columns;
+        dglabTextDraw(canvas, text, x, y, line, color);
 
-            if (offset + take < length && text[offset + take] != ' ') {
-                size_t back = take;
+        y += text->line_height;
+        value += taken;
 
-                while (back > 0 && text[offset + back] != ' ')
-                    back--;
-
-                if (back > (size_t)columns / 3)
-                    take = back;
-            }
-        }
-
-        memcpy(line, text + offset, take);
-        line[take] = '\0';
-
-        dglabCanvasText(canvas, font, x, y, 1, line, color);
-
-        y += LINE_HEIGHT;
-        offset += take;
-
-        while (offset < length && text[offset] == ' ')
-            offset++;
+        while (*value == ' ')
+            value++;
     }
 }
 
-void dglabAdvancedDraw(DglabCanvas* canvas, const DglabFont* font,
+// The parameter rows carry their text in the string tables, so the names and
+// descriptions translate with everything else.
+static const DglabString kNameKeys[DglabMotionSetting_Count] = {
+    [DglabMotionSetting_DeadzoneEnter] = DglabString_SetDeadzoneEnter,
+    [DglabMotionSetting_DeadzoneExit] = DglabString_SetDeadzoneExit,
+    [DglabMotionSetting_GyroRange] = DglabString_SetGyroRange,
+    [DglabMotionSetting_AccelRange] = DglabString_SetAccelRange,
+    [DglabMotionSetting_GyroWeight] = DglabString_SetGyroWeight,
+    [DglabMotionSetting_AccelWeight] = DglabString_SetAccelWeight,
+    [DglabMotionSetting_Attack] = DglabString_SetAttack,
+    [DglabMotionSetting_Release] = DglabString_SetRelease,
+    [DglabMotionSetting_IdleStop] = DglabString_SetIdleStop,
+    [DglabMotionSetting_FrequencyFast] = DglabString_SetFrequencyFast,
+    [DglabMotionSetting_FrequencyStill] = DglabString_SetFrequencyStill,
+    [DglabMotionSetting_StrengthMax] = DglabString_SetStrengthMax,
+};
+
+static const DglabString kDescKeys[DglabMotionSetting_Count] = {
+    [DglabMotionSetting_DeadzoneEnter] = DglabString_DescDeadzoneEnter,
+    [DglabMotionSetting_DeadzoneExit] = DglabString_DescDeadzoneExit,
+    [DglabMotionSetting_GyroRange] = DglabString_DescGyroRange,
+    [DglabMotionSetting_AccelRange] = DglabString_DescAccelRange,
+    [DglabMotionSetting_GyroWeight] = DglabString_DescGyroWeight,
+    [DglabMotionSetting_AccelWeight] = DglabString_DescAccelWeight,
+    [DglabMotionSetting_Attack] = DglabString_DescAttack,
+    [DglabMotionSetting_Release] = DglabString_DescRelease,
+    [DglabMotionSetting_IdleStop] = DglabString_DescIdleStop,
+    [DglabMotionSetting_FrequencyFast] = DglabString_DescFrequencyFast,
+    [DglabMotionSetting_FrequencyStill] = DglabString_DescFrequencyStill,
+    [DglabMotionSetting_StrengthMax] = DglabString_DescStrengthMax,
+};
+
+void dglabAdvancedDraw(DglabCanvas* canvas, DglabGlyphSource* text,
     const DglabAdvancedState* state)
 {
     const DglabMotionFeedConfig* config = state->config;
     unsigned selected = state->selected;
-    int row_x = MARGIN + 20;
-    int value_x = MARGIN + PANEL_WIDTH - 24;
-    int row_y = PANEL_TOP + 32;
+    int line = text->line_height;
+    // Twelve rows share the screen with the description and the footer, so the
+    // row is a little tighter than a full line.
+    int row_height = line - 2;
+    int row_x = MARGIN + 28;
+    int value_x = MARGIN + PANEL_WIDTH - 28;
+    int row_y = PANEL_TOP + 24;
+    // Rows on the left, the description of the selected one on the right: the
+    // screen is much wider than one column needs, and stacking them did not fit
+    // above the footer at this font size.
+    int panel_height = 24 + (int)DglabMotionSetting_Count * row_height + 16;
+    int side_x = MARGIN + PANEL_WIDTH + GAP;
+    int side_width = SCREEN_WIDTH - side_x - MARGIN;
 
     dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, kBackground);
     dglabCanvasFill(canvas, 0, 0, SCREEN_WIDTH, TITLE_HEIGHT, kPanel);
-    dglabCanvasText(canvas, font, MARGIN, 20, 1, "DGLAB-NX   advanced (motion)", kText);
+    dglabTextDraw(canvas, text, MARGIN, (TITLE_HEIGHT - text->cell_height) / 2,
+        dglabString(DglabString_AdvancedTitle), kText);
 
-    dglabCanvasFill(canvas, MARGIN, PANEL_TOP, PANEL_WIDTH, PANEL_HEIGHT, kPanel);
-    dglabCanvasFrame(canvas, MARGIN, PANEL_TOP, PANEL_WIDTH, PANEL_HEIGHT, 2, kPanelBorder);
+    dglabCanvasFill(canvas, MARGIN, PANEL_TOP, PANEL_WIDTH, panel_height, kPanel);
+    dglabCanvasFrame(canvas, MARGIN, PANEL_TOP, PANEL_WIDTH, panel_height, 2, kPanelBorder);
 
     for (unsigned setting = 0; setting < (unsigned)DglabMotionSetting_Count; setting++) {
-        int y = row_y + (int)setting * ROW_HEIGHT;
+        int y = row_y + (int)setting * row_height;
         bool is_selected = (setting == selected);
         char value[32];
 
         dglabMotionSettingsFormat(config, setting, value, sizeof(value));
 
         if (is_selected) {
-            dglabCanvasFill(canvas, MARGIN + 8, y - 4, PANEL_WIDTH - 16, ROW_HEIGHT - 2,
-                kSelected);
-            dglabCanvasText(canvas, font, MARGIN + 12, y, 1, ">", kAccent);
+            dglabCanvasFill(canvas, MARGIN + 8, y - 4, PANEL_WIDTH - 16, row_height - 2, kSelected);
+            dglabTextDraw(canvas, text, MARGIN + 12, y + 4, ">", kAccent);
         }
 
-        dglabCanvasText(canvas, font, row_x, y, 1, dglabMotionSettingName(setting),
+        dglabTextDraw(canvas, text, row_x, y + 4, dglabString(kNameKeys[setting]),
             is_selected ? kText : kMuted);
-        dglabCanvasText(canvas, font, value_x - dglabCanvasTextWidth(font, 1, value), y, 1, value,
+        dglabTextDraw(canvas, text, value_x - dglabTextWidth(text, value), y + 4, value,
             is_selected ? kAccent : kText);
     }
 
-    // What the highlighted parameter does, and why it is worth touching.
-    drawWrapped(canvas, font, MARGIN + 20,
-        row_y + (int)DglabMotionSetting_Count * ROW_HEIGHT + 24, (PANEL_WIDTH - 40) / 16,
-        dglabMotionSettingDescription(selected), kMuted);
+    dglabCanvasFill(canvas, side_x, PANEL_TOP, side_width, panel_height, kPanel);
+    dglabCanvasFrame(canvas, side_x, PANEL_TOP, side_width, panel_height, 2, kPanelBorder);
+    drawWrapped(canvas, text, side_x + 24, PANEL_TOP + 24, side_width - 48,
+        dglabString(kDescKeys[selected]), kMuted);
 
-    dglabCanvasText(canvas, font, MARGIN,
-        PANEL_TOP + PANEL_HEIGHT + 24, 1,
-        state->saved ? "saved to sdmc:/switch/DGLAB-NX/motion.cfg"
-                     : "could not write motion.cfg (settings still apply to this run)",
+    dglabTextDraw(canvas, text, MARGIN, PANEL_TOP + panel_height + 20,
+        state->saved ? dglabString(DglabString_AdvancedSaved)
+                     : dglabString(DglabString_AdvancedSaveFailed),
         state->saved ? kAccent : kWarn);
 
-    dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 56, 1,
-        "D-pad up/down select    left/right change: one step per press", kText);
-    dglabCanvasText(canvas, font, MARGIN, SCREEN_HEIGHT - 32, 1,
-        "Y reset to the defaults    + back to the menu", kText);
+    dglabTextDraw(canvas, text, MARGIN, SCREEN_HEIGHT - line * 2 - 16,
+        dglabString(DglabString_AdvancedSelect), kText);
+    dglabTextDraw(canvas, text, MARGIN, SCREEN_HEIGHT - line - 16,
+        dglabString(DglabString_AdvancedReset), kText);
 }

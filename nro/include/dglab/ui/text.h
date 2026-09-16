@@ -44,6 +44,14 @@ void dglabTextDraw(DglabCanvas* canvas, DglabGlyphSource* source, int x, int y, 
 /// The width dglabTextDraw would use, in pixels.
 int dglabTextWidth(DglabGlyphSource* source, const char* text);
 
+/// Takes one line's worth of `text` that fits `max_width` pixels, writes it into
+/// out (without any trailing space) and returns how many bytes of `text` that
+/// consumed. It prefers to break at a space, but Chinese has none, so it also
+/// breaks between characters - except inside a run of ASCII letters or digits,
+/// which are kept together. Returns 0 only for an empty string or no room.
+size_t dglabTextWrapLine(DglabGlyphSource* source, const char* text, int max_width, char* out,
+    size_t out_size);
+
 /// A source over libnx's bitmap font (ASCII only). Used on the host, where there
 /// is no system font to rasterise, and as the fallback when the real font cannot
 /// be loaded on the console.

@@ -118,6 +118,63 @@ int dglabTextWidth(DglabGlyphSource* source, const char* text)
     return width;
 }
 
+size_t dglabTextWrapLine(DglabGlyphSource* source, const char* text, int max_width, char* out,
+    size_t out_size)
+{
+    int width = 0;
+    size_t offset = 0;
+    size_t break_at = 0;
+    size_t used = 0;
+
+    if (!source || !text || !out || out_size == 0 || max_width <= 0)
+        return 0;
+
+    while (text[offset]) {
+        uint32_t codepoint = decodeUtf8(text + offset, &used);
+
+        if (used == 0)
+            break;
+
+        {
+            DglabGlyph glyph;
+            int advance;
+
+            memset(&glyph, 0, sizeof(glyph));
+            advance = source->lookup(source, codepoint, &glyph) ? glyph.advance
+                                                                : missingAdvance(source);
+
+            if (width + advance > max_width && break_at > 0)
+                break;
+
+            width += advance;
+        }
+
+        offset += used;
+
+        // Somewhere the line may end: after a space, or after anything that is
+        // not an ASCII letter or digit (so "Joy-Con" and "100" stay whole).
+        if (codepoint == ' ' || codepoint >= 0x80 ||
+            !((codepoint >= '0' && codepoint <= '9') || (codepoint >= 'A' && codepoint <= 'Z') ||
+              (codepoint >= 'a' && codepoint <= 'z')))
+            break_at = offset;
+    }
+
+    if (break_at == 0)
+        break_at = offset;
+
+    // Trailing spaces move to the next line instead of padding this one.
+    while (break_at > 0 && text[break_at - 1] == ' ')
+        break_at--;
+
+    if (break_at >= out_size)
+        break_at = out_size - 1;
+
+    memcpy(out, text, break_at);
+    out[break_at] = '\0';
+
+    return break_at;
+}
+
 // ---------------------------------------------------------------------------
 // The bitmap font adapter (ASCII)
 // ---------------------------------------------------------------------------

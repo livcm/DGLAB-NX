@@ -5,6 +5,7 @@
 // a PC.
 
 #include <dglab/ui/screen.h> // DglabCmdTone
+#include <dglab/ui/text.h>
 
 #include <stdbool.h>
 
@@ -34,5 +35,5 @@ typedef struct {
     bool server_running;
 } DglabMotionScreenState;
 
-void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFont* font,
+void dglabMotionScreenDraw(DglabCanvas* canvas, DglabGlyphSource* text,
     const DglabMotionScreenState* state);

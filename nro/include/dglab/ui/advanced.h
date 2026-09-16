@@ -6,6 +6,7 @@
 
 #include <dglab/nro/motion_settings.h>
 #include <dglab/ui/canvas.h>
+#include <dglab/ui/text.h>
 
 typedef struct {
     const DglabMotionFeedConfig* config;
@@ -13,5 +14,5 @@ typedef struct {
     bool saved;          ///< the last change reached the config file
 } DglabAdvancedState;
 
-void dglabAdvancedDraw(DglabCanvas* canvas, const DglabFont* font,
+void dglabAdvancedDraw(DglabCanvas* canvas, DglabGlyphSource* text,
     const DglabAdvancedState* state);
