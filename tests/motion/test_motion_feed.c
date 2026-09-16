@@ -253,6 +253,44 @@ static void testFrequencyGetterMatchesTheSlots(void)
     CHECK(dglabMotionFeedFrequencyMs(&g_feed) == slot.frequency_ms);
 }
 
+// The rule behind the motion page's two Joy-Con rows (docs/joycon-input.md).
+// Readings only reach the feed when they reported being connected, so a sample
+// is proof that the side is alive - and the row cannot say "not connected" while
+// the waveform the user feels is coming from that side.
+static void testSensorSideConnection(void)
+{
+    DglabMotionSensorPoll poll;
+
+    memset(&poll, 0, sizeof(poll));
+
+    // Samples arrived even though the *other* handle for the same side called
+    // itself disconnected: the placeholder must not undo the readings.
+    poll.answered = true;
+    poll.connected = false;
+    poll.samples = 5;
+    CHECK(dglabMotionSensorConnected(false, &poll));
+
+    // The case that used to decide the whole side: a handle answered, nothing in
+    // it was connected, and it produced no readings.
+    poll.samples = 0;
+    CHECK(!dglabMotionSensorConnected(true, &poll));
+
+    // Nothing answered at all - an idle sensor has nothing to say, so the row
+    // keeps what it had instead of flickering.
+    poll.answered = false;
+    CHECK(dglabMotionSensorConnected(true, &poll));
+    CHECK(!dglabMotionSensorConnected(false, &poll));
+
+    // Connected, but everything it produced was interpolated (no samples): still
+    // connected.
+    poll.answered = true;
+    poll.connected = true;
+    CHECK(dglabMotionSensorConnected(false, &poll));
+
+    // And no poll at all is not evidence either.
+    CHECK(dglabMotionSensorConnected(true, NULL));
+}
+
 int main(void)
 {
     testStillHandIsSilent();
@@ -264,6 +302,7 @@ int main(void)
     testPacingFollowsTimeNotFrames();
     testStrengthMaxScales();
     testFrequencyGetterMatchesTheSlots();
+    testSensorSideConnection();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
 

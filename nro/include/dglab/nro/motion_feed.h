@@ -104,3 +104,29 @@ bool dglabMotionFeedIsStreaming(const DglabMotionFeed* feed);
 
 /// Whether the dead zone currently reports movement.
 bool dglabMotionFeedIsMoving(const DglabMotionFeed* feed);
+
+// ---------------------------------------------------------------------------
+// Sensor link state
+//
+// One side's sensor is reached through more than one HID handle (the pair style
+// hands over one per side, and the single styles hand over another for the same
+// physical controller), and each handle answers independently: it may have
+// readings, it may have nothing, and a reading may be a placeholder that says
+// "not connected". Turning that into the one "is this side connected?" the
+// screen shows is a rule, and it is here rather than in joycon.c so the host
+// tests can hold it down (docs/joycon-input.md).
+// ---------------------------------------------------------------------------
+
+/// What one side's handles reported during a poll.
+typedef struct {
+    bool answered;     ///< at least one handle had readings to hand over
+    bool connected;    ///< at least one of those readings said IsConnected
+    unsigned samples;  ///< readings that were handed to the feed
+} DglabMotionSensorPoll;
+
+/// The side's connection state after a poll. Samples are the strongest evidence
+/// - a reading only reaches the feed when it said it was connected, so "output
+/// works but the screen says not connected" cannot happen. A poll where no
+/// handle answered at all keeps `previous`: an idle sensor has nothing to say,
+/// and flickering the row on every empty poll would be worse than a stale value.
+bool dglabMotionSensorConnected(bool previous, const DglabMotionSensorPoll* poll);

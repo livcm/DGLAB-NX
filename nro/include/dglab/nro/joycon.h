@@ -33,3 +33,11 @@ size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max)
 
 /// Whether a reading for this side was connected the last time we looked.
 bool dglabJoyconIsConnected(DglabJoyconSide side);
+
+/// Writes one line describing what this side's handles are and what the last
+/// poll got out of them, e.g. "left: handles 2, states 17/0, samples 5/0,
+/// connected 1/0". Written into the NRO's log by main.c when the mode starts:
+/// which handles a console really hands over (and which of them answer) is a
+/// hardware fact, and this is what makes the next hardware run conclusive.
+/// Returns the length written, 0 when `out` is unusable or no sensor was started.
+size_t dglabJoyconDescribe(DglabJoyconSide side, char* out, size_t size);

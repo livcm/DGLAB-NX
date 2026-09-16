@@ -222,3 +222,25 @@ bool dglabMotionFeedIsMoving(const DglabMotionFeed* feed)
 {
     return feed ? feed->moving : false;
 }
+
+bool dglabMotionSensorConnected(bool previous, const DglabMotionSensorPoll* poll)
+{
+    if (!poll)
+        return previous;
+
+    // Readings only get this far when they reported being connected, so a sample
+    // is proof that the side is alive - and the row can never contradict the
+    // output the user is feeling.
+    if (poll->samples > 0)
+        return true;
+
+    if (poll->connected)
+        return true;
+
+    // A handle answered and none of it was connected: the controller is gone or
+    // asleep. That is the only case that may turn the row to "not connected".
+    if (poll->answered)
+        return false;
+
+    return previous;
+}
