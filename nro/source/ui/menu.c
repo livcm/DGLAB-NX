@@ -54,11 +54,13 @@ unsigned dglabMenuMove(unsigned selected, int delta)
     int count = (int)DglabMenu_ItemCount;
     int value = (int)selected + delta;
 
-    while (value < 0)
-        value += count;
+    // Clamped, not wrapped: the list is a list, and stepping off either end used
+    // to jump to the other one, which reads as a lost keypress.
+    if (value < 0)
+        value = 0;
 
-    while (value >= count)
-        value -= count;
+    if (value >= count)
+        value = count - 1;
 
     return (unsigned)value;
 }
@@ -134,5 +136,5 @@ void dglabMenuDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabMe
         dglabString(DglabString_ActionExit), };
     hints[1] = (DglabHint){ DglabButton_A, DglabButton_None,
         dglabString(DglabString_ActionEnter), };
-    dglabPageHints(canvas, fonts->body, hints, 2);
+    dglabPageHints(canvas, fonts->icon, fonts->body, hints, 2);
 }

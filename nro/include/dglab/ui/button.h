@@ -41,7 +41,10 @@ typedef enum {
 
 /// Draws `button` with its top left corner at (x, y), filled with `color` and
 /// with its letter or symbol knocked out in the page's background colour. `font`
-/// draws that letter: DGLAB_TEXT_VALUE (22px) is the size the console uses.
+/// draws that letter and must be the DGLAB_TEXT_ICON size: the letter has to fit
+/// inside a 26px shape, and at the row size it reached the outline
+/// (docs/nro-ui.md has the measurements). The letter is centred on its ink, not
+/// on its line box, so the shape keeps an even margin all round.
 void dglabButtonIcon(DglabCanvas* canvas, DglabGlyphSource* font, DglabButton button, int x,
     int y, uint32_t color);
 

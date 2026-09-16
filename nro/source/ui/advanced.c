@@ -125,5 +125,5 @@ void dglabAdvancedDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
         dglabString(DglabString_ActionBack), };
     hints[2] = (DglabHint){ DglabButton_Y, DglabButton_None,
         dglabString(DglabString_ActionReset), };
-    dglabPageHints(canvas, fonts->body, hints, 3);
+    dglabPageHints(canvas, fonts->icon, fonts->body, hints, 3);
 }

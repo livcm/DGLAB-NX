@@ -41,26 +41,26 @@ int dglabHintWidth(DglabGlyphSource* font, const DglabHint* hint)
     return width + DGLAB_PAGE_HINT_TEXT_GAP + dglabTextWidth(font, hint->action);
 }
 
-void dglabHintDraw(DglabCanvas* canvas, DglabGlyphSource* font, const DglabHint* hint, int x,
-    int y, uint32_t color)
+void dglabHintDraw(DglabCanvas* canvas, DglabGlyphSource* icon_font, DglabGlyphSource* font,
+    const DglabHint* hint, int x, int y, uint32_t color)
 {
     int text_y = y + (DGLAB_BUTTON_ICON_HEIGHT - font->cell_height) / 2;
     int width = dglabButtonIconWidth(hint->button);
 
-    dglabButtonIcon(canvas, font, hint->button, x, y, color);
+    dglabButtonIcon(canvas, icon_font, hint->button, x, y, color);
 
     if (hint->button2 != DglabButton_None) {
         x += width + DGLAB_BUTTON_ICON_GAP;
         width = dglabButtonIconWidth(hint->button2);
-        dglabButtonIcon(canvas, font, hint->button2, x, y, color);
+        dglabButtonIcon(canvas, icon_font, hint->button2, x, y, color);
     }
 
     dglabTextDraw(canvas, font, x + width + DGLAB_PAGE_HINT_TEXT_GAP, text_y, hint->action,
         color);
 }
 
-void dglabPageHints(DglabCanvas* canvas, DglabGlyphSource* font, const DglabHint* hints,
-    int count)
+void dglabPageHints(DglabCanvas* canvas, DglabGlyphSource* icon_font, DglabGlyphSource* font,
+    const DglabHint* hints, int count)
 {
     int x = DGLAB_PAGE_HINTS_RIGHT;
 
@@ -74,7 +74,7 @@ void dglabPageHints(DglabCanvas* canvas, DglabGlyphSource* font, const DglabHint
 
         x -= hint_width;
 
-        dglabHintDraw(canvas, font, &hints[i], x, DGLAB_PAGE_HINT_ICON_Y,
+        dglabHintDraw(canvas, icon_font, font, &hints[i], x, DGLAB_PAGE_HINT_ICON_Y,
             dglabThemeGet()->text);
 
         x -= DGLAB_PAGE_HINT_GAP;

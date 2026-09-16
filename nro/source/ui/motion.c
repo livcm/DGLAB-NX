@@ -84,7 +84,8 @@ void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     dglabPageClipContent(canvas);
 
     for (int i = 0; i < 2; i++) {
-        dglabHintDraw(canvas, fonts->note, &adjust[i], x, DGLAB_PAGE_CONTENT_TOP, theme->text);
+        dglabHintDraw(canvas, fonts->icon, fonts->note, &adjust[i], x, DGLAB_PAGE_CONTENT_TOP,
+            theme->text);
         x += dglabHintWidth(fonts->note, &adjust[i]) + DGLAB_PAGE_HINT_GAP;
     }
 
@@ -98,13 +99,13 @@ void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     };
     rows[1] = (DglabRow){
         .kind = DglabRow_Item,
-        .label = dglabString(DglabString_MotionChannelA),
+        .label = dglabString(DglabString_MotionJoyConLeft),
         .value = channelText(state, true, channel_a, sizeof(channel_a), &connected_a),
         .value_color = connected_a ? theme->accent : theme->muted,
     };
     rows[2] = (DglabRow){
         .kind = DglabRow_Item,
-        .label = dglabString(DglabString_MotionChannelB),
+        .label = dglabString(DglabString_MotionJoyConRight),
         .value = channelText(state, false, channel_b, sizeof(channel_b), &connected_b),
         .value_color = connected_b ? theme->accent : theme->muted,
     };
@@ -119,9 +120,6 @@ void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
         .label = label_b,
         .value = strength_b,
         .value_color = theme->text,
-        // One block for the safety notes: this mode drives a device that is
-        // attached to a body, so they are not footnotes.
-        .note = dglabString(DglabString_MotionSafety),
     };
 
     dglabListMeasure(&list_fonts, rows, 5, DGLAB_PAGE_CONTENT_WIDTH, boxes, 5);
@@ -146,5 +144,5 @@ void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     hints[3] = (DglabHint){ DglabButton_A, DglabButton_None,
         state->server_running ? dglabString(DglabString_ActionStop)
                               : dglabString(DglabString_ActionStart), };
-    dglabPageHints(canvas, fonts->body, hints, 4);
+    dglabPageHints(canvas, fonts->icon, fonts->body, hints, 4);
 }

@@ -67,16 +67,20 @@ void dglabPageHeader(DglabCanvas* canvas, const DglabTextStyle* title, const cha
     const DglabTextStyle* right, const char* right_text);
 
 /// The bottom bar's hints, in reading order (left to right).
-void dglabPageHints(DglabCanvas* canvas, DglabGlyphSource* font, const DglabHint* hints,
-    int count);
+///
+/// Two fonts, because the two halves are different sizes: the button icons take
+/// DGLAB_TEXT_ICON and the action text the size the page uses for it (body in the
+/// bottom bar, note in the hint line a page puts inside its own content).
+void dglabPageHints(DglabCanvas* canvas, DglabGlyphSource* icon_font, DglabGlyphSource* font,
+    const DglabHint* hints, int count);
 
 /// How wide one hint is (its buttons, the gap, and the action).
 int dglabHintWidth(DglabGlyphSource* font, const DglabHint* hint);
 
 /// Draws one hint with its top left corner at (x, y). Used by the bottom bar and
 /// by the screens that put a hint line inside the content ("上/下 调整 A").
-void dglabHintDraw(DglabCanvas* canvas, DglabGlyphSource* font, const DglabHint* hint, int x,
-    int y, uint32_t color);
+void dglabHintDraw(DglabCanvas* canvas, DglabGlyphSource* icon_font, DglabGlyphSource* font,
+    const DglabHint* hint, int x, int y, uint32_t color);
 
 /// Confines drawing to the content column between the title rule and the bottom
 /// bar. Rows scrolled past the edge are cut there instead of over the rules.

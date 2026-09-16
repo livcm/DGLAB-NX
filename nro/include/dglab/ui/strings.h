@@ -61,15 +61,17 @@ typedef enum {
     DglabString_MotionChannels,
     DglabString_MotionLink,
     DglabString_MotionVolume,
-    DglabString_MotionChannelA,
-    DglabString_MotionChannelB,
+    // The motion page's input rows: which side's Joy-Con is being read, and how
+    // hard it is being moved. They are not the DG-LAB channels - those are the
+    // strength rows below them (docs/joycon-input.md).
+    DglabString_MotionJoyConLeft,
+    DglabString_MotionJoyConRight,
     DglabString_MotionLastCmd,
     DglabString_MotionStill,
     DglabString_MotionMoving,
     DglabString_MotionLevel,
     DglabString_MotionNotConnected,
     DglabString_MotionDesc,
-    DglabString_MotionSafety,
     DglabString_LinkNotStarted,
     DglabString_LinkWaiting,
     DglabString_LinkPaired,

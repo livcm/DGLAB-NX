@@ -71,6 +71,11 @@ static DglabFontSet g_bitmap_fonts;
 static DglabLanguage g_language_pref = DglabLanguage_Auto;
 static DglabLanguage g_language = DglabLanguage_English;
 
+// Bumped whenever the display is rebuilt: a new framebuffer is blank, and the
+// fonts are rasterised anew for it (the docked frame is 1.5x the handheld one),
+// so every screen has to draw again even if nothing else about it changed.
+static u32 g_display_generation;
+
 static void appLanguageSave(void)
 {
     char text[64];
@@ -126,7 +131,53 @@ static void appLanguageApply(void)
     g_bitmap_fonts.body = g_bitmap_fonts.title;
     g_bitmap_fonts.value = g_bitmap_fonts.title;
     g_bitmap_fonts.note = g_bitmap_fonts.title;
+    g_bitmap_fonts.icon = g_bitmap_fonts.title;
     g_fonts = g_bitmap_fonts;
+}
+
+// ---------------------------------------------------------------------------
+// The display
+// ---------------------------------------------------------------------------
+
+// Gives the screen up before a view that needs the console (consoleInit takes
+// the same window), and takes it back afterwards. The shared font mapping is
+// released as well: it is the NRO's largest allocation and the console view has
+// its own bitmap font.
+static void appDisplaySuspend(void)
+{
+    dglabFontClose();
+    dglabFramebufferClose();
+}
+
+// Builds the framebuffer again, at whatever resolution the console is running
+// at now, and re-rasterises the fonts for it. Every screen has to redraw after
+// this, which g_display_generation tells them.
+//
+// Without the appLanguageApply() the font objects would still point at the
+// shared font mapping appDisplaySuspend() released: the glyph caches would draw
+// what they already held and every new character would come out blank. Leaving
+// the BLE PoC console used to do exactly that, and only a restart recovered.
+static bool appDisplayReopen(void)
+{
+    if (!dglabFramebufferOpen())
+        return false;
+
+    appLanguageApply();
+    g_display_generation++;
+
+    return true;
+}
+
+// The console tells us when it is docked or undocked; the callback only records
+// it, and the main loop rebuilds the display between frames.
+static volatile bool g_display_mode_dirty;
+
+static void appletHookCallback(AppletHookType hook, void* param)
+{
+    (void)param;
+
+    if (hook == AppletHookType_OnOperationMode)
+        g_display_mode_dirty = true;
 }
 
 static char g_log_lines[DGLAB_SCREEN_LOG_LINES][DGLAB_SCREEN_LOG_LINE_LEN];
@@ -496,6 +547,9 @@ typedef struct {
     u32 log_generation;
     bool log_open;
     int log_offset;
+    // The display was rebuilt: the frame on screen is gone, so the snapshot the
+    // view last drew no longer describes what is up there.
+    u32 display_generation;
 } DglabScreenSnapshot;
 
 static void snapshotFromState(DglabScreenSnapshot* out, const DglabScreenState* state)
@@ -513,6 +567,7 @@ static void snapshotFromState(DglabScreenSnapshot* out, const DglabScreenState* 
     out->log_generation = g_log_generation;
     out->log_open = state->log_open;
     out->log_offset = state->log_offset;
+    out->display_generation = g_display_generation;
 
     snprintf(out->last_command, sizeof(out->last_command), "%s",
         state->last_command ? state->last_command : "");
@@ -530,44 +585,51 @@ static int logMaxOffset(int log_count)
     return content > view ? content - view : 0;
 }
 
-// The log page scrolls one line per press and, like the strength keys, repeats
-// while a direction is held. It reuses the strength hold timing because the two
-// never run at the same time.
+// The log page scrolls one line per press and then repeats while a direction is
+// held. One line is DGLAB_SCREEN_LOG_PITCH pixels - a press used to move a single
+// pixel, which read as "nothing happened, and then it crawls" - and the repeat
+// has its own timing, faster than the strength keys: a log is something you fly
+// through, and the whole page is only a screenful away from either end.
+#define LOG_SCROLL_HOLD_NS (300ull * 1000000ull)
+#define LOG_SCROLL_REPEAT_NS (50ull * 1000000ull)
+static u64 g_log_hold_started_ns;
+static u64 g_log_last_repeat_ns;
+
 static int logScrollFromDirections(int offset, int max_offset, u64 down, u64 held, u64 now_ns)
 {
-    int steps = 0;
+    int lines = 0;
 
     if (down & HidNpadButton_Up)
-        steps -= 1;
+        lines -= 1;
 
     if (down & HidNpadButton_Down)
-        steps += 1;
+        lines += 1;
 
-    if (steps == 0) {
+    if (lines == 0) {
         if (!(held & (HidNpadButton_Up | HidNpadButton_Down))) {
-            g_strength_hold_started_ns = 0;
+            g_log_hold_started_ns = 0;
             return offset;
         }
 
-        if (g_strength_hold_started_ns == 0) {
-            g_strength_hold_started_ns = now_ns ? now_ns : 1u;
-            g_strength_last_repeat_ns = 0;
+        if (g_log_hold_started_ns == 0) {
+            g_log_hold_started_ns = now_ns ? now_ns : 1u;
+            g_log_last_repeat_ns = 0;
             return offset;
         }
 
-        if (now_ns - g_strength_hold_started_ns < TEST_STRENGTH_HOLD_NS ||
-            (g_strength_last_repeat_ns != 0 &&
-                now_ns - g_strength_last_repeat_ns < TEST_STRENGTH_REPEAT_NS))
+        if (now_ns - g_log_hold_started_ns < LOG_SCROLL_HOLD_NS ||
+            (g_log_last_repeat_ns != 0 &&
+                now_ns - g_log_last_repeat_ns < LOG_SCROLL_REPEAT_NS))
             return offset;
 
-        g_strength_last_repeat_ns = now_ns;
-        steps = (held & HidNpadButton_Down) ? 1 : -1;
+        g_log_last_repeat_ns = now_ns;
+        lines = (held & HidNpadButton_Down) ? 1 : -1;
     } else {
-        g_strength_hold_started_ns = now_ns ? now_ns : 1u;
-        g_strength_last_repeat_ns = 0;
+        g_log_hold_started_ns = now_ns ? now_ns : 1u;
+        g_log_last_repeat_ns = 0;
     }
 
-    offset += steps;
+    offset += lines * DGLAB_SCREEN_LOG_PITCH;
 
     if (offset < 0)
         offset = 0;
@@ -706,6 +768,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
     DglabMenuState state;
     unsigned drawn_selected = 0;
     bool drawn_liveness = false;
+    u32 drawn_generation = 0;
     bool have_drawn = false;
     u32 frame = 0;
 
@@ -751,7 +814,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
         state.selected = g_menu_selected;
 
         if (have_drawn && state.selected == drawn_selected &&
-            state.sysmodule_ok == drawn_liveness)
+            state.sysmodule_ok == drawn_liveness && drawn_generation == g_display_generation)
             continue;
 
         if (dglabFramebufferBegin(&canvas)) {
@@ -760,6 +823,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
 
             drawn_selected = state.selected;
             drawn_liveness = state.sysmodule_ok;
+            drawn_generation = g_display_generation;
             have_drawn = true;
         }
     }
@@ -870,6 +934,8 @@ static void runMotionView(Service* dglab, PadState* pad)
     DglabNetWaveformSlot slots[DGLAB_NET_WAVEFORM_MAX_SLOTS];
     u64 last_ticks;
     u32 frame = 0;
+    u32 drawn_generation = 0;
+    bool described = false;
 
     motionSettingsLoad(&config);
     dglabMotionFeedInit(&feed_a, &config);
@@ -925,6 +991,23 @@ static void runMotionView(Service* dglab, PadState* pad)
              i < count; i++)
             dglabMotionFeedAddSample(&feed_b, &samples[i]);
 
+        // One line about the sensor handles, once per visit (the log page shows
+        // it, and the whole line goes to the file on the SD card). Which handles
+        // a console hands over, and which of them answer, is a hardware fact:
+        // this is what makes "the row says not connected while the waveform
+        // plays" answerable from a log instead of a guess.
+        if (!described) {
+            char left[96];
+            char right[96];
+            char line[224];
+
+            described = true;
+            dglabJoyconDescribe(DglabJoycon_Left, left, sizeof(left));
+            dglabJoyconDescribe(DglabJoycon_Right, right, sizeof(right));
+            snprintf(line, sizeof(line), "motion %s | %s", left, right);
+            logPushLine(line);
+        }
+
         // A batch that is all silence is dropped instead of uploaded: that is
         // what makes a still controller cost no traffic at all.
         {
@@ -945,7 +1028,9 @@ static void runMotionView(Service* dglab, PadState* pad)
                     uploadSlots(dglab, MOTION_CHANNEL_B, slots, produced), NULL);
         }
 
-        if (++frame % MOTION_DISPLAY_FRAMES == 1) {
+        // The live values refresh a few times a second; a rebuilt display is
+        // drawn at once, whatever that counter says.
+        if (++frame % MOTION_DISPLAY_FRAMES == 1 || drawn_generation != g_display_generation) {
             DglabNetStatus status;
             bool status_ok = R_SUCCEEDED(
                 serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, status));
@@ -979,6 +1064,8 @@ static void runMotionView(Service* dglab, PadState* pad)
             if (dglabFramebufferBegin(&canvas)) {
                 dglabMotionScreenDraw(&canvas, &g_fonts, &state);
                 dglabFramebufferEnd();
+
+                drawn_generation = g_display_generation;
             }
         }
     }
@@ -1003,6 +1090,7 @@ static void runAboutView(Service* dglab, PadState* pad)
     DglabAboutState state;
     bool redraw = true;
     bool have_drawn = false;
+    u32 drawn_generation = 0;
 
     serviceDispatchOut(dglab, DGLAB_IPC_CMD_GET_VERSION, version);
 
@@ -1027,7 +1115,7 @@ static void runAboutView(Service* dglab, PadState* pad)
             redraw = true;
         }
 
-        if (!redraw && have_drawn)
+        if (!redraw && have_drawn && drawn_generation == g_display_generation)
             continue;
 
         memset(&state, 0, sizeof(state));
@@ -1041,6 +1129,7 @@ static void runAboutView(Service* dglab, PadState* pad)
             dglabFramebufferEnd();
 
             redraw = false;
+            drawn_generation = g_display_generation;
             have_drawn = true;
         }
     }
@@ -1079,6 +1168,7 @@ static void runAdvancedView(Service* dglab, PadState* pad)
     u32 revision = 0;
     u32 drawn_revision = ~0u;
     bool drawn_saved = false;
+    u32 drawn_generation = ~0u;
 
     (void)dglab;
 
@@ -1144,7 +1234,7 @@ static void runAdvancedView(Service* dglab, PadState* pad)
         }
 
         if (state.selected == drawn_selected && revision == drawn_revision &&
-            state.saved == drawn_saved)
+            state.saved == drawn_saved && drawn_generation == g_display_generation)
             continue;
 
         if (dglabFramebufferBegin(&canvas)) {
@@ -1154,6 +1244,7 @@ static void runAdvancedView(Service* dglab, PadState* pad)
             drawn_selected = state.selected;
             drawn_revision = revision;
             drawn_saved = state.saved;
+            drawn_generation = g_display_generation;
         }
     }
 }
@@ -1261,7 +1352,24 @@ int main(int argc, char* argv[])
     appLanguageLoad();
     appLanguageApply();
 
+    // Docking and undocking changes the frame the NRO draws into (720p handheld,
+    // 1080p docked), so the display is built again when the console says it
+    // moved. The hook only records that; the rebuild happens between frames.
+    AppletHookCookie display_hook;
+
+    appletHook(&display_hook, appletHookCallback, NULL);
+
     while (true) {
+        if (g_display_mode_dirty) {
+            g_display_mode_dirty = false;
+            appDisplaySuspend();
+
+            if (!appDisplayReopen()) {
+                showNotice(&pad, "DGLAB-NX: the framebuffer could not be created");
+                break;
+            }
+        }
+
         DglabMenuResult selection = runMenuView(&dglab, &pad);
 
         if (selection == DglabMenuResult_Exit)
@@ -1288,15 +1396,17 @@ int main(int argc, char* argv[])
         }
 
         // The BLE PoC view takes the console and the screen over, so the
-        // framebuffer is released while it runs and created again afterwards.
-        dglabFontClose();
-    dglabFramebufferClose();
+        // framebuffer and the shared font are released while it runs and built
+        // again afterwards - including the fonts, which used to be left closed
+        // (see appDisplayReopen).
+        appDisplaySuspend();
         dglabBlePocViewRun();
 
-        if (!dglabFramebufferOpen())
+        if (!appDisplayReopen())
             break;
     }
 
+    appletUnhook(&display_hook);
     dglabFramebufferClose();
 
     if (g_log_file != NULL)

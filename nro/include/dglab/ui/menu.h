@@ -24,8 +24,9 @@ typedef struct {
 
 void dglabMenuDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabMenuState* state);
 
-/// Moves the selection by `delta` and wraps around, so the caller does not have
-/// to do signed modulo arithmetic on an unsigned index.
+/// Moves the selection by `delta`, clamped to the ends of the list: the menu
+/// does not wrap around, so the caller does not have to do signed modulo
+/// arithmetic on an unsigned index either.
 unsigned dglabMenuMove(unsigned selected, int delta);
 
 /// Short name shown in the list.

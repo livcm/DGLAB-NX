@@ -87,9 +87,19 @@ static void formatAppId(DglabGlyphSource* font, int room, const char* id, char* 
 }
 
 // The code for the current payload, or NULL when there is nothing to show.
+//
+// A payload exists as soon as the console has a LAN address - that is what the
+// sysmodule's NET_QR answers, and the address is worth showing on its own - but
+// a code is only worth scanning while there is a socket listening behind it, so
+// the screen is where the two are put together. Before the server runs the
+// column says so instead (QrNotRunning), which is also what the reason below
+// picks: a QR code nobody is listening on just wastes the user's scan.
 static DglabQrCode* qrCode(const DglabScreenState* state)
 {
     if (!state->url_ok || !state->url || state->url[0] == '\0')
+        return NULL;
+
+    if (!state->status_ok || !statusHasWarning(state))
         return NULL;
 
     if (!g_cached || strcmp(g_cached_url, state->url) != 0) {
@@ -230,7 +240,8 @@ static void drawInfoColumn(DglabCanvas* canvas, const DglabFontSet* fonts,
     const DglabNetStatus* status = &state->status;
 
     for (int i = 0; i < 2; i++) {
-        dglabHintDraw(canvas, fonts->note, &adjust[i], x, DGLAB_PAGE_CONTENT_TOP, theme->text);
+        dglabHintDraw(canvas, fonts->icon, fonts->note, &adjust[i], x, DGLAB_PAGE_CONTENT_TOP,
+            theme->text);
         x += dglabHintWidth(fonts->note, &adjust[i]) + DGLAB_PAGE_HINT_GAP;
     }
 
@@ -338,7 +349,7 @@ static void drawSocketPage(DglabCanvas* canvas, const DglabFontSet* fonts,
     hints[4] = (DglabHint){ DglabButton_A, DglabButton_None,
         statusHasWarning(state) ? dglabString(DglabString_ActionStop)
                                 : dglabString(DglabString_ActionStart), };
-    dglabPageHints(canvas, fonts->body, hints, 5);
+    dglabPageHints(canvas, fonts->icon, fonts->body, hints, 5);
 }
 
 // The log page: the console's long text look - white body text at a 37px pitch -
@@ -389,7 +400,7 @@ static void drawLogPage(DglabCanvas* canvas, const DglabFontSet* fonts,
         dglabString(DglabString_ActionClose), };
     hints[2] = (DglabHint){ DglabButton_B, DglabButton_None,
         dglabString(DglabString_ActionBack), };
-    dglabPageHints(canvas, fonts->body, hints, 3);
+    dglabPageHints(canvas, fonts->icon, fonts->body, hints, 3);
 }
 
 void dglabScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,

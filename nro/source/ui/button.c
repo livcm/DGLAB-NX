@@ -8,6 +8,11 @@
 // in the screenshots an "A" is a hole in a filled disc, not a letter inside a
 // thin ring (docs/nro-ui.md has the pixel map). The letter is therefore painted
 // in the background colour - the icons only ever sit on the page background.
+//
+// The letter is drawn at DGLAB_TEXT_ICON (20px, passed in by the caller) and
+// centred on its ink box: a shape this small has no room for the descender space
+// the line box carries under the baseline, which is what pushed the letter into
+// the outline at the row size.
 #define ICON_HEIGHT 26
 #define FACE_RADIUS 13
 #define BOX_RADIUS 6
@@ -23,7 +28,9 @@ static void letterInBox(DglabCanvas* canvas, DglabGlyphSource* font, const char*
     int x, int y, int width, int height)
 {
     int text_width = dglabTextWidth(font, letter);
-    int text_y = y + (height - font->cell_height) / 2;
+    int ink_height = dglabTextInkHeight(font, letter);
+    int ink_top = dglabTextInkTop(font, letter);
+    int text_y = y + (height - ink_height) / 2 - ink_top;
 
     dglabTextDraw(canvas, font, x + (width - text_width) / 2, text_y, letter, knockout());
 }

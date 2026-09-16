@@ -27,7 +27,14 @@
 static int g_checks;
 static int g_failures;
 
+// The screen metrics and the page helpers are defined further down, next to the
+// block font they are built on; the early tests use them (the motion page is
+// rendered to look for ink in a band, and the menu one to count what it drew).
 static DglabFontSet blockFonts(void);
+static uint32_t screenPixel(int x, int y);
+static size_t screenBytes(void);
+static void beginPage(DglabCanvas* canvas, uint32_t background);
+static void setScreenSize(int width, int height, int scale_num, int scale_den);
 
 // Counts the pixels a screen changed away from the background it was filled
 // with, which is how these tests notice a screen that drew nothing at all.
@@ -88,6 +95,25 @@ static uint32_t pixelAt(int x, int y)
     return ((uint32_t)g_pixels[offset] << 24) | ((uint32_t)g_pixels[offset + 1] << 16) |
            ((uint32_t)g_pixels[offset + 2] << 8) | (uint32_t)g_pixels[offset + 3];
 }
+
+#define SCREEN_PIXEL_WIDTH 1280
+#define SCREEN_PIXEL_HEIGHT 720
+// The docked frame is the same layout at 1.5x (docs/nro-ui.md), so the pages are
+// rendered at both sizes into the same buffer.
+#define DOCK_PIXEL_WIDTH 1920
+#define DOCK_PIXEL_HEIGHT 1080
+#define DOCK_SCALE_NUM 3
+#define DOCK_SCALE_DEN 2
+
+static uint8_t g_screen_pixels[DOCK_PIXEL_WIDTH * DOCK_PIXEL_HEIGHT * 4];
+static int g_screen_width = SCREEN_PIXEL_WIDTH;
+static int g_screen_height = SCREEN_PIXEL_HEIGHT;
+static int g_scale_num = 1;
+static int g_scale_den = 1;
+// The canvas the page under test is being drawn on, for the region checks: they
+// ask it to convert the logical bounds of a region, so they cannot drift from
+// what the drawing calls do.
+static DglabCanvas g_page_canvas;
 
 static void testFillAndClip(void)
 {
@@ -293,8 +319,9 @@ static void testScreen(void)
     CHECK(changed > 1280 * 720 / 2);
 }
 
-// The mode menu: every entry draws, the selection wraps both ways, and a full
-// circle of moves comes back to where it started.
+// The mode menu: every entry draws, and the selection stops at the ends instead
+// of wrapping around (the list is a list; stepping off the bottom used to jump
+// back to the top, which reads as a lost keypress).
 static void testMenu(void)
 {
     static uint8_t screen_pixels[1280 * 720 * 4];
@@ -303,16 +330,19 @@ static void testMenu(void)
     DglabMenuState menu;
     DglabCanvas canvas;
 
-    CHECK(dglabMenuMove(0, -1) == DglabMenu_ItemCount - 1);
-    CHECK(dglabMenuMove(DglabMenu_ItemCount - 1, 1) == 0);
+    CHECK(dglabMenuMove(0, -1) == 0);
+    CHECK(dglabMenuMove(0, 1) == 1);
+    CHECK(dglabMenuMove(DglabMenu_ItemCount - 1, 1) == DglabMenu_ItemCount - 1);
     CHECK(dglabMenuMove(DglabMenu_ItemCount - 1, -1) == DglabMenu_ItemCount - 2);
+    CHECK(dglabMenuMove(1, -(int)DglabMenu_ItemCount) == 0);
+    CHECK(dglabMenuMove(1, (int)DglabMenu_ItemCount) == DglabMenu_ItemCount - 1);
 
     for (unsigned item = 0; item < (unsigned)DglabMenu_ItemCount; item++) {
         int changed;
 
         CHECK(dglabMenuItemName(item)[0] != '\0');
         CHECK(dglabMenuItemDescription(item)[0] != '\0');
-        CHECK(dglabMenuMove(item, (int)DglabMenu_ItemCount) == item);
+        CHECK(dglabMenuMove(item, 0) == item);
 
         memset(&menu, 0, sizeof(menu));
         menu.selected = item;
@@ -331,7 +361,6 @@ static void testMenu(void)
 // draws for both a connected and a missing Joy-Con.
 static void testMotionScreen(void)
 {
-    static uint8_t screen_pixels[1280 * 720 * 4];
     const uint32_t blue = DGLAB_RGBA(0, 0, 0xFF, 0xFF);
     DglabMotionScreenState state;
     DglabCanvas canvas;
@@ -353,26 +382,65 @@ static void testMotionScreen(void)
     state.server_running = true;
 
     // Same rule as the socket page: label on the left, value on the right, and
-    // the longest of each has to fit the content column together. The label is
-    // the localised string, so this covers the Chinese table too.
+    // the longest of each has to fit the content column together. The labels are
+    // the localised strings, so this covers the Chinese table too.
     {
-        int labels = dglabCanvasTextWidth(&kFont, 1, dglabString(DglabString_MotionVolume));
         int inside = DGLAB_PAGE_CONTENT_WIDTH;
         int widest = dglabCanvasTextWidth(&kFont, 1, "moving   waveform 100   100ms");
+        char strength_label[64];
+        int labels;
+
+        // The two label shapes the rows use: the strength rows suffix the local
+        // name with " A" / " B", the input rows are the localised Joy-Con names.
+        snprintf(strength_label, sizeof(strength_label), "%s A",
+            dglabString(DglabString_MotionVolume));
+
+        labels = dglabCanvasTextWidth(&kFont, 1, strength_label);
+        {
+            int joycon = dglabCanvasTextWidth(&kFont, 1,
+                dglabString(DglabString_MotionJoyConLeft));
+
+            if (joycon > labels)
+                labels = joycon;
+        }
 
         CHECK(labels + 24 + widest <= inside);
     }
 
-    dglabCanvasInit(&canvas, screen_pixels, 1280, 720, 1280 * 4);
-    dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
+    setScreenSize(SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, 1, 1);
+    beginPage(&canvas, blue);
     {
         DglabFontSet fonts = blockFonts();
 
         dglabMotionScreenDraw(&canvas, &fonts, &state);
     }
 
-    changed = countChangedPixels(screen_pixels, sizeof(screen_pixels), blue);
+    changed = countChangedPixels(g_screen_pixels, screenBytes(), blue);
     CHECK(changed > 1280 * 720 / 2);
+
+    // The page has no grey explanation under its last row any more: the note that
+    // used to sit there ("the channel strength is the volume ... set on the
+    // socket server page") restated what the rows above it already show, and the
+    // strength is edited on this very page. A note leaves ink in the band between
+    // the last row and the bottom bar, and the rows themselves stop well above
+    // it, so ink there means the note came back.
+    {
+        int top = DGLAB_PAGE_CONTENT_TOP + DGLAB_NOTE_LINE + 8 + 5 * DGLAB_ROW_HEIGHT + 20;
+        uint32_t page_background = dglabThemeGet()->background;
+        int found = 0;
+
+        for (int y = top; y < DGLAB_PAGE_BAR_Y; y++) {
+            for (int x = DGLAB_PAGE_CONTENT_X;
+                 x < DGLAB_PAGE_CONTENT_X + DGLAB_PAGE_CONTENT_WIDTH; x++) {
+                uint32_t pixel = screenPixel(x, y);
+
+                if (pixel != blue && pixel != page_background)
+                    found++;
+            }
+        }
+
+        CHECK(found == 0);
+    }
 }
 
 // The advanced screen: every setting has a name and a description, and the
@@ -463,6 +531,15 @@ static void testBlend(void)
     dglabCanvasBlend(&canvas, TEST_WIDTH, 4, white, 128);
 }
 
+// Every page, with the longest state each one can be given: the socket page with
+// a bound app and a full log, the advanced page on its last setting, and the menu
+// on every entry in turn. What is checked is where the ink ended up, not what it
+// says.
+//
+// `frames` is what the run is called in a failure message, `fonts` the sizes the
+// pages draw with: the same suite runs for the handheld frame and for the docked
+// one, whose glyphs are rasterised 1.5x larger while the layout stays in logical
+// units (docs/nro-ui.md).
 // ---------------------------------------------------------------------------
 // The screens at the console's metrics
 // ---------------------------------------------------------------------------
@@ -569,13 +646,8 @@ static void testWrap(void)
     }
 }
 
-#define SCREEN_PIXEL_WIDTH 1280
-#define SCREEN_PIXEL_HEIGHT 720
-
-static uint8_t g_screen_pixels[SCREEN_PIXEL_WIDTH * SCREEN_PIXEL_HEIGHT * 4];
-
-// The four sizes a screen draws with. The host has no system font, so every size
-// is the block font: what these tests check is where the layout puts things, and
+// The sizes a screen draws with. The host has no system font, so every size is
+// the block font: what these tests check is where the layout puts things, and
 // that does not depend on the face.
 static DglabFontSet blockFonts(void)
 {
@@ -585,24 +657,98 @@ static DglabFontSet blockFonts(void)
     fonts.body = fonts.title;
     fonts.value = fonts.title;
     fonts.note = fonts.title;
+    fonts.icon = fonts.title;
+
+    return fonts;
+}
+
+// The same, for the docked frame: the logical metrics are unchanged (that is
+// what keeps the layout identical) while the bitmaps come out 1.5x larger, the
+// way dglabTtfFontCreate() rasterises them at a 3/2 display scale. A glyph box
+// that is not scaled the same way as the pen is what would make text drift, so
+// the pages are rendered with this source as well.
+#define DOCK_BLOCK_SIZE 36
+#define DOCK_BLOCK_ASCII_WIDTH 18
+
+static uint8_t g_dock_bitmap[DOCK_BLOCK_SIZE * DOCK_BLOCK_SIZE];
+
+static bool dockBlockLookup(DglabGlyphSource* source, uint32_t codepoint, DglabGlyph* out)
+{
+    (void)source;
+
+    memset(out, 0, sizeof(*out));
+    out->pixels = g_dock_bitmap;
+    out->coverage = true;
+    out->stride = DOCK_BLOCK_SIZE;
+    out->width = codepoint < 0x80 ? DOCK_BLOCK_ASCII_WIDTH : DOCK_BLOCK_SIZE;
+    out->height = DOCK_BLOCK_SIZE;
+    out->bearing_x = 0;
+    out->bearing_y = BLOCK_ASCENT;
+    out->advance = codepoint < 0x80 ? BLOCK_ASCII_WIDTH : BLOCK_SIZE;
+
+    return true;
+}
+
+static DglabGlyphSource* dockBlockSource(void)
+{
+    static DglabGlyphSource source;
+
+    memset(g_dock_bitmap, 0xFF, sizeof(g_dock_bitmap));
+
+    source.lookup = dockBlockLookup;
+    source.line_height = BLOCK_LINE_HEIGHT;
+    source.ascent = BLOCK_ASCENT;
+    source.cell_height = BLOCK_CELL_HEIGHT;
+    source.context = NULL;
+
+    return &source;
+}
+
+static DglabFontSet dockFonts(void)
+{
+    DglabFontSet fonts;
+    DglabGlyphSource* source = dockBlockSource();
+
+    fonts.title = source;
+    fonts.body = source;
+    fonts.value = source;
+    fonts.note = source;
+    fonts.icon = source;
 
     return fonts;
 }
 
 static uint32_t screenPixel(int x, int y)
 {
-    size_t offset = ((size_t)y * SCREEN_PIXEL_WIDTH + (size_t)x) * 4u;
+    size_t offset = ((size_t)y * (size_t)g_screen_width + (size_t)x) * 4u;
 
     return ((uint32_t)g_screen_pixels[offset] << 24) |
            ((uint32_t)g_screen_pixels[offset + 1] << 16) |
            ((uint32_t)g_screen_pixels[offset + 2] << 8) | (uint32_t)g_screen_pixels[offset + 3];
 }
 
+// How much of the screen buffer is in use: the buffer itself is sized for the
+// largest frame these tests render.
+static size_t screenBytes(void)
+{
+    return (size_t)g_screen_width * (size_t)g_screen_height * 4u;
+}
+
 static void beginPage(DglabCanvas* canvas, uint32_t background)
 {
-    dglabCanvasInit(canvas, g_screen_pixels, SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT,
-        SCREEN_PIXEL_WIDTH * 4);
+    dglabCanvasInit(canvas, g_screen_pixels, g_screen_width, g_screen_height, g_screen_width * 4);
+    dglabCanvasSetScale(canvas, g_scale_num, g_scale_den);
     dglabCanvasFill(canvas, 0, 0, SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, background);
+    g_page_canvas = *canvas;
+}
+
+// Switches the whole page suite between the handheld frame and the docked one.
+static void setScreenSize(int width, int height, int scale_num, int scale_den)
+{
+    g_screen_width = width;
+    g_screen_height = height;
+    g_scale_num = scale_num;
+    g_scale_den = scale_den;
 }
 
 // Where a page may draw: the header band, the content column, the bottom bar, and
@@ -613,28 +759,36 @@ static void beginPage(DglabCanvas* canvas, uint32_t background)
 // were checked for text against a panel's border, and there is no border any
 // more, so what has to hold is that nothing leaves the column it belongs to.
 // The one pixel of slack absorbs the antialiased edge of the focus ring.
+//
+// The bounds are logical and go through the canvas, which is drawing the page:
+// the same check then holds for the docked 1080p frame, whose pixels are the
+// logical ones 1.5x larger.
 static bool pageRegion(int x, int y, bool wide)
 {
-    if (y <= DGLAB_PAGE_RULE_Y)
+    const DglabCanvas* canvas = &g_page_canvas;
+
+    if (y <= dglabCanvasScale(canvas, DGLAB_PAGE_RULE_Y))
         return true;
 
-    if (y >= DGLAB_PAGE_BAR_Y)
+    if (y >= dglabCanvasScale(canvas, DGLAB_PAGE_BAR_Y))
         return true;
 
-    if (x >= DGLAB_PAGE_WIDTH - 20)
+    if (x >= dglabCanvasScale(canvas, DGLAB_PAGE_WIDTH - 20))
         return true;
 
     // A one column page keeps to x=220..1060; a two column page uses the wider
     // band, because that is what the console does (docs/nro-ui.md). The clip
     // starts one pixel under the title rule, so a focused first row's ring is
     // drawn whole.
-    if (wide && x >= DGLAB_PAGE_WIDE_X - 1 &&
-        x <= DGLAB_PAGE_WIDE_X + DGLAB_PAGE_WIDE_WIDTH)
-        return y >= DGLAB_PAGE_CLIP_TOP - 1 && y < DGLAB_PAGE_CONTENT_BOTTOM;
+    if (wide && x >= dglabCanvasScale(canvas, DGLAB_PAGE_WIDE_X - 1) &&
+        x <= dglabCanvasScale(canvas, DGLAB_PAGE_WIDE_X + DGLAB_PAGE_WIDE_WIDTH))
+        return y >= dglabCanvasScale(canvas, DGLAB_PAGE_CLIP_TOP - 1) &&
+               y < dglabCanvasScale(canvas, DGLAB_PAGE_CONTENT_BOTTOM);
 
-    return x >= DGLAB_PAGE_CONTENT_X - 1 &&
-           x <= DGLAB_PAGE_CONTENT_X + DGLAB_PAGE_CONTENT_WIDTH &&
-           y >= DGLAB_PAGE_CLIP_TOP - 1 && y < DGLAB_PAGE_CONTENT_BOTTOM;
+    return x >= dglabCanvasScale(canvas, DGLAB_PAGE_CONTENT_X - 1) &&
+           x <= dglabCanvasScale(canvas, DGLAB_PAGE_CONTENT_X + DGLAB_PAGE_CONTENT_WIDTH) &&
+           y >= dglabCanvasScale(canvas, DGLAB_PAGE_CLIP_TOP - 1) &&
+           y < dglabCanvasScale(canvas, DGLAB_PAGE_CONTENT_BOTTOM);
 }
 
 static void checkPageStaysInItsRegions(const char* name, uint32_t background, bool wide)
@@ -645,8 +799,8 @@ static void checkPageStaysInItsRegions(const char* name, uint32_t background, bo
     int outside = 0;
     int drawn = 0;
 
-    for (int y = 0; y < SCREEN_PIXEL_HEIGHT; y++) {
-        for (int x = 0; x < SCREEN_PIXEL_WIDTH; x++) {
+    for (int y = 0; y < g_screen_height; y++) {
+        for (int x = 0; x < g_screen_width; x++) {
             uint32_t pixel = screenPixel(x, y);
 
             if (pixel == background || pixel == page_background)
@@ -676,10 +830,14 @@ static void checkPageStaysInItsRegions(const char* name, uint32_t background, bo
     // Both rules are white and one pixel tall, and the margin beside them is
     // left alone: the console reserves the grey #4D4D4D for the rows inside the
     // page (docs/nro-ui.md).
-    CHECK(screenPixel(640, DGLAB_PAGE_RULE_Y) == dglabThemeGet()->rule);
-    CHECK(screenPixel(640, DGLAB_PAGE_BAR_Y) == dglabThemeGet()->rule);
-    CHECK(screenPixel(24, DGLAB_PAGE_BAR_Y - 2) == page_background);
-    CHECK(screenPixel(24, DGLAB_PAGE_BAR_Y + 2) == page_background);
+    CHECK(screenPixel(dglabCanvasScale(&g_page_canvas, 640),
+              dglabCanvasScale(&g_page_canvas, DGLAB_PAGE_RULE_Y)) == dglabThemeGet()->rule);
+    CHECK(screenPixel(dglabCanvasScale(&g_page_canvas, 640),
+              dglabCanvasScale(&g_page_canvas, DGLAB_PAGE_BAR_Y)) == dglabThemeGet()->rule);
+    CHECK(screenPixel(dglabCanvasScale(&g_page_canvas, 24),
+              dglabCanvasScale(&g_page_canvas, DGLAB_PAGE_BAR_Y) - 3) == page_background);
+    CHECK(screenPixel(dglabCanvasScale(&g_page_canvas, 24),
+              dglabCanvasScale(&g_page_canvas, DGLAB_PAGE_BAR_Y) + 3) == page_background);
 }
 
 // The console draws a button as a solid shape with its letter knocked out, not
@@ -700,7 +858,7 @@ static void testButtonIcons(void)
 
     dglabButtonIcon(&canvas, font, DglabButton_A, 0, 0, icon);
 
-    CHECK(pixelAt(13, 0) == theme.background);  // above the disc
+    CHECK(pixelAt(1, 1) == theme.background);   // the box corner outside the disc
     CHECK(pixelAt(1, 13) == icon);              // the disc's own fill
     CHECK(pixelAt(13, 13) == theme.background); // the knocked out letter
     CHECK(pixelAt(0, 0) == theme.background);   // the corner outside the circle
@@ -708,6 +866,152 @@ static void testButtonIcons(void)
     // The two shoulders are wider than a face button, so a ZL+ZR hint reads as
     // two icons rather than as one wide one.
     CHECK(dglabButtonIconWidth(DglabButton_ZL) > dglabButtonIconWidth(DglabButton_A));
+
+    dglabThemeSet(NULL);
+}
+
+// A glyph source whose ink is a solid rectangle: the shape of one capital letter
+// of a font of that size. The button icon is drawn with DGLAB_TEXT_ICON (20px),
+// whose capitals are about 14px tall, and the letter has to sit inside the 26px
+// shape without touching the outline.
+#define INK_MAX 64
+#define INK_FONTS 4
+
+typedef struct {
+    DglabGlyphSource source;
+    uint8_t bitmap[INK_MAX * INK_MAX];
+    int width;
+    int height;
+    int ascent;
+} InkFont;
+
+static bool inkLookup(DglabGlyphSource* source, uint32_t codepoint, DglabGlyph* out)
+{
+    const InkFont* font = source->context;
+
+    (void)codepoint;
+
+    memset(out, 0, sizeof(*out));
+    out->pixels = font->bitmap;
+    out->coverage = true;
+    out->stride = font->width;
+    out->width = font->width;
+    out->height = font->height;
+    out->bearing_x = 0;
+    out->bearing_y = font->ascent;
+    out->advance = font->width;
+
+    return true;
+}
+
+static DglabGlyphSource* inkSource(int width, int height, int ascent)
+{
+    static InkFont fonts[INK_FONTS];
+    static unsigned used;
+    InkFont* font = &fonts[used++ % INK_FONTS];
+
+    font->width = width;
+    font->height = height;
+    font->ascent = ascent;
+    memset(font->bitmap, 0xFF, sizeof(font->bitmap));
+
+    font->source.lookup = inkLookup;
+    font->source.ascent = ascent;
+    font->source.cell_height = ascent + height / 4;
+    font->source.line_height = ascent + height / 4;
+    font->source.context = font;
+
+    return &font->source;
+}
+
+// The first and last row of the letter inside one of the icon's columns: a run of
+// background pixels inside the shape, which is what the knocked out letter is.
+static void letterRows(int column, int* first, int* last)
+{
+    uint32_t page_background = dglabThemeGet()->background;
+
+    *first = -1;
+    *last = -1;
+
+    for (int y = 0; y < DGLAB_BUTTON_ICON_HEIGHT; y++) {
+        if (pixelAt(column, y) != page_background)
+            continue;
+
+        if (*first < 0)
+            *first = y;
+
+        *last = y;
+    }
+}
+
+// The letter keeps its distance from the outline. Drawing it with the row sized
+// font, centred on the line box - which is what the icons used to do - put its
+// ink 1px from the edge of the disc, and that is what the user's screenshot of
+// the footer shows.
+static void testButtonIconLetterMargins(void)
+{
+    const uint32_t icon = DGLAB_RGBA(0xFF, 0xFF, 0xFF, 0xFF);
+    DglabTheme theme = dglabThemeDark;
+    DglabGlyphSource* font = inkSource(14, 14, 22);
+    int ink_height = dglabTextInkHeight(font, "A");
+    DglabCanvas canvas;
+    int first;
+    int last;
+
+    dglabThemeSet(&theme);
+
+    dglabCanvasInit(&canvas, g_pixels, TEST_WIDTH, TEST_HEIGHT, TEST_WIDTH * 4);
+    dglabCanvasFill(&canvas, 0, 0, TEST_WIDTH, TEST_HEIGHT, theme.background);
+
+    // A round face button, measured down its middle: the disc is filled, so the
+    // only background in that column is the letter.
+    dglabButtonIcon(&canvas, font, DglabButton_A, 0, 0, icon);
+
+    letterRows(13, &first, &last);
+
+    CHECK(first >= 5);
+    CHECK(last <= DGLAB_BUTTON_ICON_HEIGHT - 6);
+    CHECK(last - first + 1 == ink_height);
+
+    // And the same in one of the boxed shapes, which the letters of L and ZL sit
+    // in. The box is a rounded rectangle, so its middle column is solid too.
+    dglabCanvasFill(&canvas, 0, 0, TEST_WIDTH, TEST_HEIGHT, theme.background);
+    dglabButtonIcon(&canvas, font, DglabButton_L, 0, 0, icon);
+
+    letterRows(13, &first, &last);
+
+    CHECK(first >= 5);
+    CHECK(last <= DGLAB_BUTTON_ICON_HEIGHT - 6);
+
+    dglabThemeSet(NULL);
+}
+
+// The action text of a hint is drawn in whatever font the page passes, but the
+// button icon is always drawn in the icon font: the two are separate arguments,
+// and this is what holds them apart.
+static void testHintIconUsesTheIconFont(void)
+{
+    const uint32_t icon = DGLAB_RGBA(0xFF, 0xFF, 0xFF, 0xFF);
+    DglabTheme theme = dglabThemeDark;
+    DglabGlyphSource* icon_font = inkSource(12, 12, 18);
+    DglabGlyphSource* text_font = inkSource(24, 30, 34);
+    DglabHint hint = { DglabButton_L, DglabButton_None, "ab" };
+    DglabCanvas canvas;
+    int first;
+    int last;
+
+    dglabThemeSet(&theme);
+
+    dglabCanvasInit(&canvas, g_pixels, TEST_WIDTH, TEST_HEIGHT, TEST_WIDTH * 4);
+    dglabCanvasFill(&canvas, 0, 0, TEST_WIDTH, TEST_HEIGHT, theme.background);
+
+    dglabHintDraw(&canvas, icon_font, text_font, &hint, 0, 0, icon);
+
+    letterRows(13, &first, &last);
+
+    // The hole is the icon font's letter, not the 30px block the action text
+    // would leave if the two were swapped.
+    CHECK(last - first + 1 == 12);
 
     dglabThemeSet(NULL);
 }
@@ -751,10 +1055,16 @@ static void checkContentClearsTheBar(const char* name)
 {
     uint32_t background = dglabThemeGet()->background;
     int found = 0;
+    const DglabCanvas* canvas = &g_page_canvas;
+    // The last few logical pixels above the bar, which is where a column that was
+    // cut off rather than laid out leaves ink.
+    int top = dglabCanvasScale(canvas, DGLAB_PAGE_BAR_Y - 6);
+    int bottom = dglabCanvasScale(canvas, DGLAB_PAGE_BAR_Y);
+    int left = dglabCanvasScale(canvas, DGLAB_PAGE_CONTENT_X);
+    int right = dglabCanvasScale(canvas, DGLAB_PAGE_CONTENT_X + DGLAB_PAGE_CONTENT_WIDTH);
 
-    for (int y = DGLAB_PAGE_BAR_Y - 6; y < DGLAB_PAGE_BAR_Y; y++) {
-        for (int x = DGLAB_PAGE_CONTENT_X; x < DGLAB_PAGE_CONTENT_X + DGLAB_PAGE_CONTENT_WIDTH;
-             x++) {
+    for (int y = top; y < bottom; y++) {
+        for (int x = left; x < right; x++) {
             if (screenPixel(x, y) == background)
                 continue;
 
@@ -772,11 +1082,115 @@ static void checkContentClearsTheBar(const char* name)
     CHECK(found == 0);
 }
 
-// Every page, in both languages, with the longest state each one can be given:
-// the socket page with a bound app and a full log, the advanced page on its
-// last setting, and the menu on every entry in turn. What is checked is where
-// the ink ended up, not what it says.
-static void testEveryPageStaysInItsRegions(void)
+// A QR code is only worth showing while a socket is listening behind it. The
+// payload reaches the page as soon as the console has a LAN address - NET_QR
+// answers then, because the address on its own is useful - and the page used to
+// paint the code anyway, which is the "the server is not even started and the
+// code is already there" the user saw.
+static void testQrOnlyWhileTheServerRuns(void)
+{
+    static const char* const url =
+        "https://www.dungeon-lab.com/app-download.php#DGLAB-SOCKET#"
+        "ws://192.168.1.161:9999/8f2a4c1e-9b77-4d21-8c3a-5e6f7a8b9c0d";
+    const uint32_t blue = DGLAB_RGBA(0, 0, 0xFF, 0xFF);
+    DglabFontSet fonts = blockFonts();
+    DglabScreenState state;
+    DglabCanvas canvas;
+
+    setScreenSize(SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, 1, 1);
+
+    // The code is the only thing on this page painted pure black, and it is
+    // always in the code's own column.
+    for (unsigned variant = 0; variant < 2; variant++) {
+        bool running = variant != 0;
+        int black = 0;
+
+        memset(&state, 0, sizeof(state));
+        state.status_ok = true;
+        state.status.state = running ? DglabNetState_Listening : DglabNetState_Idle;
+        state.status.port = 9999;
+        snprintf((char*)state.status.ip_text, sizeof(state.status.ip_text), "192.168.1.161");
+        snprintf((char*)state.status.controller_id, DGLAB_NET_ID_LEN,
+            "8f2a4c1e-9b77-4d21-8c3a-5e6f7a8b9c0d");
+        state.url = url;
+        state.url_ok = true;
+
+        beginPage(&canvas, blue);
+        dglabScreenDraw(&canvas, &fonts, &state);
+
+        for (int y = DGLAB_PAGE_CONTENT_TOP; y < DGLAB_PAGE_CONTENT_BOTTOM; y++) {
+            for (int x = DGLAB_SOCKET_QR_X; x < DGLAB_SOCKET_QR_X + DGLAB_SOCKET_QR_WIDTH;
+                 x++) {
+                if (screenPixel(x, y) == dglabThemeGet()->black)
+                    black++;
+            }
+        }
+
+        if (running)
+            CHECK(black > 1000);
+        else
+            CHECK(black == 0);
+    }
+}
+
+// The docked frame draws the same layout 1.5x larger. Two things have to hold for
+// that to be invisible: rectangles that share an edge still share it (a seam
+// would run along every rule and every row), and a glyph whose bitmap was
+// rasterised 1.5x larger still lands where the logical metrics put it.
+static void testScaledCanvas(void)
+{
+    const uint32_t red = DGLAB_RGBA(0xFF, 0, 0, 0xFF);
+    const uint32_t blue = DGLAB_RGBA(0, 0, 0, 0xFF);
+    const uint32_t text = DGLAB_RGBA(0xFF, 0xFF, 0xFF, 0xFF);
+    DglabFontSet fonts = dockFonts();
+    DglabCanvas canvas;
+    int gap = 0;
+
+    setScreenSize(DOCK_PIXEL_WIDTH, DOCK_PIXEL_HEIGHT, DOCK_SCALE_NUM, DOCK_SCALE_DEN);
+    beginPage(&canvas, blue);
+
+    // Two 100x100 logical rectangles side by side.
+    dglabCanvasFill(&canvas, 100, 100, 100, 100, red);
+    dglabCanvasFill(&canvas, 200, 100, 100, 100, red);
+
+    for (int y = dglabCanvasScale(&canvas, 100); y < dglabCanvasScale(&canvas, 200); y++) {
+        for (int x = dglabCanvasScale(&canvas, 100); x < dglabCanvasScale(&canvas, 300); x++) {
+            if (screenPixel(x, y) != red)
+                gap++;
+        }
+    }
+
+    CHECK(gap == 0);
+    CHECK(screenPixel(dglabCanvasScale(&canvas, 300), dglabCanvasScale(&canvas, 150)) == blue);
+
+    // A rule is one logical pixel; at this scale it must cover at least the one
+    // buffer pixel it started as, and never less.
+    dglabCanvasHLine(&canvas, 100, 400, 100, red);
+    CHECK(screenPixel(dglabCanvasScale(&canvas, 150), dglabCanvasScale(&canvas, 400)) == red);
+
+    // The metrics a screen reads stay logical at this scale, which is what keeps
+    // the layout identical to the handheld one.
+    CHECK(dglabTextWidth(fonts.body, "中") == BLOCK_SIZE);
+    CHECK(dglabTextWidth(fonts.body, "AB") == 2 * BLOCK_ASCII_WIDTH);
+
+    // One CJK block covers its whole 24 logical pixel cell, so at this scale its
+    // ink has to cover 36 buffer pixels starting at the pen.
+    dglabCanvasFill(&canvas, 0, 0, SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, blue);
+    dglabTextDraw(&canvas, fonts.body, 300, 300, "中", text);
+
+    {
+        int left = dglabCanvasScale(&canvas, 300);
+        int top = dglabCanvasScale(&canvas, 300);
+
+        CHECK(screenPixel(left, top) == text);
+        CHECK(screenPixel(left + DOCK_BLOCK_SIZE - 1, top + DOCK_BLOCK_SIZE - 1) == text);
+        CHECK(screenPixel(left + DOCK_BLOCK_SIZE, top) == blue);
+    }
+
+    setScreenSize(SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, 1, 1);
+}
+
+static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
 {
     static const char* log_lines[DGLAB_SCREEN_LOG_LINES] = {
         "sleep watch unavailable rc=0x000108C3",
@@ -792,32 +1206,26 @@ static void testEveryPageStaysInItsRegions(void)
         "rx ping #1",
         "waveform ch A, 48 slots",
     };
-    static const DglabLanguage languages[2] = { DglabLanguage_English,
-        DglabLanguage_ChineseSimplified };
-    DglabFontSet fonts = blockFonts();
     const uint32_t blue = DGLAB_RGBA(0, 0, 0xFF, 0xFF);
     DglabMotionFeedConfig config;
     DglabCanvas canvas;
 
     dglabMotionSettingsDefault(&config);
 
-    for (size_t lang = 0; lang < sizeof(languages) / sizeof(languages[0]); lang++) {
-        char name[64];
-
-        dglabStringsSetLanguage(languages[lang]);
-
+    {
         // The menu, on every entry: the description under the selected one is
         // what changes the page's height.
         for (unsigned item = 0; item < (unsigned)DglabMenu_ItemCount; item++) {
             DglabMenuState menu;
+            char name[96];
 
             memset(&menu, 0, sizeof(menu));
             menu.selected = item;
             menu.sysmodule_ok = (item % 2) == 0;
 
-            snprintf(name, sizeof(name), "menu %u", item);
+            snprintf(name, sizeof(name), "%s menu %u", frames, item);
             beginPage(&canvas, blue);
-            dglabMenuDraw(&canvas, &fonts, &menu);
+            dglabMenuDraw(&canvas, fonts, &menu);
             checkPageStaysInItsRegions(name, blue, false);
         }
 
@@ -828,6 +1236,7 @@ static void testEveryPageStaysInItsRegions(void)
             bool running = (variant & 1) != 0;
             bool have_qr = (variant & 2) != 0;
             DglabScreenState screen;
+            char name[96];
 
             memset(&screen, 0, sizeof(screen));
             screen.status_ok = true;
@@ -862,9 +1271,9 @@ static void testEveryPageStaysInItsRegions(void)
             screen.log_lines = log_lines;
             screen.log_count = DGLAB_SCREEN_LOG_LINES;
 
-            snprintf(name, sizeof(name), "socket %u", variant);
+            snprintf(name, sizeof(name), "%s socket %u", frames, variant);
             beginPage(&canvas, blue);
-            dglabScreenDraw(&canvas, &fonts, &screen);
+            dglabScreenDraw(&canvas, fonts, &screen);
             checkPageStaysInItsRegions(name, blue, true);
             checkContentClearsTheBar(name);
 
@@ -874,19 +1283,22 @@ static void testEveryPageStaysInItsRegions(void)
                 screen.log_open = true;
                 screen.log_offset = 0;
                 beginPage(&canvas, blue);
-                dglabScreenDraw(&canvas, &fonts, &screen);
-                checkPageStaysInItsRegions("log top", blue, false);
+                dglabScreenDraw(&canvas, fonts, &screen);
+                snprintf(name, sizeof(name), "%s log top", frames);
+                checkPageStaysInItsRegions(name, blue, false);
 
                 screen.log_offset = 400;
                 beginPage(&canvas, blue);
-                dglabScreenDraw(&canvas, &fonts, &screen);
-                checkPageStaysInItsRegions("log scrolled", blue, false);
+                dglabScreenDraw(&canvas, fonts, &screen);
+                snprintf(name, sizeof(name), "%s log scrolled", frames);
+                checkPageStaysInItsRegions(name, blue, false);
             }
         }
 
         // The motion page, with and without the right Joy-Con.
         for (unsigned variant = 0; variant < 2; variant++) {
             DglabMotionScreenState motion;
+            char name[96];
 
             memset(&motion, 0, sizeof(motion));
             motion.left_connected = true;
@@ -903,9 +1315,9 @@ static void testEveryPageStaysInItsRegions(void)
             motion.last_upload_tone = DglabCmdTone_Error;
             motion.server_running = variant == 0;
 
-            snprintf(name, sizeof(name), "motion %u", variant);
+            snprintf(name, sizeof(name), "%s motion %u", frames, variant);
             beginPage(&canvas, blue);
-            dglabMotionScreenDraw(&canvas, &fonts, &motion);
+            dglabMotionScreenDraw(&canvas, fonts, &motion);
             checkPageStaysInItsRegions(name, blue, false);
             checkContentClearsTheBar(name);
         }
@@ -918,14 +1330,16 @@ static void testEveryPageStaysInItsRegions(void)
             DglabAdvancedState advanced;
 
             for (size_t i = 0; i < sizeof(settings) / sizeof(settings[0]); i++) {
+                char name[96];
+
                 memset(&advanced, 0, sizeof(advanced));
                 advanced.config = &config;
                 advanced.selected = settings[i];
                 advanced.saved = i == 0;
 
-                snprintf(name, sizeof(name), "advanced %u", settings[i]);
+                snprintf(name, sizeof(name), "%s advanced %u", frames, settings[i]);
                 beginPage(&canvas, blue);
-                dglabAdvancedDraw(&canvas, &fonts, &advanced);
+                dglabAdvancedDraw(&canvas, fonts, &advanced);
                 checkPageStaysInItsRegions(name, blue, false);
             }
         }
@@ -933,23 +1347,47 @@ static void testEveryPageStaysInItsRegions(void)
         // The about page, with the longest url the row can carry.
         {
             DglabAboutState about;
+            char name[96];
 
             memset(&about, 0, sizeof(about));
             about.preference = DglabLanguage_Auto;
-            about.resolved = languages[lang];
+            about.resolved = DglabLanguage_ChineseSimplified;
             about.version.major = 1;
             about.version.minor = 2;
             about.version.patch = 3;
             about.github_url = "https://github.com/livcm/DGLAB-NX";
 
+            snprintf(name, sizeof(name), "%s about", frames);
             beginPage(&canvas, blue);
-            dglabAboutDraw(&canvas, &fonts, &about);
-            checkPageStaysInItsRegions("about", blue, false);
-            checkContentClearsTheBar("about");
+            dglabAboutDraw(&canvas, fonts, &about);
+            checkPageStaysInItsRegions(name, blue, false);
+            checkContentClearsTheBar(name);
         }
+    }
+}
+
+// The same suite for every language and for both frames the NRO draws into: the
+// handheld 720p one, and the docked 1080p one whose whole point is that the
+// layout is unchanged.
+static void testEveryPageStaysInItsRegions(void)
+{
+    static const DglabLanguage languages[2] = { DglabLanguage_English,
+        DglabLanguage_ChineseSimplified };
+    DglabFontSet handheld = blockFonts();
+    DglabFontSet docked = dockFonts();
+
+    for (size_t lang = 0; lang < sizeof(languages) / sizeof(languages[0]); lang++) {
+        dglabStringsSetLanguage(languages[lang]);
+
+        setScreenSize(SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, 1, 1);
+        checkEveryPage("720p", &handheld);
+
+        setScreenSize(DOCK_PIXEL_WIDTH, DOCK_PIXEL_HEIGHT, DOCK_SCALE_NUM, DOCK_SCALE_DEN);
+        checkEveryPage("1080p", &docked);
     }
 
     // The other tests and the previews assume the default table.
+    setScreenSize(SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, 1, 1);
     dglabStringsSetLanguage(DglabLanguage_English);
 }
 
@@ -967,11 +1405,15 @@ int main(void)
     testFillAndClip();
     testFrame();
     testText();
+    testScaledCanvas();
     testWrap();
     testBlend();
     testButtonIcons();
+    testButtonIconLetterMargins();
+    testHintIconUsesTheIconFont();
     testFirstRowFocusRingIsWhole();
     testQr();
+    testQrOnlyWhileTheServerRuns();
     testScreen();
     testMenu();
     testMotionScreen();

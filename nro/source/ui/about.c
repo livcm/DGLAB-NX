@@ -111,5 +111,5 @@ void dglabAboutDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabA
         dglabString(DglabString_ActionLanguage), };
     hints[1] = (DglabHint){ DglabButton_B, DglabButton_None,
         dglabString(DglabString_ActionBack), };
-    dglabPageHints(canvas, fonts->body, hints, 2);
+    dglabPageHints(canvas, fonts->icon, fonts->body, hints, 2);
 }
