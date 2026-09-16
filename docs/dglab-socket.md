@@ -255,7 +255,39 @@ sysmodule 的线程栈只有 16KB（主线程来自 NPDM 的 `main_thread_stack_
 
 同一类缓冲区（`sendError`、`sendHeartbeat`、绑定回复帧、`dglabNetServerOnMessage` 的解析
 结构）也一并挪到了 `.bss`，核心代码现在没有接近 2KB 的栈帧。量栈的方法写在
-`sysmodule/AGENTS.md` 的"线程与栈"一节。**每个连接自己的缓冲区不在此列**：那两个必须
+`sysmodule/AGENTS.md` 的"线程与栈"一节。
+
+**2026-09-16：第二次报告与结论**。又收到一次同样的症状（按 ZL/ZR → NRO 卡死 → 退出重进
+提示 sysmodule 未运行）。当前代码里那两个缓冲区已经在 `.bss`（`-fstack-usage` 复核过，这
+条链上最大的帧是 `dglabNetServerLog` 的 480 字节 + newlib 的 `printf`），**把
+`release/00FF072107210721/` 重新装到 SD 卡并重启之后不再复现**（用户实机确认）。
+
+这一轮的教训不是某个 API 用法，而是流程：
+
+- 症状组（**NRO 卡死 + 退出重进提示 sysmodule 未运行**）的含义是 **sysmodule 进程不在了**
+  ——不是"某一帧画错"也不是"IPC 慢"。而"SD 卡上装的是旧二进制"与"代码真有 bug"表现**完全
+  一样**：旧进程照样会以栈溢出这种方式死掉；
+- 所以看到这组症状，先排除自己装的版本，再怀疑代码。2026-09-16 起 sysmodule 会在启动与每
+  次开服时把 `git describe` 得到的构建标识写进日志（`dglab/build.h`），`dglab-sys.log`
+  开头那行就是答案；没有这一行说明装的是更老的版本；
+- 排查顺序固定为：① 比对日志里的构建标识（旧版本没有这一行）→ ② `dglab-sys.log`
+  （最后一行停在哪儿）→ ③ `sdmc:/atmosphere/crash_reports/…_00ff072107210721.log`。
+
+同时补了两条与现象无关但同属这一类的加固：
+
+- NPDM 的 `main_thread_stack_size` 从 `0x4000`(16KB) 提到 `0x8000`(32KB)——这条链上跑着
+  libnx 的 IPC、newlib 的 `printf` 与 fs 写入，16KB 的余量本来就不合理；
+- 新增 `make -C tests/stack`：用 devkitA64 的 gcc 以 `-fstack-usage` 编译 sysmodule 全部源码，
+  除文档里说明过的几个例外（两个每连接接收缓冲 + ble_poc 的三个 scan 结果结构）外，任何
+  函数栈帧 ≥ 1KB 就失败。这条把上面那节的人工测量变成了每次都能跑的检查。
+
+如果再复现（目前没有用到），按证据分流：有崩溃报告（`sdmc:/atmosphere/crash_reports/` 里
+`…_00ff072107210721.log`）且回溯落在 `NET_WAVEFORM` 链 → 按栈的规则处理；没有崩溃报告、
+`dglab-sys.log` 停在某条 `tx …` 之前且 NRO 几秒后自己恢复 → 说明是 IPC 线程在持锁状态下被
+socket 写入挡住（`SO_SNDTIMEO` 5 秒），那就把波形上传统统改成只入队（由 tick 线程发）、
+客户端写改成 `MSG_DONTWAIT` + 部分写失败即断开。
+
+**每个连接自己的缓冲区不在此列**：那两个必须
 留在对应线程的栈上，因为两个客户端可能同时在线。
 
 ### 日志文件（SD 卡）
@@ -265,7 +297,12 @@ sysmodule 的线程栈只有 16KB（主线程来自 NPDM 的 `main_thread_stack_
 | 文件 | 写入方 | 内容 |
 | --- | --- | --- |
 | `sdmc:/switch/DGLAB-NX/logs/dglab-net.log` | NRO | `NET_LOG` 的增量副本（服务端日志的实际落盘处） |
-| `sdmc:/switch/DGLAB-NX/logs/dglab-sys.log` | sysmodule | 服务端自己的日志副本（NRO 挂掉时仍有记录） |
+| `sdmc:/switch/DGLAB-NX/logs/dglab-sys.log` | sysmodule | 服务端自己的日志副本（NRO 挂掉时仍有记录），**开头一行就是构建标识** |
+
+`dglab-sys.log` 第一行形如 `server start, dglab 645f698-dirty`，是 sysmodule 自己在
+`dglabNetSocketStart()` 里写的：`git describe --always --dirty` 的结果，构建时由 Makefile
+注入（`sysmodule/include/dglab/build.h`）。装的是哪一版一看就知道——这一条是 2026-09-16
+那次"旧二进制看起来像 bug"的教训（见上一节）。
 
 （曾经还有一个 `dglab-boot.log` 记录 NRO 的启动步骤，用来查"无 sysmodule 时黑屏"。
 经实机确认无 sysmodule 时 NRO 可以正常启动，该文件已按要求移除；黑屏那条留到以后完善

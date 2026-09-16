@@ -183,7 +183,9 @@ DG-LAB Bluetooth Protocol 的官方参考仓库为：
 
 1. 构建受影响的组件；
 2. 运行已有测试；
-3. 必要时进行 Switch 实机验证；
+3. 必要时进行 Switch 实机验证：**改了 sysmodule 就先 `make -C sysmodule package`
+   覆盖 SD 卡上的 `<TITLE_ID>/` 并重启主机**，否则后台跑的还是旧二进制，验证到的是旧代码
+   （症状与代码 bug 一样，见 `sysmodule/AGENTS.md` 的"改完必须重装"）；
 4. 检查 Git diff；
 5. 确认没有无关修改；
 6. 在最终报告中说明实际执行过的验证。

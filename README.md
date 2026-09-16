@@ -53,7 +53,7 @@ DG-LAB App（手机，负责 BLE）
 | `overlay/` | Tesla / Ultrahand overlay（未实现） |
 | `mods/` | 特定游戏的联动（未实现） |
 | `common/` | 组件间共享的 IPC 定义与公共类型 |
-| `tests/` | 主机侧测试（protocol / ipc / net / qr / canvas） |
+| `tests/` | 主机侧测试（protocol / ipc / net / qr / canvas / lang / motion / stack） |
 | `docs/` | 技术文档，见[文档](#文档) |
 | `release/` | 构建产物（不提交） |
 
@@ -152,11 +152,14 @@ make -C tests/protocol   # Coyote V3 编解码、强度状态机、会话层
 make -C tests/ipc        # 手写 CMIF 服务端与 libnx 客户端的发法是否对得上
 make -C tests/net        # WebSocket 帧、Socket 协议、服务端会话、真实回环端到端
 make -C tests/qr         # 二维码与 CoreImage 参考矩阵逐模块比对
-make -C tests/canvas     # canvas 裁剪、字体位序、整屏排版
+make -C tests/canvas     # canvas 裁剪、字体位序、整屏排版（720p 与 1080p 各一遍）
 make -C tests/lang       # JSON 读取、语言文件加载、lang/*.json 是否完整
+make -C tests/motion     # 体感映射与参数文件
+make -C tests/stack      # sysmodule 的线程栈预算（用 devkitA64 的 gcc 量栈帧）
 ```
 
-这些测试都不需要 Switch，也不需要 devkitA64（只有 `tests/ipc` 要读 libnx 头文件）。
+这些测试都不需要 Switch（`tests/stack` 要 devkitA64 的编译器来量 aarch64 的栈帧，
+`tests/ipc` 要读 libnx 的头文件）。
 界面排版还能在电脑上渲染成图片直接看，用法见 `tests/canvas/tools/render_preview.c`
 文件头部注释。
 

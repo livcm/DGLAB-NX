@@ -88,20 +88,33 @@ UI 风格可以模仿 HOS，但实现应与 HOS 系统 UI 解耦。
   **界面里没有滑块**，数值一律用文字显示；
 - 行以外的控件（二维码、日志正文）由屏幕自己按列/按行距画在内容区里，位置必须来自
   `dglabListMeasure` 之类的实测结果，不要另写常数；
-- 字号只能用 `text.h` 里的四个（`DGLAB_TEXT_TITLE` 28 / `BODY` 24 / `VALUE` 22 /
-  `NOTE` 18），由 `DglabFontSet` 一起传给屏幕。不要在屏幕里挑新字号，也不要假设
-  只有一个字体实例；
+- 字号只能用 `text.h` 里的五个（`DGLAB_TEXT_TITLE` 28 / `BODY` 24 / `VALUE` 22 /
+  `ICON` 20 / `NOTE` 18），由 `DglabFontSet` 一起传给屏幕。不要在屏幕里挑新字号，也不要
+  假设只有一个字体实例；
 - 按键提示只能是"**按键图标 + 动作文字**"（`dglab/ui/button.h` + `dglab/ui/page.h` 的
   `DglabHint`，一个提示可以带两个图标，例如 ZL+ZR、←+→）。**按键名不进 `lang/`**：
   图标不是可翻译内容，`lang/` 里只放"返回""启动服务端"这类动作；
   新动作 = `strings.h` 加 `DglabString_Action*`；
 - 按键图标一律"**实心形状 + 字母挖空**"（字母用页面背景色画进实心盘里），不要画细圆环；
+  字母用 `DGLAB_TEXT_ICON`(20px) 并**按字形墨迹盒居中**（`dglabTextInkTop`/`InkHeight`）：
+  用行字号或按 line box 居中都会让字母顶到 26px 的图标框边（docs/nro-ui.md 有实测）；
+  `dglabHintDraw`/`dglabPageHints` 因此要显式传两个字体（图标一个、动作文字一个）；
 - 退出规则：**Console 页（BLE PoC console、`showNotice`、`showStartupNotice`）用 `+`**，
   **其余 framebuffer 页面一律 `B`**，`+` 在这些页面不响应。改按键语义必须同时改底栏提示，
   两者不一致比没有提示更糟；
 - 需要多于一屏内容的页面必须给出滚动方式：有光标的页面用光标驱动，无光标的页面用
   专门的滚动键（日志子页用 ↑↓）。**无光标又无滚动键的页面（连接测试、体感）必须把
   内容排进一屏**，`tests/canvas` 的"内容不贴底"检查会守住这一条；
+- 日志子页的一次按键 = 一行（`DGLAB_SCREEN_LOG_PITCH`），连发用 `LOG_SCROLL_*` 自己的时序，
+  不要复用体感强度的连发时序；
+- 二维码只在服务端 `Listening`/`Paired` 时显示（`screen.c` 的 `qrCode()`）；
+  `NET_QR` 在只有局域网地址时也会成功，不要用它的成败当作"服务端在运行"；
+- 布局坐标一律是 720p 逻辑单位。底座 1080p 由 `platform/framebuffer.c` 建 1920×1080 的
+  framebuffer + canvas 层的 `scale_num/scale_den` 完成，**屏幕代码不得自己乘比例**；
+  缩放会把逻辑坐标按边换算，测量函数返回的仍然是逻辑单位；
+- 重建 framebuffer（底座切换、进出 BLE PoC 控制台）必须走 `main.c` 的
+  `appDisplaySuspend()` / `appDisplayReopen()`：它同时重开共享字体并按当前 scale 重新光栅化。
+  重建后靠 `g_display_generation` 强制每一屏重画一帧；
 - 新增或修改屏幕后跑 `make -C tests/canvas`：`testEveryPageStaysInItsRegions` 会用
   两份语言文件把每一屏渲染一遍，检查没有任何像素画到页头/内容列/底栏/滚动条之外
   （原委见 `docs/nro-ui.md`）。

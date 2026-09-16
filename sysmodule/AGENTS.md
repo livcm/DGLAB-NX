@@ -213,9 +213,10 @@ V3 文档明确说明其数据处理方式与 V2 存在差异，应以 V3 文档
 
 ## 线程与栈
 
-sysmodule 的线程栈都是 16KB：主线程由 NPDM 的 `main_thread_stack_size` 决定，
-网络线程在 `sysmodule/source/transport/net_socket.c` 里由 `NET_THREAD_STACK_SIZE`
-指定。栈很小，而这条路径上叠着 libnx 的 IPC/服务调用、newlib 的 `printf` 和 fs 写入，
+sysmodule 的线程栈都很小：主线程由 NPDM 的 `main_thread_stack_size` 决定
+（`sysmodule/DGLAB-NX-Core.json`，**32KB**，最初是 16KB），网络线程在
+`sysmodule/source/transport/net_socket.c` 里由 `NET_THREAD_STACK_SIZE` 指定。
+这条路径上叠着 libnx 的 IPC/服务调用、newlib 的 `printf` 和 fs 写入，
 **不要在这些函数里放大缓冲区**。
 
 已经踩过两次的坑：一条 `char command[1950]`（`DGLAB_SOCKET_MAX_MESSAGE`）或
@@ -230,13 +231,19 @@ sysmodule 的线程栈都是 16KB：主线程由 NPDM 的 `main_thread_stack_siz
   `.bss`（`static`），并在注释里写明"调用方持有 transport 锁"，因为一份缓冲区就够；
 - 每个连接自己的缓冲区（`netClientThreadMain` 的接收缓冲、`wsConnRecv` 的重组缓冲）
   必须留在那个线程的栈上，不能共享——两个客户端同时在线时共享会互相踩；
-- 新增或改动网络/IPC 路径后，用 aarch64 编译器量一遍栈帧：
+- 栈帧由 `make -C tests/stack` 自动检查：它用 devkitA64 的 gcc 以 `-fstack-usage` 编译
+  sysmodule 的全部源码，除 `netClientThreadMain`、`wsConnRecv` 与 ble_poc 里那三个
+  scan 结果结构外，**任何函数栈帧 ≥ 1KB 就失败**（名单与理由写在
+  `tests/stack/Makefile` 的 `ALLOW` 里）。新增的大缓冲区要先想想是不是该放 `.bss`，
+  确实要留的再加进名单并写明理由；
+- 手工量单个文件时（需要看完整列表、或想比较不同编译选项）：
 
       aarch64-none-elf-gcc -std=gnu11 -O2 -fstack-usage -D__SWITCH__ \
           -I$(DEVKITPRO)/libnx/include -Isysmodule/include -Icommon/include \
           -c sysmodule/source/net/net_server.c -o /tmp/net_server.o
 
   然后看 `/tmp/net_server.su`：核心代码里不该再出现接近 2KB 的栈帧。
+  主线程栈从 16KB 提到 32KB 之后这一类事故的余量更大，但规则不变——栈不是无限的地方。
 
 ## Sysmodule Title ID
 
@@ -318,3 +325,25 @@ NPDM 配置文件名必须与 `TARGET` 一致：libnx 模板只自动匹配 `<TA
 7. 输出目录结构正确。
 
 如果任何检查失败，构建必须失败，而不是生成一个可能无法安装的目录。
+
+### 改完必须重装（血泪教训）
+
+Sysmodule 是 **boot2 常驻**进程：它不从 SD 卡上的 NRO 启动，而是开机时由 Atmosphère
+从 `atmosphere/contents/<TITLE_ID>/` 加载。因此
+
+    make -C sysmodule package  →  覆盖 SD 卡上的 <TITLE_ID>/  →  重启主机
+
+这三步少任何一步，跑的都还是旧二进制，而**旧二进制的行为与代码 bug 无法区分**：
+2026-09-16 那次"按 ZL/ZR 就卡死、退出重进提示 sysmodule 未运行"，最后查明是"SD 卡上装的
+是旧版本"（旧版本的 16KB 主线程栈会被 `NET_WAVEFORM` 那条链压爆，进程直接消失）。最容易
+犯的是只更新 NRO：NRO 一拷就生效，sysmodule 还是老的。
+
+为了下次一眼能看出来，sysmodule 会在启动与每次开服时把构建标识写进日志：
+
+- 标识来自 Makefile 注入的 `git describe --always --dirty`
+  （`sysmodule/include/dglab/build.h`，拿不到 git 时是 `unknown`）；
+- `dglab-sys.log` 的第一行形如 `server start, dglab 645f698-dirty`；
+- **日志里没有这一行 = 装的是 2026-09-16 之前的版本**。
+
+实机验证之前先确认这一行与当前 checkout 对得上；对不上就先重装再验，否则验证的是旧代码。
+完整事件记录见 `docs/dglab-socket.md` 的"栈上不要放 KB 级缓冲区"。
