@@ -100,6 +100,13 @@ static void testFormatting(void)
 
     dglabMotionSettingsFormat(&config, DglabMotionSetting_GyroRange, text, sizeof(text));
     CHECK(strcmp(text, "6.00") == 0);
+
+    // The strength ceiling is not a duration: it must not be labelled in ms.
+    dglabMotionSettingsFormat(&config, DglabMotionSetting_StrengthMax, text, sizeof(text));
+    CHECK(strcmp(text, "100") == 0);
+
+    dglabMotionSettingsFormat(&config, DglabMotionSetting_Release, text, sizeof(text));
+    CHECK(strcmp(text, "300ms") == 0);
 }
 
 static void testFileRoundTrip(void)

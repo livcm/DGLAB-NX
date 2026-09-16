@@ -30,6 +30,16 @@ static const SettingRange kRanges[DglabMotionSetting_Count] = {
     { "strength_max", "strength max", 1.0f, 100.0f, 1.0f, 0 },
 };
 
+// Only these are milliseconds. The strength ceiling is a plain 0..100 number, and
+// the scaled values have no unit at all - the settings screen showing "100ms" for
+// the waveform strength was simply wrong.
+static bool settingIsMilliseconds(unsigned setting)
+{
+    return setting == DglabMotionSetting_Attack || setting == DglabMotionSetting_Release ||
+           setting == DglabMotionSetting_IdleStop || setting == DglabMotionSetting_FrequencyFast ||
+           setting == DglabMotionSetting_FrequencyStill;
+}
+
 static float* floatField(DglabMotionFeedConfig* config, unsigned setting)
 {
     switch (setting) {
@@ -164,7 +174,7 @@ void dglabMotionSettingsFormat(const DglabMotionFeedConfig* config, unsigned set
     else
         snprintf(number, sizeof(number), "%.2f", (double)settingValue(config, setting));
 
-    if (range->decimals == 0)
+    if (range->decimals == 0 && settingIsMilliseconds(setting))
         snprintf(out, out_size, "%sms", number);
     else
         snprintf(out, out_size, "%s", number);
