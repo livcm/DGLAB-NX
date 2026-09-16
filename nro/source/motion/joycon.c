@@ -13,6 +13,15 @@
 // style gives another for the same physical controller.
 #define HANDLES_MAX 2u
 
+// A side that has produced nothing for this many polls may be holding handles
+// from an assignment that no longer exists: the console went handheld, or the
+// controller was re-synced and came back under a different style. Taking a fresh
+// set is what the design already promises ("however the system hands the
+// controllers over, the side is readable"), and it is the difference between a
+// side that says "not connected" for a moment and one that says it for the rest
+// of the session while its channel stays silent.
+#define RESCAN_AFTER_QUIET_POLLS 120u
+
 // A pair of Joy-Cons is exposed as one "JoyDual" handle per side, and a lone one
 // as a JoyLeft/JoyRight handle. A side may answer on either, depending on how
 // the system assigned the controllers, so both are held and tried in order.
@@ -32,6 +41,8 @@ typedef struct {
     // LIFO every frame, so a run of these is how a controller that was turned
     // off or plugged back in shows up (see dglabMotionSensorConnected).
     unsigned quiet_polls;
+    // How often this side gave up on its handles and took a fresh set.
+    unsigned rescans;
     // What the last poll asked each handle and what it answered, oldest first,
     // for the log line dglabJoyconDescribe() builds. A handle the poll did not
     // reach (see the order rule below) keeps polled=false, which the log says
@@ -52,41 +63,63 @@ static void addHandle(JoyconState* state, HidSixAxisSensorHandle handle)
         state->handles[state->handle_count++] = handle;
 }
 
-bool dglabJoyconStart(void)
+// Stops whatever this side has running and forgets the handles. The connection
+// state is left alone: it is the caller's, and a rescan must not make the row
+// jump.
+static void stopSide(JoyconState* state)
+{
+    for (size_t i = 0; i < state->handle_count; i++) {
+        if (state->started)
+            hidStopSixAxisSensor(state->handles[i]);
+    }
+
+    state->handle_count = 0;
+    state->started = false;
+    state->quiet_polls = 0;
+}
+
+// The handles one side may answer on, in the order they are tried, started.
+static bool acquireSide(JoyconState* state, DglabJoyconSide side)
 {
     HidSixAxisSensorHandle pair[2] = { 0 };
-    HidSixAxisSensorHandle left = { 0 };
-    HidSixAxisSensorHandle right = { 0 };
+    HidSixAxisSensorHandle single = { 0 };
+    HidNpadStyleTag single_style = side == DglabJoycon_Left ? HidNpadStyleTag_NpadJoyLeft
+                                                            : HidNpadStyleTag_NpadJoyRight;
     bool any = false;
 
-    if (dglabJoyconStarted())
-        return true;
-
-    memset(g_joycon, 0, sizeof(g_joycon));
+    stopSide(state);
 
     // Filled from the system; failures just mean that style is not present, so
     // nothing here is fatal.
     if (R_SUCCEEDED(hidGetSixAxisSensorHandles(pair, 2, HidNpadIdType_No1,
-            HidNpadStyleTag_NpadJoyDual))) {
-        addHandle(&g_joycon[DglabJoycon_Left], pair[0]);
-        addHandle(&g_joycon[DglabJoycon_Right], pair[1]);
+            HidNpadStyleTag_NpadJoyDual)))
+        addHandle(state, pair[side == DglabJoycon_Left ? 0 : 1]);
+
+    if (R_SUCCEEDED(hidGetSixAxisSensorHandles(&single, 1, HidNpadIdType_No1, single_style)))
+        addHandle(state, single);
+
+    for (size_t i = 0; i < state->handle_count; i++) {
+        if (R_SUCCEEDED(hidStartSixAxisSensor(state->handles[i]))) {
+            state->started = true;
+            any = true;
+        }
     }
 
-    if (R_SUCCEEDED(hidGetSixAxisSensorHandles(&left, 1, HidNpadIdType_No1,
-            HidNpadStyleTag_NpadJoyLeft)))
-        addHandle(&g_joycon[DglabJoycon_Left], left);
+    return any;
+}
 
-    if (R_SUCCEEDED(hidGetSixAxisSensorHandles(&right, 1, HidNpadIdType_No1,
-            HidNpadStyleTag_NpadJoyRight)))
-        addHandle(&g_joycon[DglabJoycon_Right], right);
+bool dglabJoyconStart(void)
+{
+    bool any = false;
 
-    for (size_t side = 0; side < 2; side++) {
-        for (size_t i = 0; i < g_joycon[side].handle_count; i++) {
-            if (R_SUCCEEDED(hidStartSixAxisSensor(g_joycon[side].handles[i]))) {
-                g_joycon[side].started = true;
-                any = true;
-            }
-        }
+    // A fresh set every time the mode is entered: handles from an earlier visit
+    // may belong to an assignment the system has changed since.
+    for (size_t side = 0; side <= (size_t)DglabJoycon_Right; side++) {
+        g_joycon[side].connected = false;
+        g_joycon[side].rescans = 0;
+
+        if (acquireSide(&g_joycon[side], (DglabJoyconSide)side))
+            any = true;
     }
 
     return any;
@@ -94,13 +127,8 @@ bool dglabJoyconStart(void)
 
 void dglabJoyconStop(void)
 {
-    for (size_t side = 0; side < 2; side++) {
-        for (size_t i = 0; i < g_joycon[side].handle_count; i++) {
-            if (g_joycon[side].started)
-                hidStopSixAxisSensor(g_joycon[side].handles[i]);
-        }
-
-        g_joycon[side].started = false;
+    for (size_t side = 0; side <= (size_t)DglabJoycon_Right; side++) {
+        stopSide(&g_joycon[side]);
         g_joycon[side].connected = false;
     }
 }
@@ -209,6 +237,16 @@ size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max)
     else
         state->quiet_polls++;
 
+    // Long silence may mean the handles themselves are stale rather than the
+    // controller being gone (see RESCAN_AFTER_QUIET_POLLS): take a fresh set and
+    // let the next polls decide. The count is in the log line, so a hardware run
+    // shows whether this was needed.
+    if (state->quiet_polls >= RESCAN_AFTER_QUIET_POLLS) {
+        acquireSide(state, side);
+        state->rescans++;
+        state->quiet_polls = 0;
+    }
+
     state->connected = dglabMotionSensorConnected(state->connected, &totals.poll,
         state->quiet_polls);
 
@@ -235,9 +273,9 @@ size_t dglabJoyconDescribe(DglabJoyconSide side, char* out, size_t size)
     out[0] = '\0';
     state = &g_joycon[side];
 
-    written = snprintf(out, size, "%s: handles %u, quiet %u",
+    written = snprintf(out, size, "%s: handles %u, quiet %u, rescans %u",
         side == DglabJoycon_Left ? "left" : "right", (unsigned)state->handle_count,
-        state->quiet_polls);
+        state->quiet_polls, state->rescans);
 
     if (written <= 0 || (size_t)written >= size)
         return 0;
@@ -252,6 +290,49 @@ size_t dglabJoyconDescribe(DglabJoyconSide side, char* out, size_t size)
                 ", #%u states %u, samples %u, connected %u", (unsigned)i,
                 (unsigned)state->last[i].states, (unsigned)state->last[i].samples,
                 state->last[i].connected ? 1u : 0u);
+
+        if (written <= 0 || (size_t)written >= size - used)
+            return used;
+
+        used += (size_t)written;
+    }
+
+    return used;
+}
+
+size_t dglabJoyconStyleText(char* out, size_t size)
+{
+    static const struct {
+        u32 bit;
+        const char* name;
+    } kStyles[] = {
+        { HidNpadStyleTag_NpadFullKey, "fullkey" },
+        { HidNpadStyleTag_NpadHandheld, "handheld" },
+        { HidNpadStyleTag_NpadJoyDual, "joydual" },
+        { HidNpadStyleTag_NpadJoyLeft, "joyleft" },
+        { HidNpadStyleTag_NpadJoyRight, "joyright" },
+    };
+    u32 styles;
+    int written;
+    size_t used;
+
+    if (!out || size == 0)
+        return 0;
+
+    styles = hidGetNpadStyleSet(HidNpadIdType_No1);
+
+    written = snprintf(out, size, "0x%08X", (unsigned)styles);
+
+    if (written <= 0 || (size_t)written >= size)
+        return 0;
+
+    used = (size_t)written;
+
+    for (size_t i = 0; i < sizeof(kStyles) / sizeof(kStyles[0]); i++) {
+        if (!(styles & kStyles[i].bit))
+            continue;
+
+        written = snprintf(out + used, size - used, "+%s", kStyles[i].name);
 
         if (written <= 0 || (size_t)written >= size - used)
             return used;

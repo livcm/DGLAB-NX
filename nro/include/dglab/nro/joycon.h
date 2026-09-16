@@ -17,6 +17,11 @@ typedef enum {
 
 /// Acquires the sensor handles and starts them. Returns false when no handle
 /// could be started at all; call it when the mode is entered.
+///
+/// This always takes a fresh set: handles acquired during an earlier visit can
+/// describe an assignment the system has since changed (a Joy-Con that was
+/// plugged in, turned off or re-synced), and polling one of those is what leaves
+/// a side stuck on "not connected" with its channel silent.
 bool dglabJoyconStart(void);
 
 /// Stops the sensors again. Safe to call when they were never started.
@@ -35,14 +40,22 @@ size_t dglabJoyconPoll(DglabJoyconSide side, DglabMotionSample* out, size_t max)
 bool dglabJoyconIsConnected(DglabJoyconSide side);
 
 /// Writes one line describing what this side's handles are and what the last
-/// poll got out of them, e.g.
-/// "left: handles 2, quiet 0, #0 states 16, samples 16, connected 1, #1 not
-/// polled". `quiet` counts the polls in a row without any readings, which is
-/// what turns the row to "not connected" once it reaches
-/// DGLAB_MOTION_SENSOR_QUIET_POLLS.
+/// poll got out of them, e.g. "left: handles 2, quiet 0, rescans 0, #0 states 16,
+/// samples 16, connected 1, #1 not polled". `quiet` counts the polls in a row
+/// without any readings, which is what turns the row to "not connected" once it
+/// reaches DGLAB_MOTION_SENSOR_QUIET_POLLS; `rescans` counts how often the side
+/// gave up on its handles and took a fresh set.
 /// Written into the NRO's log by main.c when the mode starts: which handles a
 /// console really hands over (and which of them answer) is a hardware fact, and
 /// this is what makes the next hardware run conclusive. A handle that was not
 /// polled says so - "no readings" and "not asked" are different answers.
 /// Returns the length written, 0 when `out` is unusable or no sensor was started.
 size_t dglabJoyconDescribe(DglabJoyconSide side, char* out, size_t size);
+
+/// Writes the Npad styles the console currently reports for player 1, e.g.
+/// "0x00000004+joydual". Which style is active decides whether a side can be read
+/// at all - a Joy-Con plugged back into the console switches the system to
+/// `handheld` and the pair handles go quiet - and it is the one fact the readings
+/// themselves cannot provide. Returns the length written, 0 when `out` is
+/// unusable.
+size_t dglabJoyconStyleText(char* out, size_t size);

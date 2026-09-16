@@ -1003,14 +1003,16 @@ static void runMotionView(Service* dglab, PadState* pad)
         // this is what makes "the row says not connected while the waveform
         // plays" answerable from a log instead of a guess.
         if (!described) {
-            char left[96];
-            char right[96];
-            char line[224];
+            char styles[64];
+            char left[160];
+            char right[160];
+            char line[448];
 
             described = true;
+            dglabJoyconStyleText(styles, sizeof(styles));
             dglabJoyconDescribe(DglabJoycon_Left, left, sizeof(left));
             dglabJoyconDescribe(DglabJoycon_Right, right, sizeof(right));
-            snprintf(line, sizeof(line), "motion %s | %s", left, right);
+            snprintf(line, sizeof(line), "motion styles %s | %s | %s", styles, left, right);
             logPushLine(line);
         }
 
@@ -1024,11 +1026,28 @@ static void runMotionView(Service* dglab, PadState* pad)
             bool right_now = dglabJoyconIsConnected(DglabJoycon_Right);
 
             if (link_known) {
-                if (left_now != left_connected)
-                    logPushLine(left_now ? "motion left connected" : "motion left disconnected");
+                // The line carries the side's own description, so a change in the
+                // log says *why* it happened: which handle answered, how long the
+                // side had been quiet, whether it had just re-acquired a set.
+                if (left_now != left_connected) {
+                    char detail[160];
+                    char line[224];
 
-                if (right_now != right_connected)
-                    logPushLine(right_now ? "motion right connected" : "motion right disconnected");
+                    dglabJoyconDescribe(DglabJoycon_Left, detail, sizeof(detail));
+                    snprintf(line, sizeof(line), "motion left %s: %s",
+                        left_now ? "connected" : "disconnected", detail);
+                    logPushLine(line);
+                }
+
+                if (right_now != right_connected) {
+                    char detail[160];
+                    char line[224];
+
+                    dglabJoyconDescribe(DglabJoycon_Right, detail, sizeof(detail));
+                    snprintf(line, sizeof(line), "motion right %s: %s",
+                        right_now ? "connected" : "disconnected", detail);
+                    logPushLine(line);
+                }
             }
 
             left_connected = left_now;
