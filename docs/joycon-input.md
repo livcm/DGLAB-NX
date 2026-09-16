@@ -344,7 +344,8 @@ NRO 每帧都在用的那个 `PadState` 旁边：
    很低，但还没有长时间统计）；
 5. `hidIsSixAxisSensorAtRest` 的判据是否够稳（能否用来做零偏归零）；
 6. NRO 在 applet 模式下读六轴的可用性与开销（每帧 60 次读是否明显耗电）；
-7. Joy-Con 断开/休眠时 `attributes` 的变化时机：**已确认不会有"未连接"的占位读数**——句柄
-   直接停止产生读数（2026-09-17 实机），规则因此改为按"连续空轮询"判定；`motion
-   left/right connected / disconnected` 的行仍在，插回主机或关掉一只 Joy-Con 时应能看到
-   `disconnected`，那行就是这条的最终确认。
+7. ~~Joy-Con 断开/休眠时六轴 `attributes` 的变化时机~~：**已确认这条路问不出连接状态**——
+   插回主机、或者按同步键关掉之后，句柄**照样给读数**（2026-09-17 实机三轮才对上），所以
+   连接判定改问主机自己的控制器状态（设备类型 / `PadState`，见上面「这一侧能不能用」）。
+   六轴 `attributes` 只剩下"这条读数能不能用"这一个用途，`motion … connected /
+   disconnected` 的日志行也改成跟着主机状态走。
