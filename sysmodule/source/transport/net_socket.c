@@ -730,11 +730,6 @@ void dglabNetSocketInitialize(void)
     mutexLock(&g_net.mutex);
     netCoreEnsureReady((u16)DGLAB_NET_DEFAULT_PORT);
     mutexUnlock(&g_net.mutex);
-
-    // The first line of the in-memory ring, and the answer to "which binary is
-    // installed?" before anything else runs. It stays in the ring only: the SD
-    // mirror switches on when the server starts, and the start logs it again.
-    dglabNetSocketLogNote("dglab %s", DGLAB_BUILD_STAMP);
 }
 
 static Result netOpenListenSocket(u16 port, int* out_fd)

@@ -8,10 +8,10 @@
 // IPC goes unanswered, and the front end reads that as "it froze" (the round
 // this rule came from: docs/dglab-socket.md, "栈上不要放 KB 级缓冲区").
 //
-// The Makefile stamps the binary with `git describe --always --dirty`, and the
-// transport writes that stamp into the log at startup and at every server
-// start, so `dglab-sys.log` says which build produced it. A log with no stamp
-// line at all is an old build.
+// The Makefile stamps the binary with `git describe --always --dirty`. main.c
+// writes it into the log ring once at startup, and the transport writes it again
+// on every server start - the second one lands in `dglab-sys.log`, so that file
+// says which build produced it. A log with no stamp line at all is an old build.
 #ifndef DGLAB_BUILD_STAMP
 #define DGLAB_BUILD_STAMP "unknown"
 #endif

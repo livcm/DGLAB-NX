@@ -3,6 +3,7 @@
 
 #include <switch.h>
 
+#include <dglab/build.h>
 #include <dglab/ipc.h>
 #include <dglab/ipc_cmif.h>
 #include <dglab/ipc_poc.h>
@@ -331,6 +332,14 @@ int main(int argc, char* argv[])
     // to sleep without anyone using the server. The NRO starts it with A (or any
     // client with NET_START) and stops it again with Y.
     dglabNetSocketInitialize();
+
+    // Which binary is running, as the first thing in the log ring - the answer
+    // to "did the console get the sysmodule I just built?" (see dglab/build.h).
+    // It is written here rather than inside dglabNetSocketInitialize(), because
+    // that function is also the transport's idempotent "make sure the core
+    // exists" call on every start, and the stamp would land in the ring again
+    // each time - the log the user exports had it twice per boot.
+    dglabNetSocketLogNote("dglab %s", DGLAB_BUILD_STAMP);
 
     while (true) {
         Handle session = INVALID_HANDLE;
