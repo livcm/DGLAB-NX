@@ -15,22 +15,26 @@
 # The sysmodule Title ID is not written down here: sysmodule/ derives the
 # directory name from sysmodule/DGLAB-NX-Core.json, which stays the single source of
 # truth for it.
+#
+# Neither is the front end's version: VERSION holds it, and it is handed to
+# nro/Makefile as APP_VERSION, which writes it into the NACP and the About page.
 #---------------------------------------------------------------------------------
 
 RELEASE_DIR := $(CURDIR)/release
+APP_VERSION := $(shell cat $(CURDIR)/VERSION 2>/dev/null)
 
 .PHONY: all release sysmodule nro overlay clean
 
 all: release
 
 release: sysmodule nro overlay
-	@echo "release layout ready in $(RELEASE_DIR)"
+	@echo "release layout ready in $(RELEASE_DIR)  [DGLAB-NX $(APP_VERSION)]"
 
 sysmodule:
 	@$(MAKE) -C sysmodule package
 
 nro:
-	@$(MAKE) -C nro package
+	@$(MAKE) -C nro package APP_VERSION='$(APP_VERSION)'
 
 # The overlay component has no implementation yet (see overlay/AGENTS.md). It is
 # part of the release layout, so it is built automatically once overlay/Makefile

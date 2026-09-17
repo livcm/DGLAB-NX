@@ -15,7 +15,6 @@ typedef enum {
     // drawn as its own icon (dglab/ui/button.h), so "B 返回" is an icon and a
     // word, and the word is the only half that can be translated.
     DglabString_ActionEnter = 0,
-    DglabString_ActionConfirm,
     DglabString_ActionBack,
     DglabString_ActionExit,
     DglabString_ActionStart,
@@ -51,6 +50,12 @@ typedef enum {
     DglabString_AboutTitle,
     DglabString_AboutLine1,
     DglabString_AboutLine2,
+    // Two versions sit on this page and they are different numbers: the release
+    // version of this NRO is the page's header, and this row is the sysmodule's
+    // IPC interface version (docs/ipc.md, "版本"). The label has to say which
+    // one it is.
+    DglabString_AboutIpcVersion,
+    DglabString_AboutBuild,
     DglabString_AboutSource,
     DglabString_AboutLanguage,
     DglabString_AboutLangAuto,
@@ -59,7 +64,6 @@ typedef enum {
 
     // motion screen
     DglabString_MotionTitle,
-    DglabString_MotionChannels,
     DglabString_MotionLink,
     DglabString_MotionVolume,
     // The motion page's input rows: which side's Joy-Con is being read, and how
@@ -67,18 +71,10 @@ typedef enum {
     // strength rows below them (docs/joycon-input.md).
     DglabString_MotionJoyConLeft,
     DglabString_MotionJoyConRight,
-    DglabString_MotionLastCmd,
     DglabString_MotionStill,
     DglabString_MotionMoving,
     DglabString_MotionLevel,
     DglabString_MotionNotConnected,
-    DglabString_MotionDesc,
-    DglabString_LinkNotStarted,
-    DglabString_LinkWaiting,
-    DglabString_LinkPaired,
-    DglabString_LinkStopped,
-    DglabString_LinkFailed,
-    DglabString_LinkIpcFailed,
 
     // advanced screen
     DglabString_AdvancedTitle,
@@ -102,8 +98,8 @@ typedef enum {
     DglabString_DescDeadzoneExit,
     DglabString_DescGyroRange,
     DglabString_DescAccelRange,
-    DglabString_DescGyroWeight,
-    DglabString_DescAccelWeight,
+    // The two weight terms share one sentence, so they share one key.
+    DglabString_DescWeight,
     DglabString_DescAttack,
     DglabString_DescRelease,
     DglabString_DescIdleStop,
@@ -114,38 +110,33 @@ typedef enum {
     // socket test screen
     DglabString_SocketTitle,
     DglabString_RowServer,
-    DglabString_RowClear,
     DglabString_LabelChannelA,
     DglabString_LabelChannelB,
-    DglabString_SocketPort,
-    DglabString_LabelState,
     DglabString_LabelAddress,
-    DglabString_LabelController,
     DglabString_LabelAppId,
     DglabString_LabelCounters,
     DglabString_LabelHeartbeats,
     DglabString_LabelAppReport,
-    DglabString_LabelLastIssue,
     DglabString_CommandLabel,
-    DglabString_LabelStrength,
+    // The server's state, shared by the socket page's server row and the motion
+    // page's link line so the two can never say different things about the same
+    // state (dglabNetStateText()). IpcFailed is the state of the call itself:
+    // the sysmodule did not answer at all.
     DglabString_StateNotStarted,
     DglabString_StateWaiting,
     DglabString_StateConnected,
     DglabString_StateStopped,
     DglabString_StateFailed,
+    DglabString_StateIpcFailed,
     DglabString_NoReport,
     DglabString_NoAddress,
-    DglabString_IssueNone,
     DglabString_QrHint,
     DglabString_QrNotRunning,
-    DglabString_QrNoAddress,
     DglabString_QrTooLong,
     DglabString_LogTitle,
     DglabString_SleepWarning,
 
     // what the buttons sent, and what came back
-    DglabString_CmdStart,
-    DglabString_CmdStop,
     DglabString_CmdClear,
     DglabString_CmdTestA,
     DglabString_CmdTestB,

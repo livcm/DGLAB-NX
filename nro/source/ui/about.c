@@ -8,10 +8,16 @@
 #include <stdio.h>
 #include <string.h>
 
-// What this is, where the source lives, and the language - laid out the way the
-// console lays out a text page: the two prose lines are white paragraphs, not
-// grey bulleted notes, and the two things that are values (the source, the
-// language) are rows under them.
+// What this is, which release is running, where the source lives, and the
+// language - laid out the way the console lays out a text page: the two prose
+// lines are white paragraphs, not grey bulleted notes, and the things that are
+// values (the IPC version, the build, the source, the language) are rows under
+// them.
+//
+// The release version of this NRO goes in the header, the way the other pages
+// put their state there; it is the page's own subject rather than one more row.
+// The IPC version stays a row, and says so in its label: it is the sysmodule's
+// interface version, a different number entirely (docs/ipc.md, "版本").
 //
 // Nothing is focused here: left and right switch the language, which is what the
 // bottom bar says.
@@ -45,20 +51,20 @@ void dglabAboutDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabA
 {
     const DglabTheme* theme = dglabThemeGet();
     DglabListFonts list_fonts = { fonts->body, fonts->value, fonts->note };
-    DglabRow rows[4];
-    DglabRowBox boxes[4];
+    DglabRow rows[6];
+    DglabRowBox boxes[6];
     DglabHint hints[2];
     DglabTextStyle title = { fonts->title, theme->text };
     DglabListStyle style;
-    char version[32];
+    char ipc_version[32];
     char language[96];
     int count = 0;
     int view_height = DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP;
     int content_height;
     int offset;
 
-    snprintf(version, sizeof(version), "IPC %u.%u.%u", (unsigned)state->version.major,
-        (unsigned)state->version.minor, (unsigned)state->version.patch);
+    snprintf(ipc_version, sizeof(ipc_version), "%u.%u.%u", (unsigned)state->ipc_version.major,
+        (unsigned)state->ipc_version.minor, (unsigned)state->ipc_version.patch);
     languageValue(state, language, sizeof(language));
 
     memset(rows, 0, sizeof(rows));
@@ -70,6 +76,18 @@ void dglabAboutDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabA
     rows[count++] = (DglabRow){
         .kind = DglabRow_Paragraph,
         .label = dglabString(DglabString_AboutLine2),
+    };
+    rows[count++] = (DglabRow){
+        .kind = DglabRow_Item,
+        .label = dglabString(DglabString_AboutIpcVersion),
+        .value = ipc_version,
+        .value_color = theme->text,
+    };
+    rows[count++] = (DglabRow){
+        .kind = DglabRow_Item,
+        .label = dglabString(DglabString_AboutBuild),
+        .value = state->build_id ? state->build_id : "",
+        .value_color = theme->text,
     };
     rows[count++] = (DglabRow){
         .kind = DglabRow_Item,
@@ -90,7 +108,8 @@ void dglabAboutDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabA
 
     dglabPageBegin(canvas);
     dglabPageHeader(canvas, &title, dglabString(DglabString_AboutTitle),
-        &(DglabTextStyle){ fonts->value, theme->muted }, version);
+        &(DglabTextStyle){ fonts->value, theme->muted },
+        state->app_version ? state->app_version : "");
 
     dglabPageClipContent(canvas);
 

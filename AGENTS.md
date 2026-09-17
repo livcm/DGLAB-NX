@@ -440,32 +440,30 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
 6. 把 V3 波形/强度数据接到 Socket 协议（复用协议层已有的波形编码）；
 7. 实现最小 NRO Client 的完整交互；
 8. 实现 Joy-Con 传感器输入（实机已确认能驱动输出，剩调参）；
-9. 实现基础 UI。
+9. 实现基础 UI；
+10. NRO 元信息与版本管理：NACP 的应用名 `DGLAB-NX`、作者 `livcm` 与版本由
+    `nro/Makefile` 写入，图标是 `nro/DGLAB-NX.jpg`（256×256，配色同界面主题）；
+    About 页显示应用版本、IPC 版本与构建标识。发行版本只有一个来源——仓库根
+    `VERSION`（初始 `0.3.0`）；IPC 接口版本仍归 `common/include/dglab/ipc.h` 的
+    `DGLAB_IPC_PROTOCOL_VERSION`，两者不要混用（见 `docs/ipc.md` 的“版本”，
+    组件内的约定见 `nro/AGENTS.md`）。
 
 ### 未完成
 
-1. NRO 元信息与版本管理：NACP 写正确的应用名 `DGLAB-NX`、作者 `livcm` 与版本；
-    图标换成正式资产（256×256 JPEG，配色沿用界面主题：底 `#2D2D2D` + 强调色
-    `#00FFC8`）；About 页显示应用版本 + IPC 版本 + 构建标识。
-    版本号单一来源：仓库根新增 `VERSION` 文件（初始 `0.3.0`），根 Makefile 读入后传给
-    `nro/Makefile` 的 `APP_VERSION`；IPC 接口版本仍由
-    `common/include/dglab/ipc.h` 的 `DGLAB_IPC_PROTOCOL_VERSION` 管，两者不要混用
-    （见 `docs/ipc.md` 的“版本”）。
-    验收：NACP 的名称/作者/版本正确、NRO 图标不再是 libnx 默认图、About 三项齐全。
-2. 浅色模式：默认跟随主机主题（`setsysGetColorSetId()`，`ColorSetId_Light` /
+1. 浅色模式：默认跟随主机主题（`setsysGetColorSetId()`，`ColorSetId_Light` /
     `ColorSetId_Dark`），界面上可手动覆盖为“跟随系统 / 浅色 / 深色”，偏好存
     `sdmc:/switch/DGLAB-NX/config/app.cfg`。调色板**从原生 HOS 浅色主题的 1280×720
     截图逐像素量出**，表格按深色那节的格式写进 `docs/nro-ui.md`；截图到位前不写数值。
     实现走 `nro/source/ui/theme.c`（新增浅色调色板）与已有的 `dglabThemeSet()`。
     验收：`tests/canvas` 用浅色主题把每一屏在 720p/1080p 各渲染一遍；实机确认跟随
     系统切换与手动覆盖都生效。
-3. 触屏拖动玩法：触屏位置与拖动速度映射到 A/B 通道的波形强度与频率，复用
+2. 触屏拖动玩法：触屏位置与拖动速度映射到 A/B 通道的波形强度与频率，复用
     `NET_WAVEFORM` 与 `motion_feed` 的包络/节奏逻辑，参数页沿用 Advanced 的结构；
     停手后 250ms 内停流（沿用“全零批次不上传”）。
     验收：实机触摸拖动能驱动对应通道、停手即停流；主机侧有逻辑测试；单位与手感参数
     按 `docs/joycon-input.md` 的格式记进文档。若之后还要第二种玩法，候选是摇杆、按键
     连打、旋转角度，做完第一种再定。
-4. deko3d UI 后端（路线 A）**：把呈现层从 libnx framebuffer 换成 deko3d，绘制层
+3. deko3d UI 后端（路线 A）**：把呈现层从 libnx framebuffer 换成 deko3d，绘制层
     （`canvas.c` 与三屏布局）零改动。做法：device/queue/swapchain + PitchLinear 图像，
     CPU 照旧写像素（`dkMemBlockGetCpuAddr` + `dkMemBlockFlushCpuCache`），再用
     `dkCmdBufCopyBufferToImage` / `dkCmdBufBlitImage` 上屏，不写着色器；`nro/Makefile`
@@ -474,12 +472,12 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
     “framebuffer → deko3d 迁移评估”。路线 A 用 `deko3d.h` 的 C API 就够，不需要
     C++17，也不需要安装 portlibs。
     验收：三屏 × 720p/1080p 的实机截图与改造前一致，`tests/canvas` 不受影响。
-5. Game Mod / Overlay：由于游戏与 NRO 前端不能同时运行，因此需要由 Overlay 来监控和管理 Sysmodule 和 Game Mod 的运行状态，两者同时开发；
-6. Socket V4 协议：V4 的消息外壳（`hello` / `message` / `heartbeat` / `ping` /
+4. Game Mod / Overlay：由于游戏与 NRO 前端不能同时运行，因此需要由 Overlay 来监控和管理 Sysmodule 和 Game Mod 的运行状态，两者同时开发；
+5. Socket V4 协议：V4 的消息外壳（`hello` / `message` / `heartbeat` / `ping` /
     `pong` / `error` / `client_disconnected`）、`?tid=` 绑定与 V4 二维码。前置是官方
     beta 稳定与 App 版本确认；在此之前不写半成品代码，只保留 `docs/dglab-socket.md`
     里已核对的 V4 事实。验收：`tests/net` 增加 V4 外壳用例与回环端到端，再实机。
-7. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
+6. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
 
 ### 已搁置：BLE 模式（sysmodule 直连设备）
 

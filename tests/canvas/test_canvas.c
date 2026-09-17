@@ -62,6 +62,21 @@ static int countChangedPixels(const uint8_t* pixels, size_t size, uint32_t backg
         }                                                               \
     } while (0)
 
+// How many pixels two frames of the same page differ in. A test that cannot read
+// the face (the block font has one glyph) can still say "this value reached the
+// drawing" by changing the value and watching the frame move.
+static int countDifferingPixels(const uint8_t* a, const uint8_t* b, size_t size)
+{
+    int different = 0;
+
+    for (size_t i = 0; i + 3 < size; i += 4) {
+        if (memcmp(a + i, b + i, 4) != 0)
+            different++;
+    }
+
+    return different;
+}
+
 #define TEST_WIDTH 64
 #define TEST_HEIGHT 32
 
@@ -1352,9 +1367,13 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             memset(&about, 0, sizeof(about));
             about.preference = DglabLanguage_Auto;
             about.resolved = DglabLanguage_ChineseSimplified;
-            about.version.major = 1;
-            about.version.minor = 2;
-            about.version.patch = 3;
+            about.app_version = "0.3.0";
+            // The longest stamp `git describe --always --dirty` produces, so the
+            // header and the row are measured against the real thing.
+            about.build_id = "8a2fcb6-dirty";
+            about.ipc_version.major = 1;
+            about.ipc_version.minor = 2;
+            about.ipc_version.patch = 3;
             about.github_url = "https://github.com/livcm/DGLAB-NX";
 
             snprintf(name, sizeof(name), "%s about", frames);
@@ -1364,6 +1383,60 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             checkContentClearsTheBar(name);
         }
     }
+}
+
+// The three things the About page exists to tell apart: the release version of
+// this NRO (in the header), the IPC interface version of the sysmodule, and the
+// build stamp. They arrive in three separate fields, and the page has to draw
+// all three: drop any one of them and the frame changes.
+//
+// This source has one glyph for every character, so what the page drew cannot be
+// read back - but a longer value is drawn wider, and a missing one is not drawn
+// at all, and that is what is compared here. A field the page ignores is a field
+// that only ever shows "unknown" on a console, which is the failure this catches.
+static void testAboutShowsItsThreeVersions(void)
+{
+    static uint8_t base[DOCK_PIXEL_WIDTH * DOCK_PIXEL_HEIGHT * 4];
+    const uint32_t blue = DGLAB_RGBA(0, 0, 0xFF, 0xFF);
+    DglabFontSet fonts = blockFonts();
+    DglabAboutState about;
+    DglabCanvas canvas;
+
+    setScreenSize(SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, 1, 1);
+
+    memset(&about, 0, sizeof(about));
+    about.preference = DglabLanguage_English;
+    about.resolved = DglabLanguage_English;
+    about.app_version = "1.2.3";
+    about.build_id = "aaaaaaa";
+    about.ipc_version.major = 4;
+    about.ipc_version.minor = 5;
+    about.ipc_version.patch = 6;
+    about.github_url = "https://github.com/livcm/DGLAB-NX";
+
+    beginPage(&canvas, blue);
+    dglabAboutDraw(&canvas, &fonts, &about);
+    memcpy(base, g_screen_pixels, screenBytes());
+
+    // The release version is the page's header, which is drawn only when there is
+    // one: a build that never got one shows exactly this.
+    about.app_version = "";
+    beginPage(&canvas, blue);
+    dglabAboutDraw(&canvas, &fonts, &about);
+    CHECK(countDifferingPixels(base, g_screen_pixels, screenBytes()) > 0);
+    about.app_version = "1.2.3";
+
+    about.build_id = "";
+    beginPage(&canvas, blue);
+    dglabAboutDraw(&canvas, &fonts, &about);
+    CHECK(countDifferingPixels(base, g_screen_pixels, screenBytes()) > 0);
+    about.build_id = "aaaaaaa";
+
+    // The values are right aligned, so a longer one starts further left.
+    about.ipc_version.major = 44;
+    beginPage(&canvas, blue);
+    dglabAboutDraw(&canvas, &fonts, &about);
+    CHECK(countDifferingPixels(base, g_screen_pixels, screenBytes()) > 0);
 }
 
 // The same suite for every language and for both frames the NRO draws into: the
@@ -1418,6 +1491,7 @@ int main(void)
     testMenu();
     testMotionScreen();
     testAdvancedScreen();
+    testAboutShowsItsThreeVersions();
     testEveryPageStaysInItsRegions();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

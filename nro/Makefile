@@ -7,6 +7,26 @@ $(error "Please set DEVKITPRO in your environment. export DEVKITPRO=<path to>/de
 endif
 
 TOPDIR ?= $(CURDIR)
+
+# The release version is VERSION at the repository root and nothing else, so the
+# NACP, the About page and the release notes cannot drift apart. The top level
+# Makefile reads it and passes it in as APP_VERSION; reading the same file here
+# keeps a plain `make -C nro` working. The path is built from TOPDIR (this
+# directory) rather than CURDIR because this Makefile is read twice - once here
+# and once from build/ (see the bottom of the file).
+#
+# This sits above switch_rules on purpose: that file fills APP_VERSION in with
+# "1.0.0" when it is empty, and a release that quietly went out as 1.0.0 is
+# exactly what VERSION is here to prevent.
+APP_VERSION_FILE	:=	$(abspath $(TOPDIR)/../VERSION)
+
+ifeq ($(strip $(APP_VERSION)),)
+APP_VERSION	:=	$(shell cat $(APP_VERSION_FILE) 2>/dev/null)
+endif
+ifeq ($(strip $(APP_VERSION)),)
+$(error "no app version: $(APP_VERSION_FILE) is missing or empty")
+endif
+
 include $(DEVKITPRO)/libnx/switch_rules
 
 #---------------------------------------------------------------------------------
@@ -44,6 +64,15 @@ DATA		:=	data
 INCLUDES	:=	include ../common/include ../third_party
 #ROMFS	:=	romfs
 
+# What the homebrew menu and the NACP say (AGENTS.md §15). The name and the
+# author are written down here; the version is not - it is VERSION at the
+# repository root, which is read below.
+APP_TITLE	:=	DGLAB-NX
+APP_AUTHOR	:=	livcm
+# The icon the menu draws, in the UI's own palette (background #2D2D2D, accent
+# #00FFC8). nro/tools/make_icon.c draws it; its header has the commands.
+ICON		:=	DGLAB-NX.jpg
+
 # Release layout (see AGENTS.md): the NRO is copied next to the sysmodule
 # package under release/ at the repository root, in a directory of its own that
 # mirrors what goes on the SD card: the .nro and the lang/ it reads at run time.
@@ -58,10 +87,15 @@ RELEASE_LANG_DIR	:=	$(RELEASE_APP_DIR)/lang
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
+# Which build this is, so the About page answers "is the console running the
+# build I just made?" - the same stamp the sysmodule logs (dglab/build.h).
+BUILD_STAMP	:=	$(shell git describe --always --dirty 2>/dev/null || echo unknown)
+
 CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 			$(ARCH) $(DEFINES)
 
-CFLAGS	+=	$(INCLUDE) -D__SWITCH__
+CFLAGS	+=	$(INCLUDE) -D__SWITCH__ '-DDGLAB_APP_VERSION="$(APP_VERSION)"' \
+			'-DDGLAB_BUILD_STAMP="$(BUILD_STAMP)"'
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 
@@ -177,7 +211,7 @@ package: $(BUILD)
 	@cp $(OUTPUT).nro $(RELEASE_NRO)
 	@mkdir -p $(RELEASE_LANG_DIR)
 	@cp $(LANG_DIR)/*.json $(RELEASE_LANG_DIR)
-	@echo "released ... $(RELEASE_NRO)"
+	@echo "released ... $(RELEASE_NRO)  [$(APP_TITLE) $(APP_VERSION), $(BUILD_STAMP)]"
 	@echo "released ... $(RELEASE_LANG_DIR)/*.json"
 
 $(BUILD):
@@ -208,6 +242,12 @@ ifeq ($(strip $(APP_JSON)),)
 
 all	:	$(OUTPUT).nro
 
+# Two things the .nro carries that libnx does not watch: a new release version
+# (the .nacp keeps whatever string it was built with) and a new icon. Bumping
+# VERSION or redrawing the icon has to rebuild them.
+$(OUTPUT).nacp	:	$(APP_VERSION_FILE)
+$(OUTPUT).nro	:	$(APP_ICON)
+
 ifeq ($(strip $(NO_NACP)),)
 $(OUTPUT).nro	:	$(OUTPUT).elf $(OUTPUT).nacp
 else
@@ -227,6 +267,12 @@ endif
 $(OUTPUT).elf	:	$(OFILES)
 
 $(OFILES_SRC)	: $(HFILES_BIN)
+
+# The release version is compiled into main.o (the About page shows it) as well
+# as written into the NACP, so a new VERSION has to rebuild that object too.
+# Without this the metadata would move to the new release while the page kept
+# showing the old one.
+main.o	:	$(APP_VERSION_FILE)
 
 #---------------------------------------------------------------------------------
 # you need a rule like this for each extension you use as binary data

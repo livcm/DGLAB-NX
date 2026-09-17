@@ -293,7 +293,12 @@ int main(int argc, char** argv)
         memset(&about, 0, sizeof(about));
         about.preference = DglabLanguage_Auto;
         about.resolved = DglabLanguage_ChineseSimplified;
-        about.version = state.version;
+        // The three the page exists to show. The real ones come from the build
+        // (VERSION and `git describe`, dglab/nro/version.h); this tool hardcodes
+        // the look of them, as it does for the log lines and the url.
+        about.app_version = "0.3.0";
+        about.build_id = "2ac34ef";
+        about.ipc_version = state.version;
         about.github_url = "https://github.com/livcm/DGLAB-NX";
 
         dglabAboutDraw(&canvas, &g_fonts, &about);
@@ -319,7 +324,7 @@ int main(int argc, char** argv)
         motion.frequency_b = 100;
         motion.channel_strength_a = 20;
         motion.channel_strength_b = 0;
-        motion.link = dglabString(DglabString_LinkPaired);
+        motion.link = dglabString(DglabString_StateConnected);
         motion.link_tone = DglabCmdTone_Ok;
         motion.last_upload = "\u6ce2\u5f62 A  \u6b63\u5e38";
         motion.last_upload_tone = DglabCmdTone_Ok;

@@ -39,7 +39,7 @@ static char g_cached_url[DGLAB_NET_QR_MAX];
 static DglabQrCode g_cached_code;
 static bool g_cached;
 
-static const char* stateText(u32 state)
+const char* dglabNetStateText(u32 state)
 {
     switch (state) {
         case DglabNetState_Listening: return dglabString(DglabString_StateWaiting);
@@ -145,7 +145,7 @@ static void drawQrColumn(DglabCanvas* canvas, const DglabFontSet* fonts,
         const char* reason;
 
         if (!state->status_ok)
-            reason = dglabString(DglabString_LinkIpcFailed);
+            reason = dglabString(DglabString_StateIpcFailed);
         else if (state->status.state != DglabNetState_Listening &&
             state->status.state != DglabNetState_Paired)
             reason = dglabString(DglabString_QrNotRunning);
@@ -268,8 +268,8 @@ static void drawInfoColumn(DglabCanvas* canvas, const DglabFontSet* fonts,
     rows[0] = (DglabRow){
         .kind = DglabRow_Item,
         .label = dglabString(DglabString_RowServer),
-        .value = state->status_ok ? stateText(status->state)
-                                  : dglabString(DglabString_LinkIpcFailed),
+        .value = state->status_ok ? dglabNetStateText(status->state)
+                                  : dglabString(DglabString_StateIpcFailed),
         .value_color = state->status_ok ? stateColor(status->state) : theme->error,
         .note = statusHasWarning(state) ? dglabString(DglabString_SleepWarning) : NULL,
     };

@@ -16,6 +16,10 @@
 #include <switch.h>
 
 #include <dglab/ipc.h>
+// This NRO's own release version and build stamp. Not the IPC version: that one
+// is DGLAB_IPC_PROTOCOL_VERSION in the header above, and the two are shown side
+// by side on the About page.
+#include <dglab/nro/version.h>
 #include <dglab/platform/langfiles.h>
 #include <dglab/nro/joycon.h>
 #include <dglab/platform/font.h>
@@ -496,12 +500,12 @@ static void repeatStrengthFromDirections(Service* dglab, u64 held, u64 now_ns)
 static void toggleServer(Service* dglab)
 {
     if (g_server_running) {
-        noteCommand(dglabString(DglabString_CmdStop), serviceDispatch(dglab, DGLAB_IPC_CMD_NET_STOP),
-            NULL);
+        noteCommand(dglabString(DglabString_ActionStop),
+            serviceDispatch(dglab, DGLAB_IPC_CMD_NET_STOP), NULL);
     } else {
         DglabNetStartRequest request = { 0 };
 
-        noteCommand(dglabString(DglabString_CmdStart),
+        noteCommand(dglabString(DglabString_ActionStart),
             serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_START, request), NULL);
     }
 }
@@ -913,18 +917,6 @@ static Result uploadSlots(Service* dglab, u32 channel, const DglabNetWaveformSlo
     return serviceDispatchIn(dglab, DGLAB_IPC_CMD_NET_WAVEFORM, request);
 }
 
-// Short form of the server's state for the motion screen's link line.
-static const char* netStateText(u32 state)
-{
-    switch (state) {
-        case DglabNetState_Listening: return dglabString(DglabString_LinkWaiting);
-        case DglabNetState_Paired: return dglabString(DglabString_LinkPaired);
-        case DglabNetState_Stopped: return dglabString(DglabString_LinkStopped);
-        case DglabNetState_Failed: return dglabString(DglabString_LinkFailed);
-        default: return dglabString(DglabString_LinkNotStarted);
-    }
-}
-
 static void runMotionView(Service* dglab, PadState* pad)
 {
     DglabMotionFeedConfig config;
@@ -953,7 +945,7 @@ static void runMotionView(Service* dglab, PadState* pad)
     dglabMotionFeedInit(&feed_b, &config);
 
     memset(&state, 0, sizeof(state));
-    state.link = dglabString(DglabString_LinkNotStarted);
+    state.link = dglabString(DglabString_StateNotStarted);
     state.last_upload = "";
 
     // Whatever the test buttons left queued should not play underneath the
@@ -1157,10 +1149,10 @@ static void runMotionView(Service* dglab, PadState* pad)
                 (status.state == DglabNetState_Listening || status.state == DglabNetState_Paired);
 
             if (!status_ok) {
-                state.link = dglabString(DglabString_LinkIpcFailed);
+                state.link = dglabString(DglabString_StateIpcFailed);
                 state.link_tone = DglabCmdTone_Error;
             } else {
-                state.link = netStateText(status.state);
+                state.link = dglabNetStateText(status.state);
                 state.link_tone = (status.state == DglabNetState_Paired) ? DglabCmdTone_Ok
                                                                         : DglabCmdTone_Warn;
             }
@@ -1228,7 +1220,9 @@ static void runAboutView(Service* dglab, PadState* pad)
         memset(&state, 0, sizeof(state));
         state.preference = g_language_pref;
         state.resolved = g_language;
-        state.version = version;
+        state.app_version = DGLAB_APP_VERSION;
+        state.build_id = DGLAB_BUILD_STAMP;
+        state.ipc_version = version;
         state.github_url = "https://github.com/livcm/DGLAB-NX";
 
         if (dglabFramebufferBegin(&canvas)) {

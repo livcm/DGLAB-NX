@@ -164,6 +164,25 @@ PresenceGroupId / SaveDataOwnerId 等字段可能被 loader 或模拟器
 - 不要让多个需要被独立识别的 NRO 无意中共享同一个 ProgramId；
 - 如果需要兼容 Ryujinx，应验证多个 NRO 能否同时被正确识别。
 
+## 元信息与版本
+
+NACP 里的应用名、作者与发行版本由 `nro/Makefile` 生成：应用名 `DGLAB-NX`、作者
+`livcm`、版本来自仓库根 `VERSION`。
+
+- **发行版本只有一个来源**：仓库根 `VERSION`。根 `Makefile` 读它并作为 `APP_VERSION`
+  传给 `nro/Makefile`，`make -C nro` 也读同一个文件；不要在 Makefile、代码或文档里
+  再写一个版本号（`nro/Makefile` 在 `switch_rules` 之前读它，就是为了不让 libnx 的
+  `1.0.0` 默认值悄悄变成发行版本）；
+- 这个号同时进 NACP 和 About 页的页头（`-DDGLAB_APP_VERSION`，默认值见
+  `nro/include/dglab/nro/version.h`），所以改 `VERSION` 之后必须重新构建 NRO；
+- **IPC 接口版本不是它**：`DGLAB_IPC_PROTOCOL_VERSION`（`common/include/dglab/ipc.h`）
+  由 sysmodule 通过 `GET_VERSION` 报告，About 页用单独一行显示（`docs/ipc.md` 的
+  “版本”）——两个版本号在同一页上，混用就是把 sysmodule 的接口版本当成 NRO 的发行版；
+- About 页的构建标识是 `git describe --always --dirty`（`-DDGLAB_BUILD_STAMP`），
+  回答“卡上的是不是我刚编的那一份”，做法与 sysmodule 的 `dglab/build.h` 相同；
+- 图标是 `nro/DGLAB-NX.jpg`（256×256 JPEG，配色同界面主题）。重画用
+  `nro/tools/make_icon.c`，文件头写着编译与转换的两条命令。
+
 ## 构建
 
 修改 NRO 源代码、headers、IPC 定义、Makefile 或 linker 配置后，应至少执行：

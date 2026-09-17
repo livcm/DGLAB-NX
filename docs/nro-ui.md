@@ -319,7 +319,8 @@ QR 编码器是自己写的（devkitPro 里没有可用 QR 库），所以它必
   `sdmc:/switch/DGLAB-NX/config/motion.cfg`，体感玩法进入时读取；参数清单见
   `docs/joycon-input.md`；
 - `motion (Joy-Con)` 玩法（`nro/source/ui/motion.c`）见 `docs/joycon-input.md`；
-- `about` 页显示源码地址与语言切换（左右键循环切换语言）；
+- `about` 页显示发行版本（页头）、IPC 版本、构建标识、源码地址与语言切换（左右键循环
+  切换语言）；
 - 服务端页（`nro/source/ui/screen.c`）的行：`server`（含休眠警告 note）、`address`、
   `app id`、`channel A`、`channel B`、`last cmd`；端口号显示在标题栏（值列只有 21 个
   字符宽，`192.168.1.161:9999` 正好占满）；
@@ -492,13 +493,30 @@ HOS 的侧栏聚焦框偏蓝（`#1A9AD5`），内容行的聚焦框偏青（`#66
 | 日志子页 | Y 打开：页头 + 32 行日志（24px、行距 37px、白色），打开时停在最新 | ↑↓ 滚动、Y 关闭、B 返回 |
 | motion (Joy-Con) | 页内提示行 + 5 行（连接、左/右 Joy-Con、通道强度 A/B） | 同 socket（A 启停、X 清空、ZL/ZR 测试、D-pad 调强度），多一个 `Y` 重新扫描手柄 |
 | advanced (motion) | 12 行 + 选中项的说明 note，按光标滚动 | ↑↓ 选择、←→ 改值（按住连发）、Y 恢复默认、B 返回 |
-| about | 两个白色段落 + 源码行 + 语言行 | ←→ 切换语言、B 返回 |
+| about | 两个白色段落 + IPC 版本行 + 构建标识行 + 源码行 + 语言行；页头右侧是发行版本 | ←→ 切换语言、B 返回 |
 
 按键约定：**Console 页（BLE PoC console、启动/出错提示页）一律 `+` 退出**；
 **其余 framebuffer 页面一律 `B` 返回/退出，`+` 在这些页面不响应**。
 
 页内提示行（socket 与 motion 页顶部那行 `[▲][▼] 调整 A  [◀][▶] 调整 B`）用的是 18px 白字 +
 按键图标，这样"上/下管 A、左/右管 B"能在一行里放下，也还是"图标 + 动作文字"的形式。
+
+### 关于页上的三个号
+
+`about` 是唯一一页要说清"这是什么"和"台上这份是哪个构建"的地方，三个号来自三个地方：
+
+| 位置 | 值 | 来源 |
+| --- | --- | --- |
+| 页头右侧 | 发行版本，如 `0.3.0` | 仓库根 `VERSION`，`nro/Makefile` 编进二进制（`nro/include/dglab/nro/version.h`） |
+| `IPC 版本` 行 | 接口版本，如 `0.2.0` | sysmodule 的 `GET_VERSION`（`DGLAB_IPC_PROTOCOL_VERSION`），与发行版本无关 |
+| `构建标识` 行 | `git describe --always --dirty` 的结果 | `nro/Makefile` 的 `BUILD_STAMP`，用来核对 SD 卡上是哪一次构建 |
+
+发行版本和 IPC 版本在同一页上，把其中一个当成另一个是这里最可能的误读，所以页头的
+值不加标签（它就是这一页自己的版本，和别的页面在页头放状态是一个用法），IPC 那一行
+则必须写明是 IPC 的。三行都在 `about.c` 的同一个行数组里量一次、画一次；`tests/canvas`
+除了渲染这一页，还逐项去掉这三个值，要求画面每次都跟着变（值写进结构体却没画出来
+会在那里失败）。`about` 页没有光标也不滚动，所以它必须自己排在一屏之内——加行前先
+看 `tests/canvas` 的"内容不贴底"检查。
 
 ### 日志环与二维码
 

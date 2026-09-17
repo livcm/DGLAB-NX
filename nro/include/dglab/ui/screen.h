@@ -75,3 +75,8 @@ typedef struct {
 
 void dglabScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     const DglabScreenState* state);
+
+/// The text of one DglabNetState. The socket page's server row and the motion
+/// page's link line are driven by the same state, so both ask this one function
+/// rather than growing a wording of their own (docs/nro-ui.md).
+const char* dglabNetStateText(u32 state);

@@ -25,7 +25,7 @@
 | BLE 模式（sysmodule 直连设备） | 未实现，已搁置，见 `docs/ble-poc.md` |
 
 进度与顺序见 `AGENTS.md` §15：骨架、Sysmodule、IPC、Coyote V3 协议层、WebSocket 模式
-传输、波形接入、NRO 交互、Joy-Con 输入、基础 UI 都已完成；接着做 NRO 元信息与版本管理 →
+传输、波形接入、NRO 交互、Joy-Con 输入、基础 UI、NRO 元信息与版本管理都已完成；接着做
 浅色模式 → 触屏拖动玩法 → deko3d UI 后端 → Overlay → Game Mod 示例 → V4 Socket 协议，
 文档/测试/错误处理是持续项。
 
@@ -61,6 +61,7 @@ DG-LAB App（手机，负责 BLE）  ──BLE──→  DG-LAB 设备
 | --- | --- |
 | `sysmodule/` | DG-LAB 设备生命周期、协议实现、WebSocket 服务端、IPC 服务端 |
 | `nro/` | Homebrew 前端：界面、二维码、测试按键、日志落盘 |
+| `VERSION` | 前端发行版本，唯一来源（进 NACP 与 About 页） |
 | `lang/` | 界面文案，一个语言一个 `.json`（构建时复制到 `release/DGLAB-NX/lang/`） |
 | `overlay/` | Tesla / Ultrahand overlay（未实现） |
 | `mods/` | 特定游戏的联动（未实现） |
@@ -89,6 +90,10 @@ make -C nro package         # release/DGLAB-NX/{DGLAB-NX.nro, lang/*.json}
 
 sysmodule 的 Title ID 只在 `sysmodule/DGLAB-NX-Core.json` 里写一次，Makefile、安装目录名和
 `toolbox.json` 都从它推导，别在别处再抄一份。
+
+前端的发行版本同样只有一个来源：仓库根 `VERSION`（当前 `0.3.0`）。根 `make` 把它传给
+`nro/Makefile`，进 NACP 与 About 页；`make -C nro package` 读的是同一个文件。IPC 接口
+版本是另一回事（`common/include/dglab/ipc.h`，见 `docs/ipc.md` 的"版本"）。
 
 ## 安装
 
