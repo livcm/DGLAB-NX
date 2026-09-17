@@ -1,5 +1,6 @@
 #include <dglab/ui/page.h>
 
+#include <dglab/ui/strings.h>
 #include <dglab/ui/theme.h>
 
 void dglabPageBegin(DglabCanvas* canvas)
@@ -14,8 +15,7 @@ void dglabPageBegin(DglabCanvas* canvas)
     dglabCanvasHLine(canvas, DGLAB_PAGE_MARGIN, DGLAB_PAGE_BAR_Y, rule_width, theme->rule);
 }
 
-void dglabPageHeader(DglabCanvas* canvas, const DglabTextStyle* title, const char* title_text,
-    const DglabTextStyle* right, const char* right_text)
+void dglabPageHeader(DglabCanvas* canvas, const DglabTextStyle* title, const char* title_text)
 {
     if (title && title->font && title_text) {
         // The title sits in the middle of the 88px header, measured in the font
@@ -23,12 +23,20 @@ void dglabPageHeader(DglabCanvas* canvas, const DglabTextStyle* title, const cha
         dglabTextDraw(canvas, title->font, DGLAB_PAGE_TITLE_X,
             (DGLAB_PAGE_RULE_Y - title->font->cell_height) / 2, title_text, title->color);
     }
+}
 
-    if (right && right->font && right_text) {
-        dglabTextDraw(canvas, right->font,
-            DGLAB_PAGE_HINTS_RIGHT - dglabTextWidth(right->font, right_text),
-            (DGLAB_PAGE_RULE_Y - right->font->cell_height) / 2, right_text, right->color);
-    }
+void dglabPageHeaderStatus(DglabCanvas* canvas, DglabGlyphSource* font, bool sysmodule_ok)
+{
+    const DglabTheme* theme = dglabThemeGet();
+    const char* text = dglabString(sysmodule_ok ? DglabString_SysmoduleOk
+                                                : DglabString_SysmoduleDown);
+
+    if (font == NULL)
+        return;
+
+    dglabTextDraw(canvas, font, DGLAB_PAGE_HINTS_RIGHT - dglabTextWidth(font, text),
+        (DGLAB_PAGE_RULE_Y - font->cell_height) / 2, text,
+        sysmodule_ok ? theme->accent : theme->error);
 }
 
 int dglabHintWidth(DglabGlyphSource* font, const DglabHint* hint)

@@ -12,6 +12,8 @@
 #include <dglab/ui/canvas.h>
 #include <dglab/ui/text.h>
 
+#include <stdbool.h>
+
 #define DGLAB_PAGE_WIDTH 1280
 #define DGLAB_PAGE_HEIGHT 720
 /// Left and right margin of the two rules that split the page.
@@ -60,11 +62,16 @@ typedef struct {
 /// Fills the page and draws the two rules.
 void dglabPageBegin(DglabCanvas* canvas);
 
-/// The page title (28px), plus an optional right hand side - the link state, the
-/// IPC version - drawn in its own style and right aligned with the hints. Pass a
-/// NULL `right` or `right_text` for a page without one.
-void dglabPageHeader(DglabCanvas* canvas, const DglabTextStyle* title, const char* title_text,
-    const DglabTextStyle* right, const char* right_text);
+/// The page title (28px). The right hand side of the title bar is the sysmodule
+/// state and comes from dglabPageHeaderStatus() below, so the line reads the same
+/// on every page (docs/nro-ui.md).
+void dglabPageHeader(DglabCanvas* canvas, const DglabTextStyle* title, const char* title_text);
+
+/// The right hand side of the title bar: whether the sysmodule still answers a
+/// PING. One function, so "every page shows the same status" is a property of the
+/// code rather than a convention. Right aligned with the hints, and centred by
+/// the font that draws it.
+void dglabPageHeaderStatus(DglabCanvas* canvas, DglabGlyphSource* font, bool sysmodule_ok);
 
 /// The bottom bar's hints, in reading order (left to right).
 ///

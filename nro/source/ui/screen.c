@@ -271,7 +271,13 @@ static void drawInfoColumn(DglabCanvas* canvas, const DglabFontSet* fonts,
         .value = state->status_ok ? dglabNetStateText(status->state)
                                   : dglabString(DglabString_StateIpcFailed),
         .value_color = state->status_ok ? stateColor(status->state) : theme->error,
-        .note = statusHasWarning(state) ? dglabString(DglabString_SleepWarning) : NULL,
+        // Two wordings for the same warning: once the front end has switched the
+        // console's automatic sleep off (dglab/nro/auto_sleep.h), what is left to
+        // watch out for is a sleep the user asks for.
+        .note = statusHasWarning(state)
+            ? dglabString(state->auto_sleep_suppressed ? DglabString_SleepWarningAutoOff
+                                                       : DglabString_SleepWarning)
+            : NULL,
     };
     rows[1] = (DglabRow){
         .kind = DglabRow_Item,
@@ -322,15 +328,11 @@ static void drawSocketPage(DglabCanvas* canvas, const DglabFontSet* fonts,
 {
     const DglabTheme* theme = dglabThemeGet();
     DglabTextStyle title = { fonts->title, theme->text };
-    DglabTextStyle right = { fonts->value, theme->muted };
     DglabHint hints[5];
-    char ipc[64];
-
-    snprintf(ipc, sizeof(ipc), "IPC %u.%u.%u", (unsigned)state->version.major,
-        (unsigned)state->version.minor, (unsigned)state->version.patch);
 
     dglabPageBegin(canvas);
-    dglabPageHeader(canvas, &title, dglabString(DglabString_SocketTitle), &right, ipc);
+    dglabPageHeader(canvas, &title, dglabString(DglabString_SocketTitle));
+    dglabPageHeaderStatus(canvas, fonts->value, state->sysmodule_ok);
     dglabPageClipWide(canvas);
 
     drawQrColumn(canvas, fonts, state);
@@ -359,32 +361,24 @@ static void drawLogPage(DglabCanvas* canvas, const DglabFontSet* fonts,
 {
     const DglabTheme* theme = dglabThemeGet();
     DglabTextStyle title = { fonts->title, theme->text };
-    DglabTextStyle right = { fonts->value, theme->muted };
-    DglabHint hints[3];
-    char ipc[64];
+    DglabListPage page;
+    DglabHint hints[2];
     int view_height = DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP;
     int content_height = state->log_count * DGLAB_SCREEN_LOG_PITCH;
-    int offset = state->log_offset;
 
-    if (content_height > view_height) {
-        if (offset > content_height - view_height)
-            offset = content_height - view_height;
-    } else {
-        offset = 0;
-    }
-
-    if (offset < 0)
-        offset = 0;
-
-    snprintf(ipc, sizeof(ipc), "IPC %u.%u.%u", (unsigned)state->version.major,
-        (unsigned)state->version.minor, (unsigned)state->version.patch);
+    // The page is a list of lines rather than of rows, but it scrolls like one:
+    // the same layout decides how far the offset may go and whether the bar is
+    // drawn at all.
+    page = dglabListPageLayout(DGLAB_PAGE_CONTENT_TOP, view_height, content_height,
+        state->log_offset);
 
     dglabPageBegin(canvas);
-    dglabPageHeader(canvas, &title, dglabString(DglabString_LogTitle), &right, ipc);
+    dglabPageHeader(canvas, &title, dglabString(DglabString_LogTitle));
+    dglabPageHeaderStatus(canvas, fonts->value, state->sysmodule_ok);
     dglabPageClipContent(canvas);
 
     for (int i = 0; i < state->log_count; i++) {
-        int y = DGLAB_PAGE_CONTENT_TOP - offset + i * DGLAB_SCREEN_LOG_PITCH;
+        int y = DGLAB_PAGE_CONTENT_TOP - page.offset + i * DGLAB_SCREEN_LOG_PITCH;
 
         dglabTextDraw(canvas, fonts->body, DGLAB_PAGE_CONTENT_X, y, state->log_lines[i],
             theme->text);
@@ -392,15 +386,15 @@ static void drawLogPage(DglabCanvas* canvas, const DglabFontSet* fonts,
 
     dglabCanvasClearClip(canvas);
 
-    dglabListScrollBar(canvas, DGLAB_PAGE_CONTENT_TOP, view_height, content_height, offset);
+    dglabListPageScrollBar(canvas, &page);
 
-    hints[0] = (DglabHint){ DglabButton_Up, DglabButton_Down,
-        dglabString(DglabString_ActionScroll), };
-    hints[1] = (DglabHint){ DglabButton_Y, DglabButton_None,
+    // No scroll hint: the bar on the right edge says the log is longer than the
+    // screen, and up/down still move it one line per press (docs/nro-ui.md).
+    hints[0] = (DglabHint){ DglabButton_Y, DglabButton_None,
         dglabString(DglabString_ActionClose), };
-    hints[2] = (DglabHint){ DglabButton_B, DglabButton_None,
+    hints[1] = (DglabHint){ DglabButton_B, DglabButton_None,
         dglabString(DglabString_ActionBack), };
-    dglabPageHints(canvas, fonts->icon, fonts->body, hints, 3);
+    dglabPageHints(canvas, fonts->icon, fonts->body, hints, 2);
 }
 
 void dglabScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,

@@ -66,6 +66,21 @@ typedef struct {
     bool navigation; ///< menu lists get the console's accent bar as well
 } DglabListStyle;
 
+/// The vertical layout of a page of rows: the band it is drawn in, how tall the
+/// measured content is, and how far it can be scrolled.
+///
+/// Every page that draws a list builds this from the same DglabRow array it
+/// hands to dglabListDraw, so the bar it shows and the rows it draws cannot
+/// disagree - and "the content is taller than the page" is decided in one place
+/// instead of once per screen (docs/nro-ui.md).
+typedef struct {
+    int view_top;       ///< the first y the content may use
+    int view_height;    ///< how tall that band is
+    int content_height; ///< what dglabListMeasure returned
+    int max_offset;     ///< content_height - view_height, or 0
+    int offset;         ///< the requested offset, clamped to what is reachable
+} DglabListPage;
+
 /// Measures every row into `boxes` and returns the total height. Returns 0 when
 /// the rows do not fit `capacity`, which is a programming error rather than a
 /// layout the caller has to handle: the screens size their row arrays statically.
@@ -78,11 +93,22 @@ void dglabListDraw(DglabCanvas* canvas, const DglabListFonts* fonts, const Dglab
 /// Moves the focus by `delta` rows, skipping the notes and wrapping around.
 int dglabListFocusMove(const DglabRow* rows, int count, int focus, int delta);
 
+/// Works out how tall the page's content is against the band it is drawn in, and
+/// clamps `offset` to what is actually reachable (`0..max_offset`).
+DglabListPage dglabListPageLayout(int view_top, int view_height, int content_height, int offset);
+
+/// Whether the content is taller than the view: the page needs a way to scroll
+/// it, and it is the same condition the scrollbar is drawn under.
+bool dglabListPageScrolls(const DglabListPage* page);
+
 /// The scrollbar the console draws on the right edge, when the content is taller
-/// than the view. Drawn outside the content clip.
-void dglabListScrollBar(DglabCanvas* canvas, int view_top, int view_height, int content_height,
-    int offset);
+/// than the view. Drawn outside the content clip, and only then.
+void dglabListPageScrollBar(DglabCanvas* canvas, const DglabListPage* page);
 
 /// Keeps `y` (a row's own top, in content coordinates) inside the view, used to
 /// scroll the focused row into sight.
 int dglabListScrollFor(int offset, int max_offset, int view_height, int row_y, int row_height);
+
+/// Keeps a scroll offset inside the content: 0 at the top, at most `max_offset`
+/// at the bottom. A `max_offset` below 0 (a page that fits) means 0.
+int dglabListScrollClamp(int offset, int max_offset);

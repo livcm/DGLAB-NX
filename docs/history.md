@@ -1100,6 +1100,92 @@ AGENTS 只留一句指针；`docs/nro-ui.md` 的面板小节并入"实现记录"
 2. `docs/dglab-protocol.md` 不是"纯 BLE 文档"：它的 B0/BF/B1 与波形频率换算被 WebSocket
    模式的 `pulse` 编码复用（`sysmodule/source/net/dglab_socket.c` 与 `NET_WAVEFORM`）。
 
+## 9. 追加（2026-09-18）：浅色主题的实现口径
+
+需求（用户原话的意思）：参考 HOS 浅色主题截图给 NRO 加浅色模式；先判断能不能跟随系统，
+不行就以深色为默认；当前颜色主题的列表项放在关于页语言行下方，按 `Y` 切换。
+
+实现前的两条核对（先查再写，见根 `AGENTS.md` §4）：
+
+1. libnx 确实有 `setsysGetColorSetId()`（`switch/services/set.h:1106`，
+   `ColorSetId_Light = 0` / `ColorSetId_Dark = 1`），所以"跟随系统"可以做，不需要
+   fallback 成"默认深色"；取不到系统的分支仍然保留，那一条按用户要求落到深色。
+2. 用户给的截图是 1280×720 的原生浅色主题系统设置页，与深色那批截图同一来源，因此
+   按"逐像素量"的规矩直接量，不猜色。量的工具是一段一次性的 PNG 解码脚本（`sips` 转
+   PNG 后在内存里解 filter、按区域取众数/中位数），数值见 `docs/nro-ui.md` 新表。
+
+两条需要用户拍板的取舍（2026-09-18 确认）：
+
+- **跟随系统只在启动与重建画面时读一次**，不做每秒轮询：NRO 在前台时用户进不去系统
+  设置，代价是"挂起期间改了系统主题要重启 NRO 才会跟上"，这一点写进了文档；
+- **截图里量不到的颜色先沿用深色值**（`error` / `warn` / 对话框三色）：截图里没有错误
+  提示、也没有对话框，按"截图到位前不写数值"的规矩不编数，文档标注"未量到"。
+
+落点与踩过的点：
+
+| 文件 | 写了什么 |
+| --- | --- |
+| `nro/include/dglab/ui/theme.h`、`nro/source/ui/theme.c` | 浅色调色板、`DglabThemeMode`（auto/light/dark）与 `dglabThemeResolve()`；`dglabThemeGet/Set()` 语义不变 |
+| `nro/include/dglab/ui/settings.h`、`nro/source/ui/settings.c` | `app.cfg` 改为一个模块拥有两个键（`language=` / `theme=`）；解析从默认值起步，旧文件升级不丢语言 |
+| `nro/source/ui/language.c` | `dglabLanguageSerialize/Parse` 删除（语言偏好仍在这里，文件格式归 settings.c） |
+| `nro/source/main.c` | `setsysInitialize()` + `appThemeApply()`（启动与 `appDisplayReopen()` 各一次）、`appSettingsSave/Load()`、关于页 `Y` 与主题进入重绘判定 |
+| `nro/source/ui/about.c` | 第八行「颜色主题」，Auto 显示成 `跟随系统（深色）`；底栏第三条提示 `[Y] 切换主题` |
+| `lang/*.json`、`nro/source/ui/strings.*` | 新增 5 条文案（`action_theme`、`about_theme*`） |
+| `tests/canvas/test_canvas.c` | 区域检查与页头状态检查改成"两套调色板 × 两种语言 × 720p/1080p"，新增关于页主题行用例 |
+| `tests/lang/test_appcfg.c`（新）、`tests/lang/Makefile` | `app.cfg` 的往返/升级/未知行/未知值，以及主题模式的键、循环与 `Auto + 取不到系统 = 深色` |
+| `tests/canvas/tools/render_preview.c` | `PREVIEW_THEME=light`，不用主机就能看浅色各屏 |
+
+写测试时发现的两件事，都是主机侧字体的性质，后面改屏要注意：
+
+- 关于页在主机块字体下**总是比一屏高**，主题行是最后一行，所以那条用例必须把 `offset`
+  推到被夹紧的位置才看得到这一行（`offset = 0` 时它根本不在画面里，早先的比较因此全等）；
+- 同一个块字体每个字符都是一样宽的黑块，`浅色` 与 `深色` 都是两个全宽字形，**像素完全
+  相同**：这条用例只用英文串比较（`Light` / `Dark` 长度不同），值本身的语义由
+  `tests/lang` 的解析用例守住。
+
+## 10. 追加（2026-09-18）：NRO 侧自动休眠抑制的口径
+
+需求（用户原话的意思）：服务端运行时让主机的自动休眠定时器不生效；能不能做、怎么做先在
+NRO 上研究，放弃 sysmodule 那条路线。
+
+先查再写（根 `AGENTS.md` §4），查证结果：
+
+1. `set:sys` 有直接对口的接口：`setsysGetSleepSettings()` / `setsysSetSleepSettings()`，配合
+   `SetSysHandheldSleepPlan_Never` / `SetSysConsoleSleepPlan_Never`（libnx 的
+   `switch/services/set.h`）。两个符号在 `libnx.a` 里确实存在（`nm` 查过）。
+2. applet 侧也有：`appletSetAutoSleepDisabled()` / `appletIsAutoSleepDisabled()`
+   （`applet.h`，`ISelfController`，5.0.0+，头文件**没有**标注 AppletType 限制），以及
+   `appletSetMediaPlaybackState()`（`IApplicationFunctions`，注释写明"true 则禁用变暗与自动休眠"，
+   但只对 `AppletType_*Application` 可用）。
+3. NPDM 里的 `svcSleepSystem` 是 devkitPro sysmodule 模板原样带来的全量 syscall 表里的一项，
+   与"能不能阻止睡眠"无关（对照过 `/opt/devkitpro/examples/switch/templates/sysmodule/sysmodule.json`）。
+
+用户拍板的三条（2026-09-18）：
+
+- 走 **NRO 侧抑制**（applet），不改 sysmodule、不碰 `set:sys`：那条路要改用户可见、掉电保持的
+  全局设置，写权限还没验证过，而且同样挡不住手动休眠；
+- 抑制失败只记日志并保留旧警告文案，不因此拒绝启动服务端；
+- 服务端页的警告按状态显示两种文案（抑制生效 / 未生效）。
+
+落点：
+
+| 文件 | 写了什么 |
+| --- | --- |
+| `nro/include/dglab/nro/auto_sleep.h`、`nro/source/platform/auto_sleep.c`（新） | 唯一所有者：只在服务端状态变化时动作；进入抑制前先读一次，本来就关的不接管也不恢复；失败回传 `Result` 与事件类型 |
+| `nro/source/main.c` | socket 页与体感页在轮询到服务端状态后调 `dglabAutoSleepFollowServer()`，结果写一行日志；退出前 `dglabAutoSleepRestore()`；`DglabScreenSnapshot` 与新字段一起进重绘判定 |
+| `nro/include/dglab/ui/screen.h`、`nro/source/ui/screen.c` | `DglabScreenState::auto_sleep_suppressed`，服务端行的 note 在两条文案之间切换 |
+| `lang/*.json`、`nro/source/ui/strings.*` | 新增 `sleep_warning_auto_off`（en：`Auto sleep is off; sleeping by hand still hangs the console`） |
+| `tests/canvas/test_canvas.c` | socket 页的排版用例从 4 种状态扩到 6 种，让两套警告文案都过一遍区域与"内容不贴底"检查 |
+
+已知边界（写进了 `docs/dglab-socket.md` 的「睡眠与唤醒」与 `README.md` 的已知限制）：
+
+- **手动休眠（电源键）仍然会卡死**：自动休眠关得掉，用户按下去的睡眠挡不住；
+- **NRO 退出后服务端仍在跑时**，applet 会话结束、抑制失效，自动休眠仍会卡死。这条按用户选择保留，
+  等做 Overlay 时一起解决。
+
+**实机结论待回填**（2026-09-18 未做）：需要确认 applet 模式（相册进入）与 title override 下
+`appletSetAutoSleepDisabled` 都生效、把系统休眠设成 1 分钟放着不动确实不休眠、停服后自动休眠恢复。
+
 ## 附录：审计中看到的代码注释残留（不在本次范围）
 
 顺手指出来，因为它们是同一批改动的尾巴：

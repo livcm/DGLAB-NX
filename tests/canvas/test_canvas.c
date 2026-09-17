@@ -301,7 +301,7 @@ static void testScreen(void)
 
     memset(&state, 0, sizeof(state));
     state.status_ok = true;
-    state.version.minor = 2;
+    state.sysmodule_ok = true;
     state.status.state = DglabNetState_Paired;
     state.status.port = 9999;
     state.status.app_feedback = DGLAB_NET_FEEDBACK_NONE;
@@ -1244,18 +1244,21 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             checkPageStaysInItsRegions(name, blue, false);
         }
 
-        // The socket page, in the four states that change what it draws: the
-        // server running or not, and a QR code available or not. The log page is
-        // part of the same view.
-        for (unsigned variant = 0; variant < 4; variant++) {
+        // The socket page, in the states that change what it draws: the server
+        // running or not, a QR code available or not, and - while the server runs
+        // - whether automatic sleep is suppressed, which is the other wording of
+        // the warning line under the server row. The log page is part of the same
+        // view.
+        for (unsigned variant = 0; variant < 6; variant++) {
             bool running = (variant & 1) != 0;
             bool have_qr = (variant & 2) != 0;
+            bool suppressed = running && (variant & 4) != 0;
             DglabScreenState screen;
             char name[96];
 
             memset(&screen, 0, sizeof(screen));
             screen.status_ok = true;
-            screen.version.minor = 2;
+            screen.sysmodule_ok = (variant % 2) == 0;
             screen.status.state = running ? DglabNetState_Paired : DglabNetState_Idle;
             screen.status.port = 9999;
             screen.status.sessions = 9999;
@@ -1283,6 +1286,7 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             screen.test_strength_b = 100;
             screen.last_command = "waveform A  no app bound";
             screen.last_command_tone = DglabCmdTone_Warn;
+            screen.auto_sleep_suppressed = suppressed;
             screen.log_lines = log_lines;
             screen.log_count = DGLAB_SCREEN_LOG_LINES;
 
@@ -1359,8 +1363,11 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             }
         }
 
-        // The about page, with the longest url the row can carry.
-        {
+        // The about page, with the longest url the row can carry: at the top, and
+        // scrolled well past the end of its content - which the page clamps - so
+        // the bar and the last rows are drawn in both states. This page scrolls,
+        // so it is allowed to run up to the clip edge like the menu does.
+        for (unsigned variant = 0; variant < 2; variant++) {
             DglabAboutState about;
             char name[96];
 
@@ -1375,20 +1382,22 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             about.ipc_version.minor = 2;
             about.ipc_version.patch = 3;
             about.github_url = "https://github.com/livcm/DGLAB-NX";
+            about.sysmodule_ok = (variant % 2) == 0;
+            about.offset = variant == 0 ? 0 : 400;
 
-            snprintf(name, sizeof(name), "%s about", frames);
+            snprintf(name, sizeof(name), "%s about %u", frames, variant);
             beginPage(&canvas, blue);
             dglabAboutDraw(&canvas, fonts, &about);
             checkPageStaysInItsRegions(name, blue, false);
-            checkContentClearsTheBar(name);
         }
     }
 }
 
 // The three things the About page exists to tell apart: the release version of
-// this NRO (in the header), the IPC interface version of the sysmodule, and the
-// build stamp. They arrive in three separate fields, and the page has to draw
-// all three: drop any one of them and the frame changes.
+// this NRO (its own row, since the header carries the sysmodule state like every
+// other page), the IPC interface version of the sysmodule, and the build stamp.
+// They arrive in three separate fields, and the page has to draw all three: drop
+// any one of them and the frame changes.
 //
 // This source has one glyph for every character, so what the page drew cannot be
 // read back - but a longer value is drawn wider, and a missing one is not drawn
@@ -1418,8 +1427,8 @@ static void testAboutShowsItsThreeVersions(void)
     dglabAboutDraw(&canvas, &fonts, &about);
     memcpy(base, g_screen_pixels, screenBytes());
 
-    // The release version is the page's header, which is drawn only when there is
-    // one: a build that never got one shows exactly this.
+    // The release version is a row of its own, drawn only when there is one: a
+    // build that never got one shows exactly this.
     about.app_version = "";
     beginPage(&canvas, blue);
     dglabAboutDraw(&canvas, &fonts, &about);
@@ -1437,29 +1446,303 @@ static void testAboutShowsItsThreeVersions(void)
     beginPage(&canvas, blue);
     dglabAboutDraw(&canvas, &fonts, &about);
     CHECK(countDifferingPixels(base, g_screen_pixels, screenBytes()) > 0);
+    about.ipc_version.major = 4;
+
+    // In this font the page is taller than the screen in both languages (one of
+    // the two paragraphs wraps at this column width), which is what the scroll
+    // keys and the bottom bar's scroll hint are for. On a console the real system
+    // font is narrower and the page fits, so this is the branch the pages
+    // themselves cannot be relied on to reach; a wording change that made the
+    // page fit here as well would leave them as dead weight, so it fails here.
+    CHECK(dglabAboutContentHeight(&fonts, &about) >
+          DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP);
+
+    beginPage(&canvas, blue);
+    dglabAboutDraw(&canvas, &fonts, &about);
+    memcpy(base, g_screen_pixels, screenBytes());
+
+    // Scrolling moves the rows, and the console's scrollbar says how far there is
+    // left to go: it is drawn in its own column on the right edge.
+    about.offset = 400;
+    beginPage(&canvas, blue);
+    dglabAboutDraw(&canvas, &fonts, &about);
+    CHECK(countDifferingPixels(base, g_screen_pixels, screenBytes()) > 0);
+
+    {
+        int bar_x = DGLAB_PAGE_WIDTH - 17;
+        int bar = 0;
+
+        for (int y = DGLAB_PAGE_CONTENT_TOP; y < DGLAB_PAGE_CONTENT_BOTTOM; y++) {
+            for (int x = bar_x; x < bar_x + 4; x++) {
+                if (screenPixel(x, y) == dglabThemeGet()->scrollbar)
+                    bar++;
+            }
+        }
+
+        CHECK(bar > 0);
+    }
 }
 
-// The same suite for every language and for both frames the NRO draws into: the
-// handheld 720p one, and the docked 1080p one whose whole point is that the
-// layout is unchanged.
+// The colour theme is a page input of the About screen - Y cycles it and the row
+// says which value it took - so the row has to be drawn, and the palette the
+// preference resolves to has to be the one the page is drawn with. A field that
+// reaches the state struct but not the screen is exactly what these renders
+// catch.
+//
+// The English strings are used on purpose: the host's block font draws one solid
+// rectangle per character, so two values of the same length are the same pixels
+// (浅色 and 深色 are), and only the English pair has different lengths.
+static void testAboutShowsItsThemeRow(void)
+{
+    static uint8_t base[DOCK_PIXEL_WIDTH * DOCK_PIXEL_HEIGHT * 4];
+    const uint32_t blue = DGLAB_RGBA(0, 0, 0xFF, 0xFF);
+    DglabFontSet fonts = blockFonts();
+    DglabAboutState about;
+    DglabCanvas canvas;
+
+    dglabStringsSetLanguage(DglabLanguage_English);
+    setScreenSize(SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, 1, 1);
+
+    memset(&about, 0, sizeof(about));
+    about.preference = DglabLanguage_English;
+    about.resolved = DglabLanguage_English;
+    about.theme = DglabThemeMode_Auto;
+    about.theme_system_is_dark = true;
+    about.app_version = "0.3.0";
+    about.build_id = "8a2fcb6";
+    about.ipc_version.major = 1;
+    about.ipc_version.minor = 2;
+    about.ipc_version.patch = 3;
+    about.github_url = "https://github.com/livcm/DGLAB-NX";
+    // The theme row is the last one, and in the host font the page is taller than
+    // the screen: scrolled to the end (the page clamps the offset) is the only
+    // state in which the row is on screen at all.
+    about.offset = 1000;
+
+    beginPage(&canvas, blue);
+    dglabAboutDraw(&canvas, &fonts, &about);
+    memcpy(base, g_screen_pixels, screenBytes());
+
+    // Auto draws "Follow the system (Dark)" here, which is wider than "Light":
+    // the row follows the preference.
+    about.theme = DglabThemeMode_Light;
+    beginPage(&canvas, blue);
+    dglabAboutDraw(&canvas, &fonts, &about);
+    CHECK(countDifferingPixels(base, g_screen_pixels, screenBytes()) > 0);
+
+    // And the fixed values are their own text, not one "not auto" state.
+    memcpy(base, g_screen_pixels, screenBytes());
+    about.theme = DglabThemeMode_Dark;
+    beginPage(&canvas, blue);
+    dglabAboutDraw(&canvas, &fonts, &about);
+    CHECK(countDifferingPixels(base, g_screen_pixels, screenBytes()) > 0);
+
+    // The same rows on the light table: the preference picks the palette the
+    // whole page is painted with, not just the words in the row.
+    about.theme = DglabThemeMode_Auto;
+    dglabThemeSet(NULL);
+    beginPage(&canvas, blue);
+    dglabAboutDraw(&canvas, &fonts, &about);
+    memcpy(base, g_screen_pixels, screenBytes());
+
+    dglabThemeSet(&dglabThemeLight);
+    beginPage(&canvas, blue);
+    dglabAboutDraw(&canvas, &fonts, &about);
+    CHECK(countDifferingPixels(base, g_screen_pixels, screenBytes()) > 0);
+    dglabThemeSet(NULL);
+}
+
+// "A bar only when the content is taller than the page" is one rule, and it
+// lives in one function - so the branch a page cannot reach on its own is
+// checked here directly. (In the host font both language files make the about
+// page taller than the screen, so its own renders never reach "it fits".)
+static void testListPageLayout(void)
+{
+    DglabListPage page;
+
+    // Shorter than the view: nothing to scroll, and a caller that asks anyway is
+    // clamped back to the top rather than scrolling into empty space.
+    page = dglabListPageLayout(DGLAB_PAGE_CONTENT_TOP, 519, 400, 0);
+    CHECK(page.max_offset == 0);
+    CHECK(!dglabListPageScrolls(&page));
+    CHECK(page.offset == 0);
+
+    page = dglabListPageLayout(DGLAB_PAGE_CONTENT_TOP, 519, 400, 90);
+    CHECK(page.offset == 0);
+
+    // Taller than the view: the bar is drawn and the offset stops at the bottom.
+    page = dglabListPageLayout(DGLAB_PAGE_CONTENT_TOP, 519, 553, 0);
+    CHECK(page.max_offset == 34);
+    CHECK(dglabListPageScrolls(&page));
+
+    page = dglabListPageLayout(DGLAB_PAGE_CONTENT_TOP, 519, 553, 400);
+    CHECK(page.offset == 34);
+
+    page = dglabListPageLayout(DGLAB_PAGE_CONTENT_TOP, 519, 553, -20);
+    CHECK(page.offset == 0);
+
+    // The same clamp, on its own: it is what main.c uses to keep a page's own
+    // scroll offset inside the content.
+    CHECK(dglabListScrollClamp(-5, 100) == 0);
+    CHECK(dglabListScrollClamp(40, 100) == 40);
+    CHECK(dglabListScrollClamp(400, 100) == 100);
+    CHECK(dglabListScrollClamp(5, -20) == 0);
+}
+
+// One page of the status check below: the state each screen needs, built fresh,
+// so the only thing that differs between two renders of the same page is
+// `sysmodule_ok`. Page 2 is the log sub-page, i.e. the socket page with its log
+// open.
+static void drawStatusProbe(unsigned page, bool ok, const DglabFontSet* fonts)
+{
+    static const char* const log_lines[2] = { "socket server core ready", "app bound" };
+    const uint32_t blue = DGLAB_RGBA(0, 0, 0xFF, 0xFF);
+    DglabMotionFeedConfig config;
+    DglabAboutState about;
+    DglabAdvancedState advanced;
+    DglabMenuState menu;
+    DglabMotionScreenState motion;
+    DglabScreenState screen;
+    DglabCanvas canvas;
+
+    dglabMotionSettingsDefault(&config);
+
+    memset(&menu, 0, sizeof(menu));
+    memset(&screen, 0, sizeof(screen));
+    memset(&motion, 0, sizeof(motion));
+    memset(&advanced, 0, sizeof(advanced));
+    memset(&about, 0, sizeof(about));
+
+    menu.sysmodule_ok = ok;
+
+    screen.sysmodule_ok = ok;
+    screen.status_ok = true;
+    screen.status.state = DglabNetState_Paired;
+    screen.log_lines = log_lines;
+    screen.log_count = 2;
+
+    motion.sysmodule_ok = ok;
+    motion.link = dglabNetStateText(DglabNetState_Paired);
+    motion.last_upload = "-";
+
+    advanced.sysmodule_ok = ok;
+    advanced.config = &config;
+    advanced.saved = true;
+
+    about.sysmodule_ok = ok;
+    about.app_version = "0.3.0";
+    about.build_id = "8a2fcb6";
+    about.github_url = "https://github.com/livcm/DGLAB-NX";
+
+    beginPage(&canvas, blue);
+
+    switch (page) {
+        case 0: dglabMenuDraw(&canvas, fonts, &menu); break;
+        case 1: dglabScreenDraw(&canvas, fonts, &screen); break;
+        case 2:
+            screen.log_open = true;
+            dglabScreenDraw(&canvas, fonts, &screen);
+            break;
+        case 3: dglabMotionScreenDraw(&canvas, fonts, &motion); break;
+        case 4: dglabAdvancedDraw(&canvas, fonts, &advanced); break;
+        default: dglabAboutDraw(&canvas, fonts, &about); break;
+    }
+}
+
+// Every page's title bar carries the sysmodule state, and it is the same line
+// everywhere because one function draws it. Flipping the flag has to change the
+// frame, and every pixel that changes has to be in the header band: a page that
+// put its status anywhere else, or that shows a status of its own, fails here.
+static void testEveryPageShowsTheSysmoduleStatus(void)
+{
+    static const char* const names[] = { "menu", "socket", "log", "motion", "advanced",
+        "about" };
+    static uint8_t base[DOCK_PIXEL_WIDTH * DOCK_PIXEL_HEIGHT * 4];
+    DglabFontSet fonts = blockFonts();
+
+    setScreenSize(SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, 1, 1);
+
+    // Both palettes: the status line is drawn in the theme's accent (or its
+    // error colour) either way, so the rule holds on the light table too.
+    for (unsigned mode = 0; mode < 2; mode++) {
+        dglabThemeSet(mode == 0 ? NULL : &dglabThemeLight);
+
+        for (unsigned page = 0; page < sizeof(names) / sizeof(names[0]); page++) {
+            int header_bottom = dglabCanvasScale(&g_page_canvas, DGLAB_PAGE_RULE_Y);
+            int changed = 0;
+            int outside = 0;
+
+            drawStatusProbe(page, true, &fonts);
+            memcpy(base, g_screen_pixels, screenBytes());
+
+            drawStatusProbe(page, false, &fonts);
+
+            for (int y = 0; y < g_screen_height; y++) {
+                for (int x = 0; x < g_screen_width; x++) {
+                    size_t offset = ((size_t)y * (size_t)g_screen_width + (size_t)x) * 4u;
+
+                    if (memcmp(base + offset, g_screen_pixels + offset, 4) == 0)
+                        continue;
+
+                    changed++;
+
+                    if (y > header_bottom) {
+                        if (outside < 4)
+                            printf("    %s %s: %d,%d changed outside the header\n",
+                                mode == 0 ? "dark" : "light", names[page], x, y);
+
+                        outside++;
+                    }
+                }
+            }
+
+            if (changed == 0 || outside)
+                printf("  %s %s: %d pixels changed, %d of them below the header\n",
+                    mode == 0 ? "dark" : "light", names[page], changed, outside);
+
+            CHECK(changed > 0);
+            CHECK(outside == 0);
+        }
+    }
+
+    dglabThemeSet(NULL);
+}
+
+// The same suite for every language, for both palettes, and for both frames the
+// NRO draws into: the handheld 720p one, and the docked 1080p one whose whole
+// point is that the layout is unchanged. The light theme is not a second layout
+// - it is the same one with the other table - so it has to pass exactly the same
+// check, rules and background included.
 static void testEveryPageStaysInItsRegions(void)
 {
     static const DglabLanguage languages[2] = { DglabLanguage_English,
         DglabLanguage_ChineseSimplified };
+    static const DglabThemeMode themes[2] = { DglabThemeMode_Dark, DglabThemeMode_Light };
     DglabFontSet handheld = blockFonts();
     DglabFontSet docked = dockFonts();
 
     for (size_t lang = 0; lang < sizeof(languages) / sizeof(languages[0]); lang++) {
         dglabStringsSetLanguage(languages[lang]);
 
-        setScreenSize(SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, 1, 1);
-        checkEveryPage("720p", &handheld);
+        for (size_t mode = 0; mode < sizeof(themes) / sizeof(themes[0]); mode++) {
+            char frames[32];
 
-        setScreenSize(DOCK_PIXEL_WIDTH, DOCK_PIXEL_HEIGHT, DOCK_SCALE_NUM, DOCK_SCALE_DEN);
-        checkEveryPage("1080p", &docked);
+            dglabThemeSet(dglabThemeResolve(themes[mode], true));
+
+            setScreenSize(SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, 1, 1);
+            snprintf(frames, sizeof(frames), "720p %s",
+                themes[mode] == DglabThemeMode_Light ? "light" : "dark");
+            checkEveryPage(frames, &handheld);
+
+            setScreenSize(DOCK_PIXEL_WIDTH, DOCK_PIXEL_HEIGHT, DOCK_SCALE_NUM, DOCK_SCALE_DEN);
+            snprintf(frames, sizeof(frames), "1080p %s",
+                themes[mode] == DglabThemeMode_Light ? "light" : "dark");
+            checkEveryPage(frames, &docked);
+        }
     }
 
     // The other tests and the previews assume the default table.
+    dglabThemeSet(NULL);
     setScreenSize(SCREEN_PIXEL_WIDTH, SCREEN_PIXEL_HEIGHT, 1, 1);
     dglabStringsSetLanguage(DglabLanguage_English);
 }
@@ -1492,6 +1775,9 @@ int main(void)
     testMotionScreen();
     testAdvancedScreen();
     testAboutShowsItsThreeVersions();
+    testAboutShowsItsThemeRow();
+    testListPageLayout();
+    testEveryPageShowsTheSysmoduleStatus();
     testEveryPageStaysInItsRegions();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

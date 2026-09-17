@@ -9,7 +9,8 @@
 
 // The mode menu: one row per mode, the description of the selected one under it,
 // and the sysmodule's liveness in the header - every mode needs it, and finding
-// out only after entering one wastes a trip through the menu.
+// out only after entering one wastes a trip through the menu. The header's status
+// is the same call every other page makes, so the line means one thing.
 //
 // A row's name is the page's own title, read from the same string, so "the list
 // says X and the page says Y" cannot happen.
@@ -74,15 +75,13 @@ void dglabMenuDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabMe
     DglabRowBox boxes[DglabMenu_ItemCount + 1];
     DglabHint hints[2];
     DglabTextStyle title = { fonts->title, theme->text };
-    DglabTextStyle status = { fonts->value, theme->accent };
     DglabListStyle style;
+    DglabListPage page;
     unsigned selected = state ? state->selected : 0;
     bool ok = state ? state->sysmodule_ok : true;
     int count = 0;
     int view_height = DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP;
     int content_height;
-    int max_offset;
-    int offset;
 
     if (selected >= (unsigned)DglabMenu_ItemCount)
         selected = 0;
@@ -105,23 +104,21 @@ void dglabMenuDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabMe
 
     content_height = dglabListMeasure(&list_fonts, rows, count, DGLAB_PAGE_CONTENT_WIDTH, boxes,
         (int)(sizeof(boxes) / sizeof(boxes[0])));
-    max_offset = content_height > view_height ? content_height - view_height : 0;
+    page = dglabListPageLayout(DGLAB_PAGE_CONTENT_TOP, view_height, content_height, 0);
     // The focus sits on the item row, which is the selected one's own index: the
     // note is only ever added after it.
-    offset = dglabListScrollFor(0, max_offset, view_height, boxes[selected].y,
+    page.offset = dglabListScrollFor(0, page.max_offset, view_height, boxes[selected].y,
         boxes[selected].height);
 
-    status.color = ok ? theme->accent : theme->error;
-
     dglabPageBegin(canvas);
-    dglabPageHeader(canvas, &title, dglabString(DglabString_MenuTitle), &status,
-        ok ? dglabString(DglabString_SysmoduleOk) : dglabString(DglabString_SysmoduleDown));
+    dglabPageHeader(canvas, &title, dglabString(DglabString_MenuTitle));
+    dglabPageHeaderStatus(canvas, fonts->value, ok);
 
     dglabPageClipContent(canvas);
 
     style = (DglabListStyle){
         .x = DGLAB_PAGE_CONTENT_X,
-        .origin_y = DGLAB_PAGE_CONTENT_TOP - offset,
+        .origin_y = DGLAB_PAGE_CONTENT_TOP - page.offset,
         .width = DGLAB_PAGE_CONTENT_WIDTH,
         .focus = (int)selected,
         .navigation = true,
@@ -130,7 +127,7 @@ void dglabMenuDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabMe
 
     dglabCanvasClearClip(canvas);
 
-    dglabListScrollBar(canvas, DGLAB_PAGE_CONTENT_TOP, view_height, content_height, offset);
+    dglabListPageScrollBar(canvas, &page);
 
     hints[0] = (DglabHint){ DglabButton_B, DglabButton_None,
         dglabString(DglabString_ActionExit), };

@@ -213,13 +213,37 @@ sysmodule 内部直接扮演控制端：
 长按电源键）。实机结果是注册被拒绝、返回 `0x0000108A`（模块 8、描述 0x8A；`WlanSockets`
 这个 id 由系统自己持有），日志里的 `sleep watch unavailable rc=0x0000108A` 就是正常情况。
 
-**现状是诚实的：只要服务端在跑，这台主机休眠就会卡死**（没有可用的睡眠通知）。兜底三条：
+**注册被拒这件事仍然成立**：sysmodule 什么都收不到。睡眠这条风险因此分两层来挡——
+一层由 NRO 关掉自动休眠，一层是原来的兜底：
 
-1. 服务端不自动启动（已验证：不启动就不会睡死）；
-2. **没有客户端连接满 55 秒就自动停服务**；计时从最后一个客户端离开开始。窗口刻意短于
+1. **自动休眠由 NRO 关掉**：NRO 是 applet，服务端运行期间它用
+   `appletSetAutoSleepDisabled()`（`ISelfController`，`applet.h`）把主机的自动休眠关掉，
+   服务端停掉时恢复。实现是 `nro/source/platform/auto_sleep.c` 一个模块，只有它碰这个标志：
+   进入抑制前先 `appletIsAutoSleepDisabled()` 读一次，**本来就是关的（用户自己的设置或别的
+   applet）不去接管、退出时也不恢复**；只有确实是它关的才在停止/退出时调 `false`。调用失败只
+   写一行日志，服务端照常运行，界面退回到下面第 4 条的旧警告文案；
+2. 服务端不自动启动（已验证：不启动就不会睡死）；
+3. **没有客户端连接满 55 秒就自动停服务**；计时从最后一个客户端离开开始。窗口刻意短于
    主机最短的自动休眠时间（60 秒），这样"人走开 → 主机自动休眠"这条路径上服务端一定
    已经收掉了。有人连着（App 会持续发心跳）时不会自动停；
-3. NRO 界面在服务运行时会显示 `do not sleep while the server runs`（`sleep_warning`）。
+4. NRO 界面在服务运行时会显示警告：抑制生效时是 `sleep_warning_auto_off`
+   （"自动休眠已抑制；手动休眠仍会卡死主机"），抑制不可用或调用失败时是原来的
+   `sleep_warning`（"服务端运行时不要休眠"）。两种文案都在 `tests/canvas` 的排版检查里。
+
+**还没有解决的两件事**：
+
+- **手动休眠（电源键）照旧会卡死**。关得掉的是自动休眠；用户按下去的睡眠挡不住——挡它要拿
+  sleep lock（`appletRequestToAcquireSleepLock`，同样是 applet 会话的接口），那会让主机在服务端
+  运行期间完全无法休眠。所以在服务端运行时手动休眠仍然只能长按电源键恢复；
+- **NRO 退出后服务端还在跑的时候**：抑制只覆盖 NRO 存活期，applet 会话结束，标志跟着失效。
+  此时服务端仍在跑（手机连着时 55 秒空闲自停也不会触发），主机自动休眠仍会卡死。这是已知
+  漏洞，先保留：现在没有游戏侧事件源，NRO 退出后服务端本来也没人用；将来做 Overlay 时一起解决。
+
+**为什么不去改系统设置**：`set:sys` 有直接对口的旋钮——`setsysGetSleepSettings()` /
+`setsysSetSleepSettings()` 加 `SetSysHandheldSleepPlan_Never`（libnx 的
+`switch/services/set.h`），但它改的是**用户可见、掉电保持的全局系统设置**，sysmodule 有没有
+写它的权限也没验证过（`service_access: ["*"]` 只保证能开会话，系统侧还有一层检查），而且同样
+挡不住手动休眠。评估后放弃这条路，只在 NRO 侧做抑制。
 
 想要真正修好，需要找到能可靠告知"即将休眠"的机制（`psc` 的模块 id 或其它信号）。
 **PSC 这条路现在是关着的**，除非将来有别的可靠机制，不要在 sysmodule 里再对 `psc` 做实验。
@@ -227,6 +251,10 @@ sysmodule 内部直接扮演控制端：
 同时 `nifm` 改成"用完即走"：查地址时 `nifmInitialize` → `nifmGetCurrentIpAddress` →
 `nifmExit`，结果缓存 2 秒（NRO 每帧轮询状态）——长期持有 nifm 会话是"网络占用"的另一个
 候选原因，先把它排除掉。
+
+截至这次改动，NRO 侧抑制只过了主机侧的编译与排版检查（`make -C nro`、`tests/canvas`、
+`tests/lang`），**实机结论还没回填**：要验的是 applet 模式下（相册进入）与 title override 下
+`appletSetAutoSleepDisabled` 都真的生效，以及主机按最短的 1 分钟自动休眠时间放着不动确实不休眠。
 
 ### 开机路径必须最小（血泪教训）
 

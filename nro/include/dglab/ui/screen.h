@@ -42,9 +42,18 @@ typedef enum {
 } DglabCmdTone;
 
 typedef struct {
-    DglabIpcVersion version;
     bool status_ok;
     DglabNetStatus status;
+    /// Whether the sysmodule still answers: the title bar's right hand side,
+    /// the same line every other page shows (docs/nro-ui.md).
+    bool sysmodule_ok;
+
+    /// Automatic sleep is off because the socket server is running (the front
+    /// end asks the console for that, see dglab/nro/auto_sleep.h). The warning
+    /// line under the server row has two wordings and picks between them with
+    /// this: with the automatic timer out of the way, all that is left to warn
+    /// about is sleeping by hand.
+    bool auto_sleep_suppressed;
 
     bool url_ok;      // a QR payload is available
     const char* url;  // QR payload, see docs/dglab-socket.md

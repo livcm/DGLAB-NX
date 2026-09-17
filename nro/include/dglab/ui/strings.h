@@ -22,10 +22,10 @@ typedef enum {
     DglabString_ActionClear,
     DglabString_ActionLog,     ///< open the sysmodule log page
     DglabString_ActionClose,   ///< and close it again
-    DglabString_ActionScroll,
     DglabString_ActionTestChannels, ///< one hint, the ZL and ZR icons
     DglabString_ActionAdjust,
     DglabString_ActionLanguage,
+    DglabString_ActionTheme,   ///< the About page's Y
     DglabString_ActionReset,
     DglabString_ActionRescan, ///< take the Joy-Con sensor handles again
     // the two adjustment hints the pages put inside their own content
@@ -50,10 +50,12 @@ typedef enum {
     DglabString_AboutTitle,
     DglabString_AboutLine1,
     DglabString_AboutLine2,
-    // Two versions sit on this page and they are different numbers: the release
-    // version of this NRO is the page's header, and this row is the sysmodule's
-    // IPC interface version (docs/ipc.md, "版本"). The label has to say which
-    // one it is.
+    // Two versions sit on this page and they are different numbers: this NRO's
+    // own release version (the repository's VERSION) and the sysmodule's IPC
+    // interface version (docs/ipc.md, "版本"). Each has its own row and its label
+    // has to say which one it is - the page's header carries the sysmodule state
+    // like every other page, not a version.
+    DglabString_AboutAppVersion,
     DglabString_AboutIpcVersion,
     DglabString_AboutBuild,
     DglabString_AboutSource,
@@ -61,6 +63,13 @@ typedef enum {
     DglabString_AboutLangAuto,
     DglabString_AboutLangZh,
     DglabString_AboutLangEn,
+    // The colour theme row, right under the language one: the preference is the
+    // same three way shape (follow the console / light / dark), so its values
+    // read the same way - Auto says what the console is, in brackets.
+    DglabString_AboutTheme,
+    DglabString_AboutThemeAuto,
+    DglabString_AboutThemeLight,
+    DglabString_AboutThemeDark,
 
     // motion screen
     DglabString_MotionTitle,
@@ -135,6 +144,7 @@ typedef enum {
     DglabString_QrTooLong,
     DglabString_LogTitle,
     DglabString_SleepWarning,
+    DglabString_SleepWarningAutoOff,
 
     // what the buttons sent, and what came back
     DglabString_CmdClear,

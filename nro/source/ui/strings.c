@@ -25,10 +25,10 @@ static const char* const kKeys[DglabString_Count] = {
     [DglabString_ActionClear] = "action_clear",
     [DglabString_ActionLog] = "action_log",
     [DglabString_ActionClose] = "action_close",
-    [DglabString_ActionScroll] = "action_scroll",
     [DglabString_ActionTestChannels] = "action_test_channels",
     [DglabString_ActionAdjust] = "action_adjust",
     [DglabString_ActionLanguage] = "action_language",
+    [DglabString_ActionTheme] = "action_theme",
     [DglabString_ActionReset] = "action_reset",
     [DglabString_ActionRescan] = "action_rescan",
     [DglabString_HintAdjustA] = "hint_adjust_a",
@@ -49,6 +49,7 @@ static const char* const kKeys[DglabString_Count] = {
     [DglabString_AboutTitle] = "about_title",
     [DglabString_AboutLine1] = "about_line1",
     [DglabString_AboutLine2] = "about_line2",
+    [DglabString_AboutAppVersion] = "about_app_version",
     [DglabString_AboutIpcVersion] = "about_ipc_version",
     [DglabString_AboutBuild] = "about_build",
     [DglabString_AboutSource] = "about_source",
@@ -56,6 +57,10 @@ static const char* const kKeys[DglabString_Count] = {
     [DglabString_AboutLangAuto] = "about_lang_auto",
     [DglabString_AboutLangZh] = "about_lang_zh",
     [DglabString_AboutLangEn] = "about_lang_en",
+    [DglabString_AboutTheme] = "about_theme",
+    [DglabString_AboutThemeAuto] = "about_theme_auto",
+    [DglabString_AboutThemeLight] = "about_theme_light",
+    [DglabString_AboutThemeDark] = "about_theme_dark",
 
     // motion screen
     [DglabString_MotionTitle] = "motion_title",
@@ -122,6 +127,7 @@ static const char* const kKeys[DglabString_Count] = {
     [DglabString_QrTooLong] = "qr_too_long",
     [DglabString_LogTitle] = "log_title",
     [DglabString_SleepWarning] = "sleep_warning",
+    [DglabString_SleepWarningAutoOff] = "sleep_warning_auto_off",
 
     // what the buttons sent, and what came back
     [DglabString_CmdClear] = "cmd_clear",

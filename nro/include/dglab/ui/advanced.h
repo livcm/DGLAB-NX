@@ -8,10 +8,13 @@
 #include <dglab/ui/canvas.h>
 #include <dglab/ui/text.h>
 
+#include <stdbool.h>
+
 typedef struct {
     const DglabMotionFeedConfig* config;
     unsigned selected;   ///< DglabMotionSetting
     bool saved;          ///< the last change reached the config file
+    bool sysmodule_ok;   ///< the title bar's right hand side
 } DglabAdvancedState;
 
 void dglabAdvancedDraw(DglabCanvas* canvas, const DglabFontSet* fonts,

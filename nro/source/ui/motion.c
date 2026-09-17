@@ -80,7 +80,8 @@ void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     snprintf(label_b, sizeof(label_b), "%s B", dglabString(DglabString_MotionVolume));
 
     dglabPageBegin(canvas);
-    dglabPageHeader(canvas, &title, dglabString(DglabString_MotionTitle), NULL, NULL);
+    dglabPageHeader(canvas, &title, dglabString(DglabString_MotionTitle));
+    dglabPageHeaderStatus(canvas, fonts->value, state->sysmodule_ok);
     dglabPageClipContent(canvas);
 
     for (int i = 0; i < 2; i++) {

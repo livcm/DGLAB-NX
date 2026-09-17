@@ -244,6 +244,14 @@ int dglabListScrollFor(int offset, int max_offset, int view_height, int row_y, i
     if (row_y + row_height + overhang > offset + view_height)
         offset = row_y + row_height + overhang - view_height;
 
+    return dglabListScrollClamp(offset, max_offset);
+}
+
+int dglabListScrollClamp(int offset, int max_offset)
+{
+    if (max_offset < 0)
+        max_offset = 0;
+
     if (offset < 0)
         offset = 0;
 
@@ -253,26 +261,50 @@ int dglabListScrollFor(int offset, int max_offset, int view_height, int row_y, i
     return offset;
 }
 
-void dglabListScrollBar(DglabCanvas* canvas, int view_top, int view_height, int content_height,
-    int offset)
+DglabListPage dglabListPageLayout(int view_top, int view_height, int content_height, int offset)
+{
+    DglabListPage page;
+
+    page.view_top = view_top;
+    page.view_height = view_height > 0 ? view_height : 0;
+    page.content_height = content_height > 0 ? content_height : 0;
+    page.max_offset = page.content_height > page.view_height
+        ? page.content_height - page.view_height : 0;
+
+    if (offset < 0)
+        offset = 0;
+
+    if (offset > page.max_offset)
+        offset = page.max_offset;
+
+    page.offset = offset;
+
+    return page;
+}
+
+bool dglabListPageScrolls(const DglabListPage* page)
+{
+    return page->view_height > 0 && page->content_height > page->view_height;
+}
+
+void dglabListPageScrollBar(DglabCanvas* canvas, const DglabListPage* page)
 {
     const DglabTheme* theme = dglabThemeGet();
     int thumb;
     int y;
-    int max_offset = content_height - view_height;
 
-    if (content_height <= view_height || view_height <= 0)
+    if (!dglabListPageScrolls(page))
         return;
 
-    thumb = view_height * view_height / content_height;
+    thumb = page->view_height * page->view_height / page->content_height;
 
     if (thumb < 40)
         thumb = 40;
 
-    if (thumb > view_height)
-        thumb = view_height;
+    if (thumb > page->view_height)
+        thumb = page->view_height;
 
-    y = view_top + (view_height - thumb) * offset / max_offset;
+    y = page->view_top + (page->view_height - thumb) * page->offset / page->max_offset;
 
     dglabCanvasFill(canvas, DGLAB_PAGE_WIDTH - 17, y, 4, thumb, theme->scrollbar);
 }

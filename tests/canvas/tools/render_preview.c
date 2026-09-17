@@ -24,12 +24,14 @@
 //   /tmp/preview /tmp/font.bin /tmp/motion.bmp motion   (the Joy-Con mode)
 //   /tmp/preview /tmp/font.bin /tmp/advanced.bmp advanced  (the motion parameters)
 //   /tmp/preview /tmp/font.bin /tmp/log.bmp log        (the sysmodule log page)
+//   /tmp/preview /tmp/font.bin /tmp/aboutlow.bmp aboutlow  (the About page, end)
 //   /tmp/preview /tmp/font.bin /tmp/dock.bmp menu dock (the docked 1080p frame)
 //   sips -s format png /tmp/preview.bmp --out /tmp/preview.png
 //
 // PREVIEW_TTF=/path/to/font.ttf renders with the real glyph source instead of
 // the bitmap font (the console's system font), and PREVIEW_LANG=en keeps the
 // English strings with it: the console picks the face and the strings together.
+// PREVIEW_THEME=light draws the light palette instead of the dark one.
 
 #include <dglab/ui/screen.h>
 #include <dglab/ui/advanced.h>
@@ -40,6 +42,7 @@
 #include <dglab/ui/text_ttf.h>
 #include <dglab/ui/language.h>
 #include <dglab/ui/strings.h>
+#include <dglab/ui/theme.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -132,8 +135,8 @@ int main(int argc, char** argv)
     FILE* file;
 
     if (argc < 3) {
-        fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> "
-                        "[normal|nowifi|stopped|log|menu|motion|advanced|about] [dock]\n");
+        fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> [normal|nowifi|stopped|"
+                        "log|menu|motion|advanced|about|aboutlow] [dock]\n");
         return 2;
     }
 
@@ -142,6 +145,16 @@ int main(int argc, char** argv)
         g_height = DOCK_HEIGHT;
         g_scale_num = 3;
         g_scale_den = 2;
+    }
+
+    // PREVIEW_THEME=light draws the pages with the light palette instead of the
+    // dark one, so a theme can be checked next to the same screenshot the values
+    // were measured from without a console in the loop.
+    {
+        const char* theme = getenv("PREVIEW_THEME");
+
+        if (theme && strcmp(theme, "light") == 0)
+            dglabThemeSet(&dglabThemeLight);
     }
 
     // The text comes from the files the NRO ships, not from the binary.
@@ -177,8 +190,7 @@ int main(int argc, char** argv)
 
     memset(&state, 0, sizeof(state));
     state.status_ok = true;
-    state.version.major = 0;
-    state.version.minor = 2;
+    state.sysmodule_ok = true;
     state.status.state = DglabNetState_Paired;
     state.status.port = 9999;
     state.status.sessions = 3;
@@ -287,19 +299,32 @@ int main(int argc, char** argv)
         }
     }
 
-    if (argc >= 4 && strcmp(argv[3], "about") == 0) {
+    if (argc >= 4 && (strcmp(argv[3], "about") == 0 || strcmp(argv[3], "aboutlow") == 0)) {
         DglabAboutState about;
 
         memset(&about, 0, sizeof(about));
         about.preference = DglabLanguage_Auto;
         about.resolved = DglabLanguage_ChineseSimplified;
+        // The two preference rows: the language one came from the loaded files,
+        // the theme one from app.cfg. Auto shows what the console says, and the
+        // preview is drawn with the palette it names - so "follow the system"
+        // means the light theme in a light preview and the dark one otherwise.
+        about.theme = DglabThemeMode_Auto;
+        about.theme_system_is_dark = strcmp(getenv("PREVIEW_THEME") ? getenv("PREVIEW_THEME")
+            : "", "light") != 0;
         // The three the page exists to show. The real ones come from the build
         // (VERSION and `git describe`, dglab/nro/version.h); this tool hardcodes
         // the look of them, as it does for the log lines and the url.
         about.app_version = "0.3.0";
         about.build_id = "2ac34ef";
-        about.ipc_version = state.version;
+        about.ipc_version.major = 0;
+        about.ipc_version.minor = 2;
+        about.sysmodule_ok = true;
         about.github_url = "https://github.com/livcm/DGLAB-NX";
+        // The page is taller than the screen, so the theme row at the bottom is
+        // only on screen once it is scrolled to the end - which is what the
+        // `aboutlow` name renders (the page clamps the offset itself).
+        about.offset = strcmp(argv[3], "aboutlow") == 0 ? 100000 : 0;
 
         dglabAboutDraw(&canvas, &g_fonts, &about);
     } else if (argc >= 4 && strcmp(argv[3], "menu") == 0) {

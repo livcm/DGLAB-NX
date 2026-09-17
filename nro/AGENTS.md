@@ -58,6 +58,12 @@ Nintendo 原生 UI Framework 给普通 Homebrew 使用。
 
 UI 风格可以模仿 HOS，但实现应与 HOS 系统 UI 解耦。
 
+颜色只有一套来源：`nro/include/dglab/ui/theme.h` 的两套调色板（`dglabThemeDark` /
+`dglabThemeLight`），屏幕一律经 `dglabThemeGet()` 取色，**不得写颜色常量**。用户可在
+关于页按 `Y` 切换"跟随系统 / 浅色 / 深色"，因此新增或修改屏幕后 `tests/canvas` 会用
+两套主题各渲染一遍（含 720p/1080p 与两种语言），浅色下同样要求零像素越界；量色规则与
+已量/未量的值见 `docs/nro-ui.md` 的「浅色主题」。
+
 建议逐渐形成自己的组件：
 
     Screen
@@ -75,15 +81,21 @@ UI 风格可以模仿 HOS，但实现应与 HOS 系统 UI 解耦。
 界面模仿 HOS（Switch 系统 UI）：**没有面板边框**，页面由页头、行列表、底栏三部分组成。
 规格与实测数据见 `docs/nro-ui.md` 的「HOS 风格页面」一节。
 
-- 每一屏的画法：`dglabPageBegin` 铺底与两条分隔线 → `dglabPageHeader` 画标题
-  （可带右侧状态）→ `dglabPageClipContent` 收裁剪 → `dglabListDraw` 画行 →
-  `dglabCanvasClearClip` → `dglabListScrollBar` → `dglabPageHints` 画底栏按键提示；
+- 每一屏的画法：`dglabPageBegin` 铺底与两条分隔线 → `dglabPageHeader` 画标题 →
+  `dglabPageHeaderStatus` 画页头右侧的 Sysmodule 状态 → `dglabPageClipContent` 收裁剪 →
+  `dglabListDraw` 画行 → `dglabCanvasClearClip` → `dglabListPageScrollBar` →
+  `dglabPageHints` 画底栏按键提示；
+- **页头右侧一律是 Sysmodule 状态**（`dglabPageHeaderStatus`，文案与配色就是主菜单那两条）。
+  版本号之类的东西不进页头：它是每一页共有的"后台还在不在"这一条信息，只有这一个实现；
 - 两条横线都是**白色**（`theme->rule`，y=87 与 y=647）；`#4D4D4D` 只用于行与行之间。
   内容裁剪区是 y 88..647，上边界必须在页头线下方——焦点框比行高，第一行的框上沿在 y≈122，
   裁剪区从行顶开始就会把它切掉；
 - 行一律用 `nro/include/dglab/ui/list.h` 的 `DglabRow` 数组描述，**同一个数组**
   交给 `dglabListMeasure` 与 `dglabListDraw`。高度、列宽、滚动位置都必须来自这次测量，
   不要另写一份尺寸公式（历史上"量一遍、画一遍"对不上已经出过两次事故）；
+- 列表页的可用高度、是否要滚动条、滚动位置夹紧一律走 `dglabListPageLayout()` /
+  `dglabListPageScrolls()` / `dglabListPageScrollBar()`：内容高过一屏就自动出滚动条，
+  排得进就没有。不要在各屏自己写"内容高 - 视口高"这套算术；
 - 行类型只有三种：`DglabRow_Item`（左标签右值，可聚焦）、`DglabRow_Note`（灰色小字说明，
   缩进、带 ◆）、`DglabRow_Paragraph`（页面自己的白色正文，24px，无 ◆，可换行）。
   **界面里没有滑块**，数值一律用文字显示；
@@ -104,8 +116,10 @@ UI 风格可以模仿 HOS，但实现应与 HOS 系统 UI 解耦。
   **其余 framebuffer 页面一律 `B`**，`+` 在这些页面不响应。改按键语义必须同时改底栏提示，
   两者不一致比没有提示更糟；
 - 需要多于一屏内容的页面必须给出滚动方式：有光标的页面用光标驱动，无光标的页面用
-  专门的滚动键（日志子页用 ↑↓）。**无光标又无滚动键的页面（连接测试、体感）必须把
-  内容排进一屏**，`tests/canvas` 的"内容不贴底"检查会守住这一条；
+  专门的滚动键（日志子页、About 页用 ↑↓）。**滚动提示不进底栏**：内容超过一屏时右缘会
+  出现滚动条，那就是提示，底栏再写一条 `↑↓ 滚动` 只是重复（2026-09-17 需求）；
+  **无光标又无滚动键的页面（连接测试、体感）必须把内容排进一屏**，`tests/canvas` 的
+  "内容不贴底"检查会守住这一条；
 - 日志子页的一次按键 = 一行（`DGLAB_SCREEN_LOG_PITCH`），连发用 `LOG_SCROLL_*` 自己的时序，
   不要复用体感强度的连发时序；
 - 二维码只在服务端 `Listening`/`Paired` 时显示（`screen.c` 的 `qrCode()`）；
@@ -116,6 +130,12 @@ UI 风格可以模仿 HOS，但实现应与 HOS 系统 UI 解耦。
 - 重建 framebuffer（底座切换、进出 BLE PoC 控制台）必须走 `main.c` 的
   `appDisplaySuspend()` / `appDisplayReopen()`：它同时重开共享字体并按当前 scale 重新光栅化。
   重建后靠 `g_display_generation` 强制每一屏重画一帧；
+- **重绘判定必须包含所有会改变画面的输入**（光标、滚动位置、语言、状态、generation…）：
+  About 页曾经漏掉语言，按 ←/→ 改了语言却不重画，要等下一次按 ↑/↓ 带动滚动位置才显示出来
+  （看起来像按键串了）；
+- **按键要用的状态必须来自本页当帧拿到的值**，不要用只有别的页面才更新的全局：体感页的 A
+  启停曾经读一个只有 socket 页写的全局，于是底栏写着"停止"、按键却发 `NET_START`
+  （sysmodule 对已运行的服务端直接返回成功、什么都不做），服务端因此停不掉；
 - 新增或修改屏幕后跑 `make -C tests/canvas`：`testEveryPageStaysInItsRegions` 会用
   两份语言文件把每一屏渲染一遍，检查没有任何像素画到页头/内容列/底栏/滚动条之外
   （原委见 `docs/nro-ui.md`）。
@@ -173,7 +193,7 @@ NACP 里的应用名、作者与发行版本由 `nro/Makefile` 生成：应用�
   传给 `nro/Makefile`，`make -C nro` 也读同一个文件；不要在 Makefile、代码或文档里
   再写一个版本号（`nro/Makefile` 在 `switch_rules` 之前读它，就是为了不让 libnx 的
   `1.0.0` 默认值悄悄变成发行版本）；
-- 这个号同时进 NACP 和 About 页的页头（`-DDGLAB_APP_VERSION`，默认值见
+- 这个号同时进 NACP 和 About 页的「应用版本」行（`-DDGLAB_APP_VERSION`，默认值见
   `nro/include/dglab/nro/version.h`），所以改 `VERSION` 之后必须重新构建 NRO；
 - **IPC 接口版本不是它**：`DGLAB_IPC_PROTOCOL_VERSION`（`common/include/dglab/ipc.h`）
   由 sysmodule 通过 `GET_VERSION` 报告，About 页用单独一行显示（`docs/ipc.md` 的

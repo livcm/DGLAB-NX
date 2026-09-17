@@ -311,19 +311,24 @@ QR 编码器是自己写的（devkitPro 里没有可用 QR 库），所以它必
 
 - 启动后先进入**菜单**（`nro/source/ui/menu.c`）：5 行（`socket server`、
   `motion (Joy-Con)`、`advanced (motion)`、`about`、`BLE PoC console`）+ 选中项的说明；
-  标题栏右侧显示 sysmodule 是否还答 `PING`（每个玩法都依赖它）。`D-pad` 上下选择、
-  `A` 进入、`B` 退出（到底夹紧、不循环）；
+  标题栏右侧显示 sysmodule 是否还答 `PING`（每个玩法都依赖它）——这一条**每一页都有**，
+  由 `dglabPageHeaderStatus()` 一处画。`D-pad` 上下选择、`A` 进入、`B` 退出（到底夹紧、
+  不循环）；
 - `advanced (motion)`（`nro/source/ui/advanced.c`）把体感玩法的全部参数放在一页上：
   `D-pad` 上下选参数、左右改值（**按一下只走一格**，按住 0.5 秒后才开始连发、每 0.2 秒
   一格）、`Y` 恢复默认、`B` 保存返回。每次改动都写进
   `sdmc:/switch/DGLAB-NX/config/motion.cfg`，体感玩法进入时读取；参数清单见
   `docs/joycon-input.md`；
 - `motion (Joy-Con)` 玩法（`nro/source/ui/motion.c`）见 `docs/joycon-input.md`；
-- `about` 页显示发行版本（页头）、IPC 版本、构建标识、源码地址与语言切换（左右键循环
-  切换语言）；
-- 服务端页（`nro/source/ui/screen.c`）的行：`server`（含休眠警告 note）、`address`、
-  `app id`、`channel A`、`channel B`、`last cmd`；端口号显示在标题栏（值列只有 21 个
-  字符宽，`192.168.1.161:9999` 正好占满）；
+- `about` 页显示发行版本、IPC 版本、构建标识、源码地址与两行偏好设置（语言：左右键
+  循环切换；颜色主题：`Y` 循环切换；上下键滚动）；发行版本是列表的第一行值，页头右侧
+  和其它页一样是 Sysmodule 状态；
+- 服务端页（`nro/source/ui/screen.c`）的行：`server`（含休眠警告 note，两种文案：
+  自动休眠被抑制时是 `sleep_warning_auto_off`，否则是 `sleep_warning`，由
+  `DglabScreenState::auto_sleep_suppressed` 选）、`address`、
+  `app id`、`channel A`、`channel B`、`last cmd`；端口号跟在 `address` 行的地址后面
+  （`192.168.1.161:9999` 正好占满这一列）。这一页的页头右侧不再放 IPC 版本，IPC 版本
+  只在 `about` 页的 `IPC 版本` 行；
 - `last cmd` 行是最近一次按键命令的结果（`A test  ok`、`clear  no app bound`、
   `A test  ok (A is 0)`，失败为红色、空通道为黄色）：sysmodule 是设备链路的唯一
   所有者，命令没送出去时那边没有任何日志，这一行是唯一能看到原因的地方；
@@ -431,7 +436,15 @@ HOS 的侧栏聚焦框偏蓝（`#1A9AD5`），内容行的聚焦框偏青（`#66
 
 - `tests/canvas` 的 `testEveryPageStaysInItsRegions` 把五屏 × 两种语言 × **两种分辨率**
   （掌机 720p、底座 1080p）渲染一遍（外加菜单每个条目、服务端页四种状态、体感页两种状态、
-  高级参数页首尾两项），检查没有任何像素落在"页头带 / 内容列 / 底栏 / 滚动条列"之外；
+  高级参数页首尾两项、关于页顶部与滚到底两种状态），检查没有任何像素落在
+  "页头带 / 内容列 / 底栏 / 滚动条列"之外。会滚的页（菜单、高级参数、日志子页、关于页）
+  允许画到裁剪边缘，`checkContentClearsTheBar` 只管不滚的那几页；
+- `testListPageLayout` 单独检查"内容高过一屏才出滚动条"这条规则本身（排得进时
+  `max_offset == 0`、offset 夹回 0；排不下时 offset 夹在 `[0, 内容高 - 视口高]`），
+  因为在主机的块字体下关于页总是高过一屏，页面上跑不到"排得进"那一半；
+- `testEveryPageShowsTheSysmoduleStatus` 把每一页（含日志子页）用状态 true/false 各渲染
+  一次，要求画面变了、而且**变化只落在页头带**：状态不是画在页头右上角、或者某页自己
+  造了一个状态，都会在这里失败；
 - 预览出图仍是 `tests/canvas/tools/render_preview.c`，会用 `PREVIEW_TTF` 开出全部字号，
   页面名后面加 `dock` 就渲染底座用的 1920×1080 画面（`normal` / `menu` / `motion` /
   `advanced` / `about` / `log` / `nowifi` / `stopped`）。
@@ -490,10 +503,10 @@ HOS 的侧栏聚焦框偏蓝（`#1A9AD5`），内容行的聚焦框偏青（`#66
 | --- | --- | --- |
 | 菜单（标题 `DGLAB-NX`） | 导航列表：5 行 + 选中项的说明 note | ↑↓ 选择，A 进入，B 退出 |
 | socket server | 左栏 x=80 宽 390：提示行 + 二维码 + 三行小字计数；右栏 x=470 宽 719：页内提示行 + 6 行参数 | X 清空、Y 日志、A 启停、B 返回、ZL/ZR 测 A/B、↑↓ 调 A、←→ 调 B |
-| 日志子页 | Y 打开：页头 + 32 行日志（24px、行距 37px、白色），打开时停在最新 | ↑↓ 滚动、Y 关闭、B 返回 |
+| 日志子页 | Y 打开：页头 + 32 行日志（24px、行距 37px、白色），打开时停在最新；底栏不画滚动提示（滚动条即提示） | ↑↓ 滚动、Y 关闭、B 返回 |
 | motion (Joy-Con) | 页内提示行 + 5 行（连接、左/右 Joy-Con、通道强度 A/B） | 同 socket（A 启停、X 清空、ZL/ZR 测试、D-pad 调强度），多一个 `Y` 重新扫描手柄 |
 | advanced (motion) | 12 行 + 选中项的说明 note，按光标滚动 | ↑↓ 选择、←→ 改值（按住连发）、Y 恢复默认、B 返回 |
-| about | 两个白色段落 + IPC 版本行 + 构建标识行 + 源码行 + 语言行；页头右侧是发行版本 | ←→ 切换语言、B 返回 |
+| about | 两个白色段落 + 发行版本行 + IPC 版本行 + 构建标识行 + 源码行 + 语言行 + 颜色主题行；页头右侧是 Sysmodule 状态；排不下时出滚动条，底栏不画滚动提示 | ↑↓ 滚动、←→ 切换语言、Y 切换主题、B 返回 |
 
 按键约定：**Console 页（BLE PoC console、启动/出错提示页）一律 `+` 退出**；
 **其余 framebuffer 页面一律 `B` 返回/退出，`+` 在这些页面不响应**。
@@ -507,16 +520,22 @@ HOS 的侧栏聚焦框偏蓝（`#1A9AD5`），内容行的聚焦框偏青（`#66
 
 | 位置 | 值 | 来源 |
 | --- | --- | --- |
-| 页头右侧 | 发行版本，如 `0.3.0` | 仓库根 `VERSION`，`nro/Makefile` 编进二进制（`nro/include/dglab/nro/version.h`） |
+| `应用版本` 行 | 发行版本，如 `0.3.0` | 仓库根 `VERSION`，`nro/Makefile` 编进二进制（`nro/include/dglab/nro/version.h`） |
 | `IPC 版本` 行 | 接口版本，如 `0.2.0` | sysmodule 的 `GET_VERSION`（`DGLAB_IPC_PROTOCOL_VERSION`），与发行版本无关 |
 | `构建标识` 行 | `git describe --always --dirty` 的结果 | `nro/Makefile` 的 `BUILD_STAMP`，用来核对 SD 卡上是哪一次构建 |
 
-发行版本和 IPC 版本在同一页上，把其中一个当成另一个是这里最可能的误读，所以页头的
-值不加标签（它就是这一页自己的版本，和别的页面在页头放状态是一个用法），IPC 那一行
-则必须写明是 IPC 的。三行都在 `about.c` 的同一个行数组里量一次、画一次；`tests/canvas`
-除了渲染这一页，还逐项去掉这三个值，要求画面每次都跟着变（值写进结构体却没画出来
-会在那里失败）。`about` 页没有光标也不滚动，所以它必须自己排在一屏之内——加行前先
-看 `tests/canvas` 的"内容不贴底"检查。
+发行版本和 IPC 版本在同一页上，把其中一个当成另一个是这里最可能的误读，所以两个值各占
+一行、各自写上标签；页头右侧留给 Sysmodule 状态，和别的页面一致（一个版本号放在那里，
+读起来就像"这一页的状态是 0.3.0"）。三行都在 `about.c` 的同一个行数组里量一次、画一次，
+`dglabAboutContentHeight()` 用的也是这个数组；`tests/canvas` 除了渲染这一页，还逐项去掉
+这三个值，要求画面每次都跟着变（值写进结构体却没画出来会在那里失败）。
+
+`about` 页没有光标，滚动靠 ↑↓（`DGLAB_ABOUT_SCROLL_STEP` = 一个段落行高），中间是
+`main.c` 用 `dglabAboutContentHeight()` 把 offset 夹在 `[0, 内容高 - 视口高]`。排不下时
+右缘出现滚动条，**底栏不再画 `↑↓ 滚动`**：滚动条已经说明还有内容，那条提示只是在重复它
+（需求 2026-09-17；日志子页同样处理）。滚动键本身照旧可用，语言与返回的提示也不动。
+实机确认这一页在真实系统字体下**排不进一屏**，所以滚动条与 ↑↓ 都得工作；主机测试用的块
+字体更宽，同样会滚，`tests/canvas` 因此也检查了滚动条与滚动后的画面。
 
 ### 日志环与二维码
 
@@ -556,6 +575,25 @@ socket server 页的两栏直接采用实测数字：左栏 `DGLAB_SOCKET_QR_X 8
 
 ### 现行规则补充（第二、六、七次修正的结论，推导过程见 `docs/history.md`）
 
+- **页头右侧只有一种内容**：Sysmodule 状态，由 `dglabPageHeaderStatus()` 一处画（文案就是
+  `sysmodule_ok` / `sysmodule_down` 那两条，正常用强调色、无响应用红色）。版本号一律进
+  列表行——about 页的发行版本因此从页头挪进 `应用版本` 行，socket 页与日志子页页头不再
+  显示 `IPC x.y.z`；`main.c` 的 `appSysmoduleOk()` 每 60 帧 `PING` 一次并缓存，六个页面
+  都从它取这一个值，`tests/canvas` 用状态 true/false 各渲染一遍守住这条；
+- **滚动条由列表自己决定**：`dglabListPageLayout()` 把内容高、视口高换成
+  `max_offset` 并夹紧 offset，`dglabListPageScrolls()` 决定画不画条。内容是"排不下就出条、
+  排得进就没有"，各屏不再自己写"内容高 - 视口高"。
+  about 页没有光标，用 ↑↓ 滚动（`DGLAB_ABOUT_SCROLL_STEP` = 一个段落行高 34px），
+  socket 右栏与体感页的 ↑↓ 已绑给通道 A/←→ 给 B，因此这两页仍必须排进一屏；
+- **会滚的页不画滚动提示**：日志子页与 about 页的底栏只有 `Y 关闭` / `B 返回` 与
+  `←→ 切换语言` / `Y 切换主题` / `B 返回`，`↑↓` 仍在工作——滚动条就是"还有内容"的提示，
+  底栏再写一条是重复（需求 2026-09-17）。`DglabString_ActionScroll` 因此已删除；
+- **重绘判定必须覆盖所有输入，按键要用的状态必须来自本页当帧的值**：两条 bug 的教训——
+  about 页的重绘条件漏了语言，按 ←/→ 改了语言却不重画，要等下一次 ↑/↓ 带动 offset 才
+  显示出来；体感页的 A 启停读的是一个只有 socket 页更新的全局，于是底栏写着"停止"、
+  按键却走"启动"分支，服务端停不掉。现在语言（`preference` / `resolved`）与颜色主题
+  （`theme`）都进入 about 页的重绘条件，`toggleServer()` 接收调用方本帧轮询到的运行状态
+  （体感页每帧轮询 `NET_STATUS`，面板仍按 `MOTION_DISPLAY_FRAMES` 刷新）；
 - **日志页一次按键滚一行**：一步 = `DGLAB_SCREEN_LOG_PITCH`(37px)；连发用它自己的时序
   （`LOG_SCROLL_HOLD_NS` 300ms 后每 `LOG_SCROLL_REPEAT_NS` 50ms 一行，约 20 行/秒），
   不复用体感强度的 `TEST_STRENGTH_*` 时序与 hold 状态变量；
@@ -577,3 +615,67 @@ socket server 页的两栏直接采用实测数字：左栏 `DGLAB_SOCKET_QR_X 8
   `padIsHandheld`），判为不可用的一侧**根本不轮询句柄**，六轴读数只决定波形值与频率；
   进入玩法写一行句柄布局日志，连接状态变化写 `motion left connected` / `disconnected`。
   细节见 `docs/joycon-input.md`。
+
+## 浅色主题（2026-09-18）
+
+需求：参考 HOS 浅色主题（用户提供的 1280×720 系统设置截图）给 NRO 加浅色模式；能跟随
+系统就跟，不能就以深色为默认；主题行放在关于页语言行下方，按 `Y` 切换。
+
+### 跟随系统
+
+- libnx 有 `setsysGetColorSetId()`（`switch/services/set.h`，`ColorSetId_Light` = 0 /
+  `ColorSetId_Dark` = 1），所以"跟随系统"是可行的：`main.c` 启动时 `setsysInitialize()`
+  一次，`appThemeApply()` 调 `setsysGetColorSetId()` 把结果放进 `g_system_is_dark`，
+  再由 `dglabThemeResolve(mode, g_system_is_dark)` 选表；
+- **只在启动与重建画面时读一次**（需求选定，不做每秒轮询）：NRO 在前台时用户进不去系统
+  设置（applet 被挂起），挂起期间改了系统主题要重启 NRO 才跟上；
+- 取不到（`setsysInitialize` 失败、或 `setsysGetColorSetId` 报错）：**跟随系统 = 深色**，
+  并在日志面板写一行原因，所以关于页写着"跟随系统（深色）"这件事在日志里有出处；
+- 偏好存 `config/app.cfg` 的 `theme=auto|light|dark`，与 `language=` 同文件、同一次写出
+  （`dglab/ui/settings.c` 是这两个键唯一的所有者；解析从默认值起步，因此 0.3.0 那份只有
+  `language=` 的文件升级后语言不丢、主题是 auto）。
+
+### 量出来的规格（浅色）
+
+用户给的截图与深色那批同样是 1280×720，下面的值逐个像素量出（JPEG 有噪声，取众数/中位数）：
+
+| 项 | 值 | 用途 |
+| --- | --- | --- |
+| 背景 | `#EBEBEB` | 页面底色 |
+| 抬升面 | `#F0F0F0` | 截图里左侧导航列那块更浅的面（本 UI 目前不用） |
+| 分隔线 | `#C9C9C9`，1px | 只用于行与行之间 |
+| 页头线 / 底栏线 | `#2D2D2D`，1px | 深色下这两条是白的，浅色下是深灰的 |
+| 正文 / 次级 | `#2D2D2D` / `#767676` | 标签与值 / 说明文字 |
+| 强调色 | `#3450F3` | 值、选中项文字，以及导航列表的竖条 |
+| 聚焦框 | 描边 `#5AFCDC`、填充 `#FDFDFD` | 光标所在行（结构与深色相同，颜色不同） |
+| 滚动条 | `#C6C6C6`，4px | 内容超过一屏时 |
+
+**这张截图里量不到的五个值**——对话框三色（`dialog` / `dialog_rule` / `dialog_button`）与
+`warn` / `error`——暂时沿用深色那一套，`theme.c` 的注释与这张表都写明"未量到"：截图里
+没有对话框、也没有错误提示。将来落地对话框、或要调浅色下的错误配色时，用一张含这些状态
+的浅色截图重新量，不要凭观感改数。
+
+其余字段（`white` / `black` 等）两套相同：二维码仍是黑模块白底。
+
+### 关于页上的主题行
+
+- 行序：… → 源码行 → 语言行 → **颜色主题行**（标签 `颜色主题` / `Color theme`）；值
+  `跟随系统` / `浅色` / `深色`，跟随系统时显示成 `跟随系统（深色）`——和语言行
+  `跟随系统（English）` 同构，因为"跟随系统"单看并不说明当前是哪一套；
+- `Y` 循环 `auto → light → dark → auto`（`dglabThemeModeNext()`），当场重画并写回
+  `app.cfg`；底栏提示按阅读顺序是 `←→ 切换语言`、`Y 切换主题`、`B 返回`；
+- 主题偏好（`theme`）与语言一样进 about 页的重绘判定，否则按 `Y` 会看起来没反应。
+
+### 实现位置与检查
+
+- 调色板：`nro/source/ui/theme.c` 的 `dglabThemeDark` / `dglabThemeLight`，屏幕只通过
+  `dglabThemeGet()` 取色，没有一处写死颜色——所以浅色模式没有改到布局代码；
+- 选择：`DglabThemeMode` 与 `dglabThemeResolve()` 在 `nro/include/dglab/ui/theme.h`，
+  存盘在 `nro/source/ui/settings.c`；
+- `tests/canvas` 的 `testEveryPageStaysInItsRegions` 与 `testEveryPageShowsTheSysmoduleStatus`
+  现在跑 **两套调色板 × 两种语言 × 720p/1080p**，浅色下同样要求零像素越界；另有一条关于页
+  主题行的用例（Auto 与两个固定值、深色表与浅色表，画面都必须不同）；
+- `tests/lang` 的 `test_appcfg.c` 检查 `app.cfg` 的两个键：往返、旧文件升级、未知行与
+  未知值、`auto/light/dark` 的键与循环，以及"取不到系统时 Auto = 深色"；
+- 电脑上看浅色画面：`PREVIEW_THEME=light PREVIEW_LANG=en /tmp/preview <font.bin> out.bmp <page>`
+  （完整命令见 `tests/canvas/tools/render_preview.c` 的文件头），`PREVIEW_THEME` 缺省是深色。

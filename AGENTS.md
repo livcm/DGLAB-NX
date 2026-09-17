@@ -447,23 +447,33 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
     `VERSION`（初始 `0.3.0`）；IPC 接口版本仍归 `common/include/dglab/ipc.h` 的
     `DGLAB_IPC_PROTOCOL_VERSION`，两者不要混用（见 `docs/ipc.md` 的“版本”，
     组件内的约定见 `nro/AGENTS.md`）。
+11. 浅色模式：三态主题偏好（默认“跟随系统”，可手动覆盖“浅色 / 深色”），浅色调色板
+    从原生 HOS 浅色主题的 1280×720 截图逐像素量出（表格见 `docs/nro-ui.md` 的
+    「浅色主题」）。跟随系统走 `setsysGetColorSetId()`，**只在启动与重建画面时读一次**
+    （不做轮询），取不到就以深色为默认并在日志里写明；偏好与语言一起存
+    `sdmc:/switch/DGLAB-NX/config/app.cfg`（`theme=`，`dglab/ui/settings.c` 是唯一
+    所有者）。关于页在语言行下方显示主题行，按 `Y` 循环。截图里量不到的
+    `error` / `warn` / 对话框三色先沿用深色值，文档标注“未量到”。
+    验收：`tests/canvas` 用两套主题把每一屏在 720p/1080p 各渲染一遍，`tests/lang` 的
+    `test_appcfg.c` 覆盖旧文件升级与取值规则；实机确认跟随系统与手动覆盖都生效。
+12. NRO 侧抑制自动休眠：服务端运行期间由 NRO（applet）调 `appletSetAutoSleepDisabled()` 关掉
+    主机自动休眠，停服/退出时恢复；**只恢复自己关的**（本来就关的不接管），失败只记日志并退回
+    旧警告文案。唯一所有者是 `nro/source/platform/auto_sleep.c`，socket 页与体感页把轮询到的
+    服务端状态喂给它。**手动休眠仍会卡死、NRO 退出后服务端仍在跑时自动休眠仍会卡死**，这两条是
+    文档里的已知边界（`docs/dglab-socket.md` 的「睡眠与唤醒」）。不改 sysmodule：`set:sys` 的
+    `setsysSetSleepSettings()` 路线评估后放弃。
+    验收：`make -C nro` 编译通过，`tests/canvas` 用两套文案各渲染一遍，`tests/lang` 检查新 key
+    三方一致；实机确认 applet 模式与 title override 下抑制都生效、停服后自动休眠恢复。
 
 ### 未完成
 
-1. 浅色模式：默认跟随主机主题（`setsysGetColorSetId()`，`ColorSetId_Light` /
-    `ColorSetId_Dark`），界面上可手动覆盖为“跟随系统 / 浅色 / 深色”，偏好存
-    `sdmc:/switch/DGLAB-NX/config/app.cfg`。调色板**从原生 HOS 浅色主题的 1280×720
-    截图逐像素量出**，表格按深色那节的格式写进 `docs/nro-ui.md`；截图到位前不写数值。
-    实现走 `nro/source/ui/theme.c`（新增浅色调色板）与已有的 `dglabThemeSet()`。
-    验收：`tests/canvas` 用浅色主题把每一屏在 720p/1080p 各渲染一遍；实机确认跟随
-    系统切换与手动覆盖都生效。
-2. 触屏拖动玩法：触屏位置与拖动速度映射到 A/B 通道的波形强度与频率，复用
+1. 触屏拖动玩法：触屏位置与拖动速度映射到 A/B 通道的波形强度与频率，复用
     `NET_WAVEFORM` 与 `motion_feed` 的包络/节奏逻辑，参数页沿用 Advanced 的结构；
     停手后 250ms 内停流（沿用“全零批次不上传”）。
     验收：实机触摸拖动能驱动对应通道、停手即停流；主机侧有逻辑测试；单位与手感参数
     按 `docs/joycon-input.md` 的格式记进文档。若之后还要第二种玩法，候选是摇杆、按键
     连打、旋转角度，做完第一种再定。
-3. deko3d UI 后端（路线 A）**：把呈现层从 libnx framebuffer 换成 deko3d，绘制层
+2. deko3d UI 后端（路线 A）**：把呈现层从 libnx framebuffer 换成 deko3d，绘制层
     （`canvas.c` 与三屏布局）零改动。做法：device/queue/swapchain + PitchLinear 图像，
     CPU 照旧写像素（`dkMemBlockGetCpuAddr` + `dkMemBlockFlushCpuCache`），再用
     `dkCmdBufCopyBufferToImage` / `dkCmdBufBlitImage` 上屏，不写着色器；`nro/Makefile`
@@ -472,12 +482,12 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
     “framebuffer → deko3d 迁移评估”。路线 A 用 `deko3d.h` 的 C API 就够，不需要
     C++17，也不需要安装 portlibs。
     验收：三屏 × 720p/1080p 的实机截图与改造前一致，`tests/canvas` 不受影响。
-4. Game Mod / Overlay：由于游戏与 NRO 前端不能同时运行，因此需要由 Overlay 来监控和管理 Sysmodule 和 Game Mod 的运行状态，两者同时开发；
-5. Socket V4 协议：V4 的消息外壳（`hello` / `message` / `heartbeat` / `ping` /
+3. Game Mod / Overlay：由于游戏与 NRO 前端不能同时运行，因此需要由 Overlay 来监控和管理 Sysmodule 和 Game Mod 的运行状态，两者同时开发；
+4. Socket V4 协议：V4 的消息外壳（`hello` / `message` / `heartbeat` / `ping` /
     `pong` / `error` / `client_disconnected`）、`?tid=` 绑定与 V4 二维码。前置是官方
     beta 稳定与 App 版本确认；在此之前不写半成品代码，只保留 `docs/dglab-socket.md`
     里已核对的 V4 事实。验收：`tests/net` 增加 V4 外壳用例与回环端到端，再实机。
-6. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
+5. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
 
 ### 已搁置：BLE 模式（sysmodule 直连设备）
 

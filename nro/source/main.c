@@ -21,6 +21,7 @@
 // by side on the About page.
 #include <dglab/nro/version.h>
 #include <dglab/platform/langfiles.h>
+#include <dglab/nro/auto_sleep.h>
 #include <dglab/nro/joycon.h>
 #include <dglab/platform/font.h>
 #include <dglab/ui/about.h>
@@ -36,6 +37,8 @@
 #include <dglab/ui/motion.h>
 #include <dglab/ui/page.h>
 #include <dglab/ui/screen.h>
+#include <dglab/ui/settings.h>
+#include <dglab/ui/theme.h>
 
 #define LOG_POLL_ROUNDS 2
 
@@ -55,7 +58,7 @@
 #define LOG_FILE_PATH LOG_DIR "/dglab-net.log"
 // The motion parameters, so a tuning session does not start over every reboot.
 #define MOTION_CONFIG_PATH CONFIG_DIR "/motion.cfg"
-// The app level settings (the UI language).
+// The app level settings (the UI language and the colour theme).
 #define APP_CONFIG_PATH CONFIG_DIR "/app.cfg"
 
 typedef enum {
@@ -72,20 +75,31 @@ typedef enum {
 // cannot be loaded - which only has ASCII, so Chinese text would show as gaps.
 static DglabFontSet g_fonts;
 static DglabFontSet g_bitmap_fonts;
-static DglabLanguage g_language_pref = DglabLanguage_Auto;
+static DglabAppSettings g_settings;
 static DglabLanguage g_language = DglabLanguage_English;
+// What the console says about its own theme, read when the palette is applied
+// (startup and every rebuilt display) rather than every frame: an applet is
+// suspended while the user is in the system settings, so there is no theme
+// change to notice in between. `g_system_theme_ok` is false when set:sys did not
+// answer at all, which makes Auto mean dark - the same fallback a console that
+// cannot be asked gets (docs/nro-ui.md).
+static bool g_system_is_dark = true;
+static bool g_system_theme_ok;
+// Whether this process holds set:sys at all. When it does not, the query is not
+// attempted - the fallback is decided without touching a service we never took.
+static bool g_set_sys_ready;
 
 // Bumped whenever the display is rebuilt: a new framebuffer is blank, and the
 // fonts are rasterised anew for it (the docked frame is 1.5x the handheld one),
 // so every screen has to draw again even if nothing else about it changed.
 static u32 g_display_generation;
 
-static void appLanguageSave(void)
+static void appSettingsSave(void)
 {
-    char text[64];
+    char text[128];
     FILE* file;
 
-    dglabLanguageSerialize(g_language_pref, text, sizeof(text));
+    dglabAppSettingsSerialize(&g_settings, text, sizeof(text));
 
     file = fopen(APP_CONFIG_PATH, "w");
 
@@ -96,13 +110,13 @@ static void appLanguageSave(void)
     fclose(file);
 }
 
-static void appLanguageLoad(void)
+static void appSettingsLoad(void)
 {
     char text[128];
     size_t size;
     FILE* file = fopen(APP_CONFIG_PATH, "r");
 
-    g_language_pref = DglabLanguage_Auto;
+    dglabAppSettingsDefault(&g_settings);
 
     if (file == NULL)
         return;
@@ -111,13 +125,15 @@ static void appLanguageLoad(void)
     text[size] = '\0';
     fclose(file);
 
-    g_language_pref = dglabLanguageParse(text);
+    // A file that came from an older build (a `language=` line and nothing else)
+    // keeps that language and takes the defaults for everything else.
+    dglabAppSettingsParse(text, &g_settings);
 }
 
 // Resolves the preference, tells the string tables, and loads the matching face.
 static void appLanguageApply(void)
 {
-    g_language = dglabLanguageResolve(g_language_pref, dglabFontSystemIsChinese());
+    g_language = dglabLanguageResolve(g_settings.language, dglabFontSystemIsChinese());
     dglabStringsSetLanguage(g_language);
 
     {
@@ -137,6 +153,21 @@ static void appLanguageApply(void)
     g_bitmap_fonts.note = g_bitmap_fonts.title;
     g_bitmap_fonts.icon = g_bitmap_fonts.title;
     g_fonts = g_bitmap_fonts;
+}
+
+// The one place the palette is chosen: the console is asked what its theme is
+// (once per call - startup and a rebuilt display), and the preference decides
+// what the screens draw with. A console that does not answer leaves Auto on the
+// dark palette, which the log panel says out loud.
+static void appThemeApply(void)
+{
+    ColorSetId color_set = ColorSetId_Dark;
+    bool answered = g_set_sys_ready && R_SUCCEEDED(setsysGetColorSetId(&color_set));
+
+    g_system_theme_ok = answered;
+    g_system_is_dark = !answered || color_set != ColorSetId_Light;
+
+    dglabThemeSet(dglabThemeResolve(g_settings.theme, g_system_is_dark));
 }
 
 // ---------------------------------------------------------------------------
@@ -161,12 +192,15 @@ static void appDisplaySuspend(void)
 // shared font mapping appDisplaySuspend() released: the glyph caches would draw
 // what they already held and every new character would come out blank. Leaving
 // the BLE PoC console used to do exactly that, and only a restart recovered.
+// The theme is applied again here too, which is the other half of "a rebuilt
+// display draws everything from scratch".
 static bool appDisplayReopen(void)
 {
     if (!dglabFramebufferOpen())
         return false;
 
     appLanguageApply();
+    appThemeApply();
     g_display_generation++;
 
     return true;
@@ -255,6 +289,62 @@ static void logPushLine(const char* line)
     }
 }
 
+// ---------------------------------------------------------------------------
+// The console's automatic sleep timer
+// ---------------------------------------------------------------------------
+
+// One line per change of the console's flag, in the same panel the sysmodule's
+// log lines go to. The reason this exists at all is in docs/dglab-socket.md
+// ("睡眠与唤醒"): a sleep with the server's sockets open hangs the console, and
+// the sysmodule is never told that one is coming.
+static void appAutoSleepLog(const char* verb, DglabAutoSleepEvent event, Result rc)
+{
+    char line[DGLAB_SCREEN_LOG_LINE_LEN];
+
+    switch (event) {
+        case DglabAutoSleepEvent_Suppressed:
+            logPushLine("auto sleep: off while the server runs");
+            break;
+
+        case DglabAutoSleepEvent_AlreadyOff:
+            logPushLine("auto sleep: already off, left alone");
+            break;
+
+        case DglabAutoSleepEvent_Restored:
+            logPushLine("auto sleep: restored");
+            break;
+
+        case DglabAutoSleepEvent_Failed:
+            snprintf(line, sizeof(line), "auto sleep: %s rc=0x%08X", verb, (unsigned)rc);
+            logPushLine(line);
+            break;
+
+        default:
+            break;
+    }
+}
+
+// Follows what the pages poll for the server: only a change does anything, so
+// calling this every frame costs nothing. Both pages that can start the server
+// call it, which is what keeps "the server is up" and "automatic sleep is off"
+// from drifting apart in the direction that hangs the console.
+static void appAutoSleepFollow(bool running)
+{
+    Result rc = 0;
+    DglabAutoSleepEvent event = dglabAutoSleepFollowServer(running, &rc);
+
+    appAutoSleepLog(running ? "disable" : "restore", event, rc);
+}
+
+// Called once on the way out, before the log file is closed.
+static void appAutoSleepRestore(void)
+{
+    Result rc = 0;
+    DglabAutoSleepEvent event = dglabAutoSleepRestore(&rc);
+
+    appAutoSleepLog("restore", event, rc);
+}
+
 // libnx's default init already mounts sdmc, so a failure to open the file is
 // reported on screen rather than treated as fatal.
 static void logFileOpen(void)
@@ -331,6 +421,28 @@ static void buildLogPointers(void)
 // ---------------------------------------------------------------------------
 // IPC
 // ---------------------------------------------------------------------------
+
+// Whether the sysmodule is still there, which is what every page's title bar
+// shows on its right hand side. The menu polled this first, and only the pages
+// that talk to the sysmodule on their own (socket, motion) used to have any
+// idea; the front end now asks from one place, so the line means the same thing
+// whichever page is up. One PING a second is enough for a service this NRO
+// cannot run without, and it keeps the IPC traffic away from the frame rate.
+#define APP_PING_FRAMES 60
+static u32 g_ping_frames;
+static bool g_sysmodule_ok = true;
+
+static bool appSysmoduleOk(Service* dglab)
+{
+    if (g_ping_frames++ % APP_PING_FRAMES == 0) {
+        u32 pong = 0;
+
+        g_sysmodule_ok = R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_PING, pong)) &&
+            pong == DGLAB_IPC_PING_MAGIC;
+    }
+
+    return g_sysmodule_ok;
+}
 
 // Turns the Result of a command into the single line the screen shows. The
 // failures the buttons can actually cause are named; anything else is shown as a
@@ -437,10 +549,6 @@ static bool adjustStrength(Service* dglab, u32 channel, u32* value, int delta, R
     return true;
 }
 
-// Whether the server held a socket as of the last status poll: what the A button
-// means on the socket and motion pages depends on it.
-static bool g_server_running;
-
 // The D-pad is the mixer: up and down dial channel A, left and right dial channel
 // B, one step per press and, at a slower rate, while held. The socket and motion
 // pages share it, because they show the same two strengths.
@@ -496,10 +604,16 @@ static void repeatStrengthFromDirections(Service* dglab, u64 held, u64 now_ns)
 }
 
 // Starts or stops the server: what A does on the socket page and on the motion
-// page, where the bottom bar's own label follows this decision.
-static void toggleServer(Service* dglab)
+// page, where the bottom bar's own label follows this decision. `running` is the
+// state the calling page polled for this frame and drew - the same value the label
+// came from - so the key can never act on a staler belief than the one on screen.
+// (It used to read one global that only the socket page updated, which made A a
+// no-op on the motion page: that page's own label said "stop" while the global
+// still said "stopped", and the sysmodule answers NET_START on a running server
+// with success and does nothing.)
+static void toggleServer(Service* dglab, bool running)
 {
-    if (g_server_running) {
+    if (running) {
         noteCommand(dglabString(DglabString_ActionStop),
             serviceDispatch(dglab, DGLAB_IPC_CMD_NET_STOP), NULL);
     } else {
@@ -538,15 +652,18 @@ static void testChannelButtons(Service* dglab, u64 down)
 // it. A full 1280x720 frame plus the QR code is expensive, and the panel only
 // changes when one of these does.
 typedef struct {
-    DglabIpcVersion version;
     DglabNetStatus status;
     bool status_ok;
+    bool sysmodule_ok;
     bool url_ok;
     char url[DGLAB_NET_QR_MAX];
     u32 test_strength_a;
     u32 test_strength_b;
     char last_command[sizeof(g_last_command)];
     u32 last_command_tone;
+    // Swaps the row of warning text under the server row, so it belongs in the
+    // redraw decision like any other thing the page draws (nro/AGENTS.md).
+    bool auto_sleep_suppressed;
     int log_count;
     u32 log_generation;
     bool log_open;
@@ -560,13 +677,14 @@ static void snapshotFromState(DglabScreenSnapshot* out, const DglabScreenState* 
 {
     memset(out, 0, sizeof(*out));
 
-    out->version = state->version;
     out->status = state->status;
     out->status_ok = state->status_ok;
+    out->sysmodule_ok = state->sysmodule_ok;
     out->url_ok = state->url_ok;
     out->test_strength_a = state->test_strength_a;
     out->test_strength_b = state->test_strength_b;
     out->last_command_tone = state->last_command_tone;
+    out->auto_sleep_suppressed = state->auto_sleep_suppressed;
     out->log_count = state->log_count;
     out->log_generation = g_log_generation;
     out->log_open = state->log_open;
@@ -635,22 +753,18 @@ static int logScrollFromDirections(int offset, int max_offset, u64 down, u64 hel
 
     offset += lines * DGLAB_SCREEN_LOG_PITCH;
 
-    if (offset < 0)
-        offset = 0;
-
-    if (offset > max_offset)
-        offset = max_offset;
-
-    return offset;
+    return dglabListScrollClamp(offset, max_offset);
 }
 
 // The socket page and its log page. B goes back to the menu; every action here
 // is a shortcut key, so there is nothing to focus and nothing to navigate.
 static void runSocketView(Service* dglab, PadState* pad)
 {
-    DglabIpcVersion version = { 0 };
     DglabScreenSnapshot snapshot;
     bool have_snapshot = false;
+    // What the A button means here: whether the server held a socket as of this
+    // frame's status poll, which is also what the bottom bar's label says.
+    bool server_running = false;
     char url[DGLAB_NET_QR_MAX];
     bool url_ok = false;
     // The log page is part of this view: Y opens it and closes it again, and it
@@ -660,8 +774,6 @@ static void runSocketView(Service* dglab, PadState* pad)
     u32 frame = 0;
 
     url[0] = '\0';
-
-    serviceDispatchOut(dglab, DGLAB_IPC_CMD_GET_VERSION, version);
 
     while (appletMainLoop()) {
         DglabScreenState state;
@@ -676,9 +788,9 @@ static void runSocketView(Service* dglab, PadState* pad)
         memset(&state, 0, sizeof(state));
         memset(&chunk, 0, sizeof(chunk));
 
-        state.version = version;
         state.url = url;
         state.url_ok = url_ok;
+        state.sysmodule_ok = appSysmoduleOk(dglab);
 
         state.status_ok =
             R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, state.status));
@@ -704,9 +816,10 @@ static void runSocketView(Service* dglab, PadState* pad)
         }
 
         state.url_ok = url_ok;
-        g_server_running = state.status_ok &&
+        server_running = state.status_ok &&
             (state.status.state == DglabNetState_Listening ||
                 state.status.state == DglabNetState_Paired);
+        appAutoSleepFollow(server_running);
 
         if (down & HidNpadButton_B)
             return;
@@ -721,7 +834,7 @@ static void runSocketView(Service* dglab, PadState* pad)
                 armTicksToNs(armGetSystemTick()));
         } else {
             if (down & HidNpadButton_A)
-                toggleServer(dglab);
+                toggleServer(dglab, server_running);
 
             testChannelButtons(dglab, down);
             adjustStrengthFromDirections(dglab, down);
@@ -737,6 +850,10 @@ static void runSocketView(Service* dglab, PadState* pad)
         state.test_strength_b = g_test_strength_b;
         state.last_command = g_last_command;
         state.last_command_tone = g_last_command_tone;
+        // Which of the two warning lines the server row carries. It follows the
+        // flag this frame's poll set, which is one frame behind a press - the
+        // same lag the status row above already has.
+        state.auto_sleep_suppressed = dglabAutoSleepActive();
 
         DglabScreenSnapshot candidate;
 
@@ -760,10 +877,6 @@ static void runSocketView(Service* dglab, PadState* pad)
 // The menu
 // ---------------------------------------------------------------------------
 
-// How often the menu checks that the sysmodule is still there. Every mode needs
-// it, and finding out after entering one wastes a trip through the menu.
-#define MENU_PING_FRAMES 60
-
 // Kept across visits, so leaving a mode comes back to the same entry.
 static unsigned g_menu_selected = DglabMenu_ItemSocket;
 
@@ -774,7 +887,6 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
     bool drawn_liveness = false;
     u32 drawn_generation = 0;
     bool have_drawn = false;
-    u32 frame = 0;
 
     memset(&state, 0, sizeof(state));
     state.sysmodule_ok = true;
@@ -807,13 +919,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
             }
         }
 
-        if (++frame % MENU_PING_FRAMES == 1) {
-            u32 pong = 0;
-
-            state.sysmodule_ok =
-                R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_PING, pong)) &&
-                pong == DGLAB_IPC_PING_MAGIC;
-        }
+        state.sysmodule_ok = appSysmoduleOk(dglab);
 
         state.selected = g_menu_selected;
 
@@ -969,6 +1075,33 @@ static void runMotionView(Service* dglab, PadState* pad)
         padUpdate(pad);
         down = padGetButtonsDown(pad);
 
+        // The server state is asked for every frame, not only when the panel is
+        // rebuilt: A starts and stops from what this frame saw, and the bottom
+        // bar's label comes from the same pass - the key and the label cannot
+        // disagree. The panel still refreshes at its own rate below.
+        {
+            DglabNetStatus status;
+            bool status_ok = R_SUCCEEDED(
+                serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, status));
+
+            state.server_running = status_ok &&
+                (status.state == DglabNetState_Listening ||
+                    status.state == DglabNetState_Paired);
+
+            // The motion page is the other place the server can be started, so
+            // it has to keep the console's sleep timer in step with it too.
+            appAutoSleepFollow(state.server_running);
+
+            if (!status_ok) {
+                state.link = dglabString(DglabString_StateIpcFailed);
+                state.link_tone = DglabCmdTone_Error;
+            } else {
+                state.link = dglabNetStateText(status.state);
+                state.link_tone = (status.state == DglabNetState_Paired) ? DglabCmdTone_Ok
+                                                                        : DglabCmdTone_Warn;
+            }
+        }
+
         if (down & HidNpadButton_B)
             break;
 
@@ -977,7 +1110,7 @@ static void runMotionView(Service* dglab, PadState* pad)
         // and the D-pad dials the two channel strengths (up/down A, left/right
         // B). Nothing is focused here, so the D-pad has no other job.
         if (down & HidNpadButton_A)
-            toggleServer(dglab);
+            toggleServer(dglab, state.server_running);
 
         // Y takes a fresh set of sensor handles. The mode's handles describe the
         // assignment the console had when they were taken, so a Joy-Con that was
@@ -1127,12 +1260,12 @@ static void runMotionView(Service* dglab, PadState* pad)
                     uploadSlots(dglab, MOTION_CHANNEL_B, slots, produced), NULL);
         }
 
-        // The live values refresh a few times a second; a rebuilt display is
-        // drawn at once, whatever that counter says.
+        // The header's status is asked for every frame (the shared poll is what
+        // paces the PING); the live values below refresh a few times a second,
+        // and a rebuilt display is drawn at once, whatever that counter says.
+        state.sysmodule_ok = appSysmoduleOk(dglab);
+
         if (++frame % MOTION_DISPLAY_FRAMES == 1 || drawn_generation != g_display_generation) {
-            DglabNetStatus status;
-            bool status_ok = R_SUCCEEDED(
-                serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, status));
             DglabCanvas canvas;
 
             state.left_connected = dglabJoyconIsConnected(DglabJoycon_Left);
@@ -1145,18 +1278,6 @@ static void runMotionView(Service* dglab, PadState* pad)
             state.frequency_b = dglabMotionFeedFrequencyMs(&feed_b);
             state.channel_strength_a = g_test_strength_a;
             state.channel_strength_b = g_test_strength_b;
-            state.server_running = status_ok &&
-                (status.state == DglabNetState_Listening || status.state == DglabNetState_Paired);
-
-            if (!status_ok) {
-                state.link = dglabString(DglabString_StateIpcFailed);
-                state.link_tone = DglabCmdTone_Error;
-            } else {
-                state.link = dglabNetStateText(status.state);
-                state.link_tone = (status.state == DglabNetState_Paired) ? DglabCmdTone_Ok
-                                                                        : DglabCmdTone_Warn;
-            }
-
             state.last_upload = g_last_command;
             state.last_upload_tone = g_last_command_tone;
 
@@ -1187,7 +1308,21 @@ static void runAboutView(Service* dglab, PadState* pad)
 {
     DglabIpcVersion version = { 0 };
     DglabAboutState state;
-    bool redraw = true;
+    // The page's own text decides how far it scrolls, so the offset is kept here
+    // and clamped against a fresh measurement every frame: switching the language
+    // changes the height, and the offset has to follow it.
+    int offset = 0;
+    int drawn_offset = 0;
+    // The language is a page input like any other: left and right change both the
+    // strings and the row heights, and leaving it out of the redraw test is how a
+    // language switch used to go unseen until the next scroll key pressed.
+    DglabLanguage drawn_preference = DglabLanguage_Count;
+    DglabLanguage drawn_resolved = DglabLanguage_Count;
+    // The theme is a page input as well: Y changes both the rows and the palette
+    // behind them, so both have to be in the redraw test - the language row
+    // taught this page that a key whose effect is left out of it looks broken.
+    DglabThemeMode drawn_theme = DglabThemeMode_Count;
+    bool drawn_liveness = false;
     bool have_drawn = false;
     u32 drawn_generation = 0;
 
@@ -1196,6 +1331,7 @@ static void runAboutView(Service* dglab, PadState* pad)
     while (appletMainLoop()) {
         DglabCanvas canvas;
         u64 down;
+        int step = 0;
 
         padUpdate(pad);
         down = padGetButtonsDown(pad);
@@ -1203,33 +1339,63 @@ static void runAboutView(Service* dglab, PadState* pad)
         if (down & HidNpadButton_B)
             return;
 
-        // Left and right switch the language, which is what the bottom bar says;
-        // there is nothing to focus on this page.
+        // Left and right switch the language and up and down scroll, which is
+        // what the bottom bar says - the scroll hint only while the page really
+        // is taller than the screen. There is nothing to focus on this page.
         if ((down & HidNpadButton_Left) || (down & HidNpadButton_Right)) {
             // Left and right both cycle: with three values there is no natural
             // direction, and the row shows what it became.
-            g_language_pref = dglabLanguageNext(g_language_pref);
-            appLanguageSave();
+            g_settings.language = dglabLanguageNext(g_settings.language);
+            appSettingsSave();
             appLanguageApply();
-            redraw = true;
         }
 
-        if (!redraw && have_drawn && drawn_generation == g_display_generation)
-            continue;
+        // Y cycles the colour theme: follow the console, light, dark and back.
+        // The palette is applied at once - the page redraws with it, and every
+        // other page draws with it when it is opened next.
+        if (down & HidNpadButton_Y) {
+            g_settings.theme = dglabThemeModeNext(g_settings.theme);
+            appSettingsSave();
+            appThemeApply();
+        }
+
+        if (down & HidNpadButton_Up)
+            step -= DGLAB_ABOUT_SCROLL_STEP;
+
+        if (down & HidNpadButton_Down)
+            step += DGLAB_ABOUT_SCROLL_STEP;
 
         memset(&state, 0, sizeof(state));
-        state.preference = g_language_pref;
+        state.preference = g_settings.language;
         state.resolved = g_language;
+        state.theme = g_settings.theme;
+        state.theme_system_is_dark = g_system_is_dark;
         state.app_version = DGLAB_APP_VERSION;
         state.build_id = DGLAB_BUILD_STAMP;
         state.ipc_version = version;
         state.github_url = "https://github.com/livcm/DGLAB-NX";
+        state.sysmodule_ok = appSysmoduleOk(dglab);
+
+        offset += step;
+        offset = dglabListScrollClamp(offset,
+            dglabAboutContentHeight(&g_fonts, &state) -
+                (DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP));
+        state.offset = offset;
+
+        if (have_drawn && offset == drawn_offset && state.sysmodule_ok == drawn_liveness &&
+            state.preference == drawn_preference && state.resolved == drawn_resolved &&
+            state.theme == drawn_theme && drawn_generation == g_display_generation)
+            continue;
 
         if (dglabFramebufferBegin(&canvas)) {
             dglabAboutDraw(&canvas, &g_fonts, &state);
             dglabFramebufferEnd();
 
-            redraw = false;
+            drawn_offset = offset;
+            drawn_preference = state.preference;
+            drawn_resolved = state.resolved;
+            drawn_theme = state.theme;
+            drawn_liveness = state.sysmodule_ok;
             drawn_generation = g_display_generation;
             have_drawn = true;
         }
@@ -1269,15 +1435,15 @@ static void runAdvancedView(Service* dglab, PadState* pad)
     u32 revision = 0;
     u32 drawn_revision = ~0u;
     bool drawn_saved = false;
+    bool drawn_liveness = false;
     u32 drawn_generation = ~0u;
-
-    (void)dglab;
 
     motionSettingsLoad(&config);
 
     memset(&state, 0, sizeof(state));
     state.config = &config;
     state.saved = true;
+    state.sysmodule_ok = appSysmoduleOk(dglab);
 
     while (appletMainLoop()) {
         DglabCanvas canvas;
@@ -1290,6 +1456,7 @@ static void runAdvancedView(Service* dglab, PadState* pad)
         padUpdate(pad);
         down = padGetButtonsDown(pad);
         held = padGetButtons(pad);
+        state.sysmodule_ok = appSysmoduleOk(dglab);
 
         if (down & HidNpadButton_B) {
             motionSettingsSave(&config);
@@ -1335,7 +1502,8 @@ static void runAdvancedView(Service* dglab, PadState* pad)
         }
 
         if (state.selected == drawn_selected && revision == drawn_revision &&
-            state.saved == drawn_saved && drawn_generation == g_display_generation)
+            state.saved == drawn_saved && drawn_liveness == state.sysmodule_ok &&
+            drawn_generation == g_display_generation)
             continue;
 
         if (dglabFramebufferBegin(&canvas)) {
@@ -1345,6 +1513,7 @@ static void runAdvancedView(Service* dglab, PadState* pad)
             drawn_selected = state.selected;
             drawn_revision = revision;
             drawn_saved = state.saved;
+            drawn_liveness = state.sysmodule_ok;
             drawn_generation = g_display_generation;
         }
     }
@@ -1450,8 +1619,21 @@ int main(int argc, char* argv[])
     for (unsigned i = 0; i < lang.notes; i++)
         logPushLine(lang.note[i]);
 
-    appLanguageLoad();
+    // set:sys is what tells us whether the console runs its light or its dark
+    // theme. A console that does not offer it (or an applet that may not ask)
+    // is not a reason to stop: "follow the console" then means dark, and the
+    // log panel carries the reason the row says so.
+    g_set_sys_ready = R_SUCCEEDED(setsysInitialize());
+
+    if (!g_set_sys_ready)
+        logPushLine("theme: set:sys unavailable, so following the console means dark");
+
+    appSettingsLoad();
     appLanguageApply();
+    appThemeApply();
+
+    if (g_set_sys_ready && !g_system_theme_ok)
+        logPushLine("theme: the console did not report a colour set, following it means dark");
 
     // Docking and undocking changes the frame the NRO draws into (720p handheld,
     // 1080p docked), so the display is built again when the console says it
@@ -1510,8 +1692,16 @@ int main(int argc, char* argv[])
     appletUnhook(&display_hook);
     dglabFramebufferClose();
 
+    // Automatic sleep is a console setting the user can change themselves, so
+    // leave it the way it was found before the process goes away (and before the
+    // log file closes: a failed restore is worth a line).
+    appAutoSleepRestore();
+
     if (g_log_file != NULL)
         fclose(g_log_file);
+
+    if (g_set_sys_ready)
+        setsysExit();
 
     serviceClose(&dglab);
 

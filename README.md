@@ -25,8 +25,8 @@
 | BLE 模式（sysmodule 直连设备） | 未实现，已搁置，见 `docs/ble-poc.md` |
 
 进度与顺序见 `AGENTS.md` §15：骨架、Sysmodule、IPC、Coyote V3 协议层、WebSocket 模式
-传输、波形接入、NRO 交互、Joy-Con 输入、基础 UI、NRO 元信息与版本管理都已完成；接着做
-浅色模式 → 触屏拖动玩法 → deko3d UI 后端 → Overlay → Game Mod 示例 → V4 Socket 协议，
+传输、波形接入、NRO 交互、Joy-Con 输入、基础 UI、NRO 元信息与版本管理、浅色模式都已完成；
+接着做触屏拖动玩法 → deko3d UI 后端 → Overlay → Game Mod 示例 → V4 Socket 协议，
 文档/测试/错误处理是持续项。
 
 协议层、IPC 布局、WebSocket/Socket 服务端、二维码与 NRO 绘制都有主机侧测试，见
@@ -157,7 +157,9 @@ BLE PoC 与启动出错提示——有效）。菜单有 5 项：`socket server`
 两点必须注意：
 
 - **服务端运行期间不要让主机休眠。** 睡眠通知注册被系统拒绝，持有 socket 跨过睡眠会
-  让主机挂死，只能长按电源键。原因与应对见 `docs/dglab-socket.md` 的“睡眠与唤醒”。
+  让主机挂死，只能长按电源键。自动休眠在服务端运行期间由 NRO 关掉（applet 的
+  `AutoSleepDisabled`），所以"人走开"这条路径是安全的；**手动休眠仍然会卡死**，
+  停服之后再睡。原因、边界与还未解决的漏洞见 `docs/dglab-socket.md` 的“睡眠与唤醒”。
 - **测试按钮会真的输出电压。** `ZL`/`ZR` 是测试波形 + 强度，请先确认设备和电极连接
   正常，强度从 0 开始一点点加。
 
@@ -186,7 +188,8 @@ make -C tests/stack      # sysmodule 的线程栈预算（用 devkitA64 的 gcc 
 
 ## 已知限制
 
-- 服务端运行期间主机无法正常休眠；
+- 服务端运行期间不能手动休眠（自动休眠已由 NRO 抑制；NRO 退出后服务端仍在跑时，
+  自动休眠这条路径也仍然会卡死）；
 - 只实现 V3 协议，V4 的消息外壳未实现；
 - 同时只绑定一个 App 连接（服务端最多接受 2 条 TCP，其中一条留给重连过渡）；已连接的
   App 没有单独的空闲超时，只靠 TCP 断开或 `shutdown()`；

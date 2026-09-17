@@ -15,7 +15,11 @@ NRO      := $(ROOT)/nro
 # The tests read the real files, so a translation that lost a key fails here.
 LANG_DIR := $(abspath $(ROOT)/lang)
 
+# settings.c owns the NRO's app.cfg, theme.c the two palettes and the theme
+# preference, so both are checked here next to the language preference they sit
+# beside on the SD card.
 SOURCES  := $(NRO)/source/ui/strings.c $(NRO)/source/ui/language.c \
+	$(NRO)/source/ui/settings.c $(NRO)/source/ui/theme.c \
 	$(NRO)/source/util/json.c $(NRO)/source/platform/langfiles.c
 # langfiles.c is the part that reads the SD card on a console, but it only uses
 # stdio, so a directory on the host drives the same code.

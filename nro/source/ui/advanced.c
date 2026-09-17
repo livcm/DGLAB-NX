@@ -56,6 +56,7 @@ void dglabAdvancedDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     DglabHint hints[3];
     DglabTextStyle title = { fonts->title, theme->text };
     DglabListStyle style;
+    DglabListPage page;
     unsigned selected = state->selected;
     // One buffer per setting: the rows are drawn after the whole page is built,
     // so a single shared buffer would leave every row showing the last value.
@@ -64,8 +65,6 @@ void dglabAdvancedDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     int count = 0;
     int view_height = DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP;
     int content_height;
-    int max_offset;
-    int offset;
 
     if (selected >= (unsigned)DglabMotionSetting_Count)
         selected = 0;
@@ -96,19 +95,20 @@ void dglabAdvancedDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
 
     content_height = dglabListMeasure(&list_fonts, rows, count, DGLAB_PAGE_CONTENT_WIDTH, boxes,
         (int)(sizeof(boxes) / sizeof(boxes[0])));
-    max_offset = content_height > view_height ? content_height - view_height : 0;
+    page = dglabListPageLayout(DGLAB_PAGE_CONTENT_TOP, view_height, content_height, 0);
     // The explanation belongs to the selected row, so the page scrolls to the
     // pair rather than to the row alone.
-    offset = dglabListScrollFor(0, max_offset, view_height, boxes[focus].y,
+    page.offset = dglabListScrollFor(0, page.max_offset, view_height, boxes[focus].y,
         boxes[focus].height);
 
     dglabPageBegin(canvas);
-    dglabPageHeader(canvas, &title, dglabString(DglabString_AdvancedTitle), NULL, NULL);
+    dglabPageHeader(canvas, &title, dglabString(DglabString_AdvancedTitle));
+    dglabPageHeaderStatus(canvas, fonts->value, state->sysmodule_ok);
     dglabPageClipContent(canvas);
 
     style = (DglabListStyle){
         .x = DGLAB_PAGE_CONTENT_X,
-        .origin_y = DGLAB_PAGE_CONTENT_TOP - offset,
+        .origin_y = DGLAB_PAGE_CONTENT_TOP - page.offset,
         .width = DGLAB_PAGE_CONTENT_WIDTH,
         .focus = focus,
         .navigation = false,
@@ -117,7 +117,7 @@ void dglabAdvancedDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
 
     dglabCanvasClearClip(canvas);
 
-    dglabListScrollBar(canvas, DGLAB_PAGE_CONTENT_TOP, view_height, content_height, offset);
+    dglabListPageScrollBar(canvas, &page);
 
     hints[0] = (DglabHint){ DglabButton_Left, DglabButton_Right,
         dglabString(DglabString_ActionAdjust), };

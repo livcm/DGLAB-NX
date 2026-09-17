@@ -34,6 +34,8 @@ typedef struct {
     // if that happens across a sleep - the same warning the socket screen shows.
     bool server_running;
 
+    /// The title bar's right hand side: whether the sysmodule still answers.
+    bool sysmodule_ok;
 } DglabMotionScreenState;
 
 void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
