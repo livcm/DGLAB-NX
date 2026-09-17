@@ -1,8 +1,12 @@
 # DG-LAB Socket 协议（Wi-Fi + WebSocket）
 
+本文对应 **WebSocket 模式**（已实现）：sysmodule 与手机 DG-LAB App 建立 WebSocket 会话
+——Switch 当服务端，App 扫码连入（Switch 不主动外连）；手机负责与设备之间的 BLE，并把
+波形数据转发给设备。BLE 模式（sysmodule 直接连接设备）未实现、已搁置，见 `docs/ble-poc.md`。
+
 本文记录 Switch 侧通过局域网控制手机的 DG-LAB App 所需的协议事实。
 
-## 为什么走 Socket 而不是 BLE
+## 为什么走 WebSocket 模式而不是 BLE 模式
 
 主机侧 BLE 在 HOS 22.5.0 上不可用（见 `docs/ble-poc.md`）。DG-LAB App 提供了
 Socket 控制能力：手机负责 BLE，Switch 只做 WebSocket 通信。
@@ -36,6 +40,10 @@ DG-LAB App 始终是 **WebSocket 客户端**，它需要一个 WebSocket **服�
 两套的消息外壳不同（见下）。由于用户 App 的具体版本待确认，Switch 端服务端应当
 同时接受"路径携带 clientId"与"`?tid=` 携带 clientId"两种连接，再按收到的第一条
 消息判断版本。
+
+**命名**：V3 / V4 是这套 **Socket 协议**（Wi-Fi + WebSocket）的版本号；`Coyote` 是
+**蓝牙协议**的代号（Coyote V2 / V3，见 `docs/dglab-protocol.md`）。两条协议线互相独立，
+版本号没有对应关系，不要写成"郊狼 4.0 的 Socket 协议"，也不要把这里的 V3 叫 Coyote V3。
 
 ## V3 协议（社区实现完整）
 
@@ -184,7 +192,8 @@ sysmodule 内部直接扮演控制端：
 `dglabNetSocketStartSleepWatch()` 在 sysmodule 启动时只做两件事：建好会话核心，
 并向电源管理注册睡眠通知。**服务端本身要等客户端调用 `NET_START`（NRO 上按 `A`）
 才启动**，因为持有 socket 会让整机睡眠出问题（见下一节），而大部分人根本不会用到
-这个服务。`NET_STOP`（NRO 上按 `Y`）会把它收掉。
+这个服务。`NET_STOP`（NRO 上再按一次 `A`，底栏的 `A` 提示会在 start / stop 之间切换）
+会把它收掉。
 
 ### 睡眠与唤醒
 
@@ -199,30 +208,25 @@ sysmodule 内部直接扮演控制端：
 实现是保守的：注册用的模块 id 是 `PscPmModuleId_WlanSockets`，若该 id 已被系统占用
 （`pscmGetPmModule` 返回失败），就只记一行日志并照常运行。
 
-**实机结果：注册被拒绝，返回 `0x0000108A`**（模块 8、描述 0x8A；`WlanSockets` 这个 id
-由系统自己持有）。因此又补了两条兜底：
+**注册只尝试 `WlanSockets` 这一个 id，绝不允许再试别的**：拿 `200`/`201` 之类的自定义 id
+去调 `pscmGetPmModule` 会**冻住整台主机**（一次卡在开机 logo，一次所有按键无响应，只能
+长按电源键）。实机结果是注册被拒绝、返回 `0x0000108A`（模块 8、描述 0x8A；`WlanSockets`
+这个 id 由系统自己持有），日志里的 `sleep watch unavailable rc=0x0000108A` 就是正常情况。
+
+**现状是诚实的：只要服务端在跑，这台主机休眠就会卡死**（没有可用的睡眠通知）。兜底三条：
 
 1. 服务端不自动启动（已验证：不启动就不会睡死）；
 2. **没有客户端连接满 55 秒就自动停服务**；计时从最后一个客户端离开开始。窗口刻意短于
    主机最短的自动休眠时间（60 秒），这样"人走开 → 主机自动休眠"这条路径上服务端一定
    已经收掉了。有人连着（App 会持续发心跳）时不会自动停；
-3. NRO 界面在服务运行时会显示 `do not sleep the console while the server runs: press Y first`。
+3. NRO 界面在服务运行时会显示 `do not sleep while the server runs`（`sleep_warning`）。
 
-**现状是诚实的：只要服务端在跑，这台主机休眠就会卡死，因为没有可用的睡眠通知。** 想要
-真正修好，需要找到能可靠告知"即将休眠"的机制（`psc` 的模块 id 或其它信号），在那之前
-只能靠上面三条兜底。
-
-**注册只尝试 `WlanSockets` 这一个 id，而且绝不允许再试别的 id。** 实机证据：拿
-`200`/`201` 之类的自定义 id 去调 `pscmGetPmModule` 会**冻住整台主机**——一次发生在开机
-路径（卡在开机 logo），一次发生在按 `A` 启动服务时（所有按键无响应，只能长按电源键）。
-`WlanSockets` 则是安全且"失败很快"的：系统自己持有该 id，调用立刻返回 `0x0000108A`。
-
-结论：**PSC 这条路现在是关着的**，除非将来有别的可靠机制，不要在 sysmodule 里再对
-`psc` 做实验。日志里出现的 `sleep watch unavailable rc=0x0000108A` 就是正常情况。
+想要真正修好，需要找到能可靠告知"即将休眠"的机制（`psc` 的模块 id 或其它信号）。
+**PSC 这条路现在是关着的**，除非将来有别的可靠机制，不要在 sysmodule 里再对 `psc` 做实验。
 
 同时 `nifm` 改成"用完即走"：查地址时 `nifmInitialize` → `nifmGetCurrentIpAddress` →
-`nifmExit`，结果缓存 2 秒（NRO 每帧轮询状态）。长期持有 nifm 会话是"网络占用"的另一
-个候选原因，先把它排除掉。
+`nifmExit`，结果缓存 2 秒（NRO 每帧轮询状态）——长期持有 nifm 会话是"网络占用"的另一个
+候选原因，先把它排除掉。
 
 ### 开机路径必须最小（血泪教训）
 
@@ -242,53 +246,32 @@ socket、服务线程、PSC 注册全部放在 `dglabNetSocketStart()` 里，也
 
 ### 栈上不要放 KB 级缓冲区（血泪教训）
 
-sysmodule 的线程栈只有 16KB（主线程来自 NPDM 的 `main_thread_stack_size`，网络线程来自
-`NET_THREAD_STACK_SIZE`），而这条路径上还叠着 libnx 的 IPC/服务调用、newlib 的
-`printf` 和 SD 卡写入。实机记录（2026-09-15）：
+sysmodule 的线程栈很小（主线程来自 NPDM 的 `main_thread_stack_size`，网络线程来自
+`NET_THREAD_STACK_SIZE`），这条路径上还叠着 libnx 的 IPC/服务调用、newlib 的 `printf`
+和 SD 卡写入。**症状**：按 `ZL`/`ZR` 会让整个 sysmodule 死掉——**进程直接消失、所有 IPC
+无响应**，客户端拿不到任何 `Result`（所以一开始被当成发送路径的问题查）。原因是
+`NET_WAVEFORM` 处理链上 `clear` 与 `pulse` 各有一个 1950 字节的栈上缓冲区
+（`char command[DGLAB_SOCKET_MAX_MESSAGE]`）；挪到 `.bss` 后不再复现。同类缓冲区
+（`sendError`、`sendHeartbeat`、绑定回复帧、`dglabNetServerOnMessage` 的解析结构）也一并
+挪到了 `.bss`，核心代码现在没有接近 2KB 的栈帧（这条链上最大的帧是 `dglabNetServerLog`
+的 480 字节 + newlib 的 `printf`）。
 
-- 按 `ZL`/`ZR` 会让整个 sysmodule 死掉：`NET_WAVEFORM` 的处理链上，`clear` 和 `pulse`
-  各有一个 1950 字节的栈上缓冲区（`char command[DGLAB_SOCKET_MAX_MESSAGE]`），加上
-  `dglabHandleRequest` 与 WebSocket/socket 写入的调用链就把主线程栈压爆了；
-- 症状是**进程直接消失、所有 IPC 无响应**，客户端拿不到任何 `Result`，所以一开始被当成
-  发送路径的问题查；
-- 把这两个缓冲区挪到 `.bss` 之后，怎么按都不再复现（同一台主机、同一支手机）。
+规则：
 
-同一类缓冲区（`sendError`、`sendHeartbeat`、绑定回复帧、`dglabNetServerOnMessage` 的解析
-结构）也一并挪到了 `.bss`，核心代码现在没有接近 2KB 的栈帧。量栈的方法写在
-`sysmodule/AGENTS.md` 的"线程与栈"一节。
-
-**2026-09-16：第二次报告与结论**。又收到一次同样的症状（按 ZL/ZR → NRO 卡死 → 退出重进
-提示 sysmodule 未运行）。当前代码里那两个缓冲区已经在 `.bss`（`-fstack-usage` 复核过，这
-条链上最大的帧是 `dglabNetServerLog` 的 480 字节 + newlib 的 `printf`），**把
-`release/00FF072107210721/` 重新装到 SD 卡并重启之后不再复现**（用户实机确认）。
-
-这一轮的教训不是某个 API 用法，而是流程：
-
-- 症状组（**NRO 卡死 + 退出重进提示 sysmodule 未运行**）的含义是 **sysmodule 进程不在了**
-  ——不是"某一帧画错"也不是"IPC 慢"。而"SD 卡上装的是旧二进制"与"代码真有 bug"表现**完全
-  一样**：旧进程照样会以栈溢出这种方式死掉；
-- 所以看到这组症状，先排除自己装的版本，再怀疑代码。2026-09-16 起 sysmodule 会在启动与每
-  次开服时把 `git describe` 得到的构建标识写进日志（`dglab/build.h`），`dglab-sys.log`
-  开头那行就是答案；没有这一行说明装的是更老的版本；
-- 排查顺序固定为：① 比对日志里的构建标识（旧版本没有这一行）→ ② `dglab-sys.log`
-  （最后一行停在哪儿）→ ③ `sdmc:/atmosphere/crash_reports/…_00ff072107210721.log`。
-
-同时补了两条与现象无关但同属这一类的加固：
-
-- NPDM 的 `main_thread_stack_size` 从 `0x4000`(16KB) 提到 `0x8000`(32KB)——这条链上跑着
-  libnx 的 IPC、newlib 的 `printf` 与 fs 写入，16KB 的余量本来就不合理；
-- 新增 `make -C tests/stack`：用 devkitA64 的 gcc 以 `-fstack-usage` 编译 sysmodule 全部源码，
-  除文档里说明过的几个例外（两个每连接接收缓冲 + ble_poc 的三个 scan 结果结构）外，任何
-  函数栈帧 ≥ 1KB 就失败。这条把上面那节的人工测量变成了每次都能跑的检查。
-
-如果再复现（目前没有用到），按证据分流：有崩溃报告（`sdmc:/atmosphere/crash_reports/` 里
-`…_00ff072107210721.log`）且回溯落在 `NET_WAVEFORM` 链 → 按栈的规则处理；没有崩溃报告、
-`dglab-sys.log` 停在某条 `tx …` 之前且 NRO 几秒后自己恢复 → 说明是 IPC 线程在持锁状态下被
-socket 写入挡住（`SO_SNDTIMEO` 5 秒），那就把波形上传统统改成只入队（由 tick 线程发）、
-客户端写改成 `MSG_DONTWAIT` + 部分写失败即断开。
-
-**每个连接自己的缓冲区不在此列**：那两个必须
-留在对应线程的栈上，因为两个客户端可能同时在线。
+- 被 IPC 线程、tick 线程、客户端线程共用的代码（`net_server.c`）里，KB 级缓冲区放 `.bss`
+  （`static`），注释写明"调用方持有 transport 锁"；
+- **每个连接自己的缓冲区**（`netClientThreadMain` 的接收缓冲、`wsConnRecv` 的重组缓冲）
+  必须留在那个线程的栈上，不能共享——两个客户端同时在线时共享会互相踩；
+- `make -C tests/stack` 用 devkitA64 的 gcc 以 `-fstack-usage` 编译 sysmodule 全部源码，
+  除 `tests/stack/Makefile` 的 `ALLOW` 列出的例外（两个每连接接收缓冲 + ble_poc 的三个
+  scan 结果结构）外，**任何函数栈帧 ≥ 1KB 就失败**。量单个文件的命令见
+  `sysmodule/AGENTS.md` 的"线程与栈"一节；
+- 排查顺序：① 比对日志里的构建标识 → ② `dglab-sys.log` 最后停在哪儿 →
+  ③ `sdmc:/atmosphere/crash_reports/…_00ff072107210721.log`。**"SD 卡上装的是旧二进制"
+  与"代码真有 bug"表现完全一样**，先排除版本再怀疑代码；
+- 若再复现且没有崩溃报告、`dglab-sys.log` 停在某条 `tx …` 之前、NRO 几秒后自己恢复：
+  说明 IPC 线程持锁时被 socket 写入挡住（`SO_SNDTIMEO` 5 秒），把波形上传统统改成只入队
+  （由 tick 线程发）、客户端写改 `MSG_DONTWAIT` + 部分写失败即断开。
 
 ### 日志文件（SD 卡）
 
@@ -390,13 +373,13 @@ Replace 模式 + 设置该通道强度），所以按一下 `ZL` 或 `ZR` 就能
 | --- | --- |
 | `ZL` | 通道 A：测试波形（波形强度固定 100）**并**设置 A 的强度 |
 | `ZR` | 通道 B：同上，走 B |
-| `B` | `clear-A` + `clear-B` |
+| `X` | `clear-A` + `clear-B` |
 | `↑`/`↓` | 通道 A 强度 0~100，步进 1，**不循环**（0 再减还是 0，100 再加还是 100）；按住约 0.4 秒后才开始连发，之后每 0.1 秒一步 |
 | `→`/`←` | 通道 B 强度，同上 |
 
 两个通道各有一个强度，默认都是 0，**改一下就立刻发给 App**，没有单独的"发送"按键；
-两个值在界面的 `strength` 行上并排显示（`A n/100  B n/100`）。这一行是我们设的通道
-强度；App 自己上报的值（3.0 上是空的）在上一行 `app report`。
+两个值在界面的 `channel A` / `channel B` 行上各显示一个（`A n/100`）。这两个值是我们设的
+通道强度。
 
 **强度用的是设备的原始值，和 App 里显示的强度是同一个数字，不做百分比换算**；官方
 文档说明超过 100 只适用于特殊情况，所以测试上限就到 100。
@@ -450,30 +433,23 @@ Switch（网络/端口问题），有就说明握手与配对已经完成，问�
 停止服务时会给已配对的连接发一个 WebSocket close 帧再关 socket，让 App 有机会显示
 断开（实机反馈：之前直接 shutdown，App 不会自动断开）。
 
-### 实机验证记录（2026-09-15，DG-LAB App 3.0 + Coyote 3.0）
+### 实机验证结论（2026-09-15，DG-LAB App 3.0 + Coyote 3.0）
 
-优先级 5 在真机上跑通：NRO 显示二维码 → App 扫码绑定 → NRO 用真实强度与波形控制设备，
-设备有输出。以下几条原先是推断，现在有实机结论：
+真机上跑通：NRO 显示二维码 → App 扫码绑定 → NRO 用真实强度与波形控制设备，设备有输出。
 
-1. **指令信封的路由字段**：`clientId` 是**发件人**、`targetId` 是**收件人**（与最初
-   的推断相反，详见"消息外壳"一节）。写成反方向时 App 会记录消息却完全不执行。
-2. **心跳**：每 30 秒一条、绑定后立刻补发一条的写法，App 接受并保持会话；`message`
-   用 `"200"`。App 不回应心跳。
-3. **pulse 的 JSON 转义**：转义形式正确，App 能播放我们排队的波形。
-4. **App 是单向的**：3.0 App 不向服务端发送任何东西（没有 `msg`、没有 `break`、连
-   WebSocket Ping 都没有）。因此 `NET_STATUS` 里 App 上报的强度/上限一直是 0，
-   NRO 的 `app report` 行显示为 `none`。
-5. **测试按键的强度语义**：设备输出 = 通道强度(0~200) × 波形强度(0~100)。`ZL` 送
-   满强度波形并设置通道强度，所以屏幕上的数字就是实际强度；上限 100（原始值）。
-   （当天两个通道共用一个值、默认 10；之后改成每通道各一个、都从 0 起，见上文
-   "测试按键"一节。）
+1. **指令信封的路由字段**：`clientId` 是**发件人**、`targetId` 是**收件人**（写反时 App
+   会记录消息却完全不执行，详见"消息外壳"一节）；
+2. **心跳**：每 30 秒一条、绑定后立刻补发一条的写法，App 接受并保持会话；`message` 用
+   `"200"`，App 不回应心跳；
+3. **pulse 的 JSON 转义**正确，App 能播放我们排队的波形；
+4. **App 3.0 是单向的**：不向服务端发送任何东西，`NET_STATUS` 里 App 上报的强度/上限一直
+   是 0；
+5. **测试按键的强度语义**：设备输出 = 通道强度(0~200) × 波形强度(0~100)，`ZL` 送满强度
+   波形并设置该通道强度，所以屏幕上的数字就是实际强度，上限 100（原始值）。
 
-仍未解决或未验证：
-
-1. **服务端运行时休眠会卡死**（原因见上文"睡眠与唤醒"），只能靠"不自动启动 + 55 秒空闲
-   自动停 + 界面提示"兜底；55 秒自动停这条本身还没有实机确认过。
-2. **V4 未实现**：`?tid=` 形式在解析里被接受（便于排查），但 V4 的消息外壳没有实现。
-3. **App 的强度上限不会同步**：见第 4 条，是 App 设计，不是本项目的缺陷。
+仍未解决或未验证：服务端运行时休眠会卡死（兜底见"睡眠与唤醒"，其中 55 秒空闲自停这条
+本身还没实机确认）；V4 未实现（`?tid=` 形式在解析里被接受，便于排查）；App 的强度上限
+不会同步（是 App 设计，不是本项目的缺陷）。原文见 `docs/history.md`。
 
 ### 如何验证
 

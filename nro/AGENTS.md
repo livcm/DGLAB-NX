@@ -17,7 +17,8 @@
 ## 边界
 
 - NRO 不负责实现底层 DG-LAB Bluetooth Protocol。
-- NRO 不得自己建立 DG-LAB BLE 连接，所有 DG-LAB 通信必须通过 Sysmodule IPC。
+- NRO 不得自己建立或持有 DG-LAB 设备侧连接（BLE/WebSocket），所有 DG-LAB 通信必须通过
+  Sysmodule IPC（见根 `AGENTS.md` 的"单一 DG-LAB 连接所有者"）。
 - NRO 的 UI、玩法和业务逻辑应与 BLE/协议层解耦。
 
 ## 交互模型示例

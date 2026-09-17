@@ -5,9 +5,14 @@
 // The service name is limited to 8 characters by the Switch service manager.
 #define DGLAB_IPC_SERVICE_NAME "dglab"
 
-// Minimal IPC protocol version. Increment whenever the IPC surface changes in a
-// way that is not backward compatible.
-#define DGLAB_IPC_PROTOCOL_VERSION 1u
+// IPC protocol version, packed as 0xMMmmpp. DGLAB_IPC_CMD_GET_VERSION reports
+// these three bytes, so this constant is the single source for the number a
+// client sees: increment the minor (or major) whenever the IPC surface changes
+// in a way that is not backward compatible.
+//
+// This is the interface version, not the application's release version (that
+// one lives in the NRO's NACP, see AGENTS.md priority 13).
+#define DGLAB_IPC_PROTOCOL_VERSION 0x000200u
 
 // Commands implemented by the sysmodule. Command IDs are part of the public IPC
 // contract and must not be renumbered once released.

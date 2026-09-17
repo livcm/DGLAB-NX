@@ -2,6 +2,13 @@
 
 本文记录本项目对 DG-LAB 蓝牙协议的移植范围、实现位置与验证状态。
 
+本文的 Coyote V3 属于 **BLE 模式**（sysmodule 直接连接 DG-LAB 设备，**未实现、已搁置**）；
+其中的编解码（B0/BF/B1 与波形频率换算）被现行 **WebSocket 模式**复用，见
+`docs/dglab-socket.md` 与 `docs/ipc.md` 的 `NET_WAVEFORM`。
+
+蓝牙协议的代号是 **Coyote**（V2 / V3）。它与 Socket 协议的 V3 / V4 是两条独立的协议线，
+版本号没有对应关系：Socket 那条见 `docs/dglab-socket.md`。
+
 ## 官方协议来源
 
 - 仓库：<https://github.com/dungeonlab-open/dglab-bluetooth-protocol>
@@ -190,15 +197,20 @@ make -C tests/protocol
 
 ## 已知限制与后续工作
 
+本节只管 **BLE 模式**（Coyote V3）。现行的 **WebSocket 模式**见 `docs/dglab-socket.md`，
+它只复用本文的编解码，不用会话层——不要把这里的待办当成 WebSocket 模式的待办。
+
 - BLE transport 目前只有 PoC（扫描、连接、服务发现、读写、通知），见
   `docs/ble-poc.md`；它尚未接入本文件的协议会话层，写的还是固定报文；
-- 尚未把会话层接入 Sysmodule 主循环：`sysmodule/source/main.c` 目前只提供最小 IPC
-  与 PoC 调试命令，没有驱动 `dglabCoyoteV3SessionTick()`；
+- 会话层（`dglabCoyoteV3SessionTick()`）目前只被主机测试驱动：它按 BLE 的 100ms
+  节拍设计，而 WebSocket 模式是"事件源上传槽位 + 服务端按需补流"，两者节奏模型不同，
+  所以会话层随 BLE 模式一并搁置，不是 WebSocket 模式的待办；
 - 会话层的时间目前由测试以虚拟时间提供，尚未与真实 100ms 定时源结合；
 - 电量读取只在 PoC 里通过临时 IPC 命令触发，尚未进入正式接口；
 - 尚未实现 V2 协议；
-- 稳定 IPC 目前只有 `GET_VERSION` 与 `PING`；PoC 的调试命令位于临时的
-  `common/include/dglab/ipc_poc.h`，设备连接、强度与波形控制命令尚未设计。
+- 稳定 IPC 面向的是 WebSocket 模式：`GET_VERSION` / `PING` 与 `NET_*`（启动/停止、
+  状态、二维码、强度、清空、波形上传），见 `docs/ipc.md`；BLE 连接相关的命令只在
+  临时的 `common/include/dglab/ipc_poc.h` 里，随 BLE 模式搁置。
 
 ## 参考
 

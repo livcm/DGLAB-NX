@@ -5,18 +5,29 @@
 项目把 DG-LAB 的连接与协议实现收进一个常驻后台服务（sysmodule），前端组件
 （NRO / Overlay / Game Mod）只通过 IPC 使用它，不各自实现一遍协议，也不各自去抢设备。
 
-当前传输路线是 **Wi-Fi + WebSocket**：Switch 自己当 WebSocket 服务端，手机上的
-DG-LAB App 扫码接入，BLE 由手机负责，Switch 不直接持有蓝牙连接。
+传输分两种模式，当前只有 **WebSocket 模式**可用：
+
+| 模式 | 连接方式 | 状态 |
+| --- | --- | --- |
+| WebSocket | sysmodule 与手机 DG-LAB App 建立 WebSocket 会话：Switch 当服务端，App 扫码连入（Switch 不主动外连）；手机负责与设备之间的 BLE，并把波形数据转发给设备 | 已实现（Socket V3） |
+| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | 未实现，该模式已搁置，见 `docs/ble-poc.md` |
+
+两种模式下 Switch 都不直接持有蓝牙连接（WebSocket 模式的 BLE 在手机上）。
 
 ## 状态
 
 | 组件 | 状态 |
 | --- | --- |
-| `sysmodule/` DG-LAB 服务（服务名 `dglab`，Title ID `0x00FF072107210721`） | 可用：Coyote V3 协议层 + Wi-Fi/WebSocket 服务端 + IPC |
+| `sysmodule/` DG-LAB 服务（服务名 `dglab`，Title ID `0x00FF072107210721`） | 可用（WebSocket 模式）：Coyote V3 协议层 + WebSocket 服务端 + IPC |
 | `nro/` 前端 | 可用：菜单选择玩法——测试屏（地址/二维码/测试键/日志）与体感玩法（Joy-Con 驱动波形） |
 | `overlay/` | 未实现 |
 | `mods/` | 未实现 |
-| 主机侧 BLE 直连 | 已搁置，见 `docs/ble-poc.md` |
+| BLE 模式（sysmodule 直连设备） | 未实现，已搁置，见 `docs/ble-poc.md` |
+
+进度与顺序见 `AGENTS.md` §15：骨架、Sysmodule、IPC、Coyote V3 协议层、WebSocket 模式
+传输、波形接入、NRO 交互、Joy-Con 输入、基础 UI 都已完成；接着做 NRO 元信息与版本管理 →
+浅色模式 → 触屏拖动玩法 → deko3d UI 后端 → Overlay → Game Mod 示例 → V4 Socket 协议，
+文档/测试/错误处理是持续项。
 
 协议层、IPC 布局、WebSocket/Socket 服务端、二维码与 NRO 绘制都有主机侧测试，见
 [测试](#测试)。
@@ -24,10 +35,10 @@ DG-LAB App 扫码接入，BLE 由手机负责，Switch 不直接持有蓝牙连�
 ## 架构
 
 ```
-DG-LAB App（手机，负责 BLE）
-             ↑  WebSocket（App 是客户端）
+DG-LAB App（手机，负责 BLE）  ──BLE──→  DG-LAB 设备
+             ↑  WebSocket（App 是客户端，扫码连入 Switch）
    ┌─────────┴─────────┐
-   │  dglab sysmodule  │  WebSocket 服务端 / Socket 协议 / Coyote V3
+   │  dglab sysmodule  │  WebSocket 服务端 / Socket V3 / Coyote V3 协议层
    └─────────┬─────────┘
              │  IPC（服务名 dglab）
              ├──→ NRO（可用）
@@ -37,7 +48,8 @@ DG-LAB App（手机，负责 BLE）
 
 围绕这张图的几条规则：
 
-- **单一连接所有者**：只有 sysmodule 接触设备侧通信，其它组件一律走 IPC；
+- **单一连接所有者**：BLE/WebSocket 连接只能由 sysmodule 建立并持有，其它组件一律走 IPC
+  （见 `AGENTS.md` §3）；
 - **IPC 是内部公共 API**：命令号定义在 `common/include/dglab/ipc.h`，一旦发布不重排，
   新增命令用新号；
 - **协议层与平台解耦**：`sysmodule/source/protocol`、`sysmodule/source/net` 不含
@@ -103,34 +115,36 @@ NRO 的运行期文件都在这一个目录下，并且固定分层：
 ## 使用
 
 1. Switch 与手机连同一个局域网；
-2. 打开 `DGLAB-NX.nro`，菜单里选 `Socket test`，界面显示局域网地址与二维码；
+2. 打开 `DGLAB-NX.nro`，菜单里选 `socket server`，界面显示局域网地址与二维码；
 3. 用 DG-LAB App 扫码接入（App 是 WebSocket 客户端）；
 4. 用测试按键确认设备有输出。
 
-菜单里的 `Motion (Joy-Con)` 是另一个玩法：左右 Joy-Con 分别驱动 A / B 通道，动得越快
+菜单里的 `motion (Joy-Con)` 是另一个玩法：左右 Joy-Con 分别驱动 A / B 通道，动得越快
 波形值越大、脉冲越密；通道强度仍然是上面的"音量"。做法与参数见
 `docs/joycon-input.md`。
 
-同一菜单里的 `Advanced (motion)` 是体感玩法的参数页（死区、灵敏度、包络、频率、波形
+同一菜单里的 `advanced (motion)` 是体感玩法的参数页（死区、灵敏度、包络、频率、波形
 强度上限），改完自动存到 `sdmc:/switch/DGLAB-NX/config/motion.cfg`。
 
 按了没反应先看界面上的 `last cmd` 行：它显示最近一次按键的结果（`ok` / `no app bound`
 / `socket error`），红色是失败、黄色是"命令发出去了但听不到"（那一路强度还是 0）。
 
+菜单本身：`D-pad` 上下选择、`A` 进入；**`B` 退出 NRO**（`+` 只在 console 页——
+BLE PoC 与启动出错提示——有效）。菜单有 5 项：`socket server`、`motion (Joy-Con)`、
+`advanced (motion)`、`about`、`BLE PoC console`。
+
 | 按键 | 动作 |
 | --- | --- |
-| `A` | 启动 WebSocket 服务端 |
-| `Y` | 停止服务端 |
-| `ZL` | 测试通道 A（送波形 + A 的强度） |
-| `ZR` | 测试通道 B（送波形 + B 的强度） |
-| `B` | 清空波形（clear A / clear B） |
+| `A` | 启动 / 停止 WebSocket 服务端（底栏提示跟着切换） |
+| `Y` | 打开 / 关闭 sysmodule 日志子页 |
+| `X` | 清空波形（clear A / clear B） |
+| `B` | 返回菜单 |
+| `ZL` / `ZR` | 测试通道 A / B（送波形 + 该通道强度） |
 | `↑` / `↓` | 调整通道 A 强度（0~100，步进 1，按住连续调整，改完立刻发给 App） |
 | `→` / `←` | 调整通道 B 强度（同上） |
-| `-` | 切到 BLE PoC 控制台视图（已搁置路线，保留用于诊断） |
-| `+` | 退出 |
 
 两个通道的强度各自独立，都从 0 开始；调整即刻发送给 App，所以没有单独的"发送强度"
-按键。界面上 `test` 那一行同时显示两个通道的当前值（`A n/100  B n/100`）。
+按键。服务端页上 `channel A` / `channel B` 两行各显示一个当前值（`A n/100`）。
 
 服务端**不会开机自启**（只有按 `A` 才启动），最后一个客户端离开 55 秒后会自动停，
 避免长期占用 socket。
@@ -169,7 +183,8 @@ make -C tests/stack      # sysmodule 的线程栈预算（用 devkitA64 的 gcc 
 
 - 服务端运行期间主机无法正常休眠；
 - 只实现 V3 协议，V4 的消息外壳未实现；
-- 同时只服务一个 App 连接，且没有空闲超时（只靠 TCP 断开或 `shutdown()`）；
+- 同时只绑定一个 App 连接（服务端最多接受 2 条 TCP，其中一条留给重连过渡）；已连接的
+  App 没有单独的空闲超时，只靠 TCP 断开或 `shutdown()`；
 - 部分与 App 的交互约定仍待实机确认，见 `docs/dglab-socket.md` 的“待确认”；
 - `overlay/` 与 `mods/` 尚未开始。
 
@@ -177,12 +192,14 @@ make -C tests/stack      # sysmodule 的线程栈预算（用 devkitA64 的 gcc 
 
 | 文档 | 内容 |
 | --- | --- |
-| `docs/dglab-socket.md` | Wi-Fi + WebSocket 传输：绑定流程、服务端实现、平台约束、排查记录 |
+| `docs/dglab-socket.md` | WebSocket 模式（Socket 协议）：绑定流程、服务端实现、平台约束、排查记录 |
 | `docs/dglab-protocol.md` | Coyote V3 协议移植范围与验证状态 |
 | `docs/ipc.md` | IPC 服务名、版本与命令表 |
 | `docs/nro-ui.md` | NRO 界面方案调研与实现记录 |
 | `docs/joycon-input.md` | Joy-Con 六轴资料，以及"动作越大波形值越大"这个可选玩法的设计 |
-| `docs/ble-poc.md` | 主机侧 BLE 直连的实测记录（已搁置） |
+| `docs/ble-poc.md` | BLE 模式（sysmodule 直连设备）的实测记录（未实现，已搁置） |
+| `docs/docs-audit.md` | 文档约定（谁放哪一层）与 2026-09-17 审计的处置结果 |
+| `docs/history.md` | 文档压缩时移出的历史原文（各文档的迭代过程与审计明细） |
 
 贡献者与 agent 的工作规则在 `AGENTS.md` 以及各组件目录下的 `AGENTS.md`。
 

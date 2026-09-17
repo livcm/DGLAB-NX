@@ -7,7 +7,8 @@ sysmodule 共用同一个头文件。
 ## 基本约定
 
 - 服务名：`dglab`（`DGLAB_IPC_SERVICE_NAME`，受 Switch 服务名 8 字符限制）；
-- 协议版本：`DGLAB_IPC_PROTOCOL_VERSION`；
+- 协议版本：`DGLAB_IPC_PROTOCOL_VERSION`（按 `0xMMmmpp` 打包，`GET_VERSION`
+  直接返回它的三个字节）；
 - 命令号一旦发布不得重排。新增命令使用新的号码；临时 PoC 命令集中在
   `common/include/dglab/ipc_poc.h` 的 `0x80` 段，不属于稳定契约；
 - 每个回复的负载必须能放进 0x100 字节的 IPC 缓冲区（内联数据区约 232 字节）。
@@ -29,7 +30,10 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 
 ## 版本
 
-`GET_VERSION` 当前返回 `0.2.0`。
+`GET_VERSION` 返回的号来自 `common/include/dglab/ipc.h` 的
+`DGLAB_IPC_PROTOCOL_VERSION`（打包值 `0x000200u`），当前是 `0.2.0`。它是 **IPC 接口
+版本**，与应用的发行版本号是两回事——后者属于 NRO 的 NACP 与 About 页（见
+`AGENTS.md` §15 的"NRO 元信息与版本管理"）。接口发生不兼容变更时递增次版本号。
 
 | 版本 | 变化 |
 | --- | --- |
@@ -40,7 +44,7 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 
 | 命令 | 号 | 入参 | 出参 | 说明 |
 | --- | --- | --- | --- | --- |
-| `GET_VERSION` | 0 | — | `DglabIpcVersion` | 服务版本 |
+| `GET_VERSION` | 0 | — | `DglabIpcVersion` | IPC 接口版本，见上文“版本” |
 | `PING` | 1 | — | `u32` = `DGLAB_IPC_PING_MAGIC` | 确认连到了正确的服务 |
 | `NET_START` | 2 | `DglabNetStartRequest` | — | 启动 WebSocket 服务端；`port = 0` 用 `DGLAB_NET_DEFAULT_PORT`。服务端**不会开机自启**，见 `docs/dglab-socket.md` |
 | `NET_STOP` | 3 | — | — | 停止服务端并断开所有连接 |
@@ -103,7 +107,7 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 
 `TestPulse` 发送的是内置的短测试波形（8 个 100ms 元素，固定频率），用来验证
 “sysmodule → 服务端 → App”整条链路，不是给实际游戏使用的接口。真正的波形数据
-接入按 AGENTS.md 的优先级 6 再做。
+接入走下面的 `NET_WAVEFORM`。
 
 ## 错误码
 

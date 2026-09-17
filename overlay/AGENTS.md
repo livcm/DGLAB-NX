@@ -16,9 +16,9 @@
 
 ## 边界
 
-- Overlay 不负责长期持有 Bluetooth 连接。
 - Overlay 不实现底层 DG-LAB Bluetooth Protocol。
-- Overlay 必须通过 Sysmodule IPC 使用 DG-LAB 能力，不得直接建立 BLE 连接。
+- Overlay 不得自己建立或持有 DG-LAB 设备侧连接（BLE/WebSocket），只能通过 Sysmodule IPC
+  使用 DG-LAB 能力（见根 `AGENTS.md` 的"单一 DG-LAB 连接所有者"）。
 
 ## 与 NRO 的关系
 

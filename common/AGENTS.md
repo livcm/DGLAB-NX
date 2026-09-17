@@ -14,7 +14,8 @@
 ## 边界
 
 - 不要把具体组件的业务逻辑塞进 `common/`。
-- `common/` 不直接持有 DG-LAB Bluetooth/BLE 连接。
+- `common/` 不建立、也不持有 DG-LAB 设备侧连接（BLE/WebSocket）——那属于 sysmodule
+  （见根 `AGENTS.md` 的"单一 DG-LAB 连接所有者"）。
 - `common/` 不直接实现 BLE Transport 或 DG-LAB Protocol。
 
 ## 修改要求

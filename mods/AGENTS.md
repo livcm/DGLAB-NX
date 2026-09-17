@@ -26,7 +26,8 @@ Game Mod 负责：
 ## 边界
 
 - Game Mod 不应该重新实现 DG-LAB Bluetooth Protocol。
-- Game Mod 不得直接持有 DG-LAB BLE 连接。
+- Game Mod 不得自己建立或持有 DG-LAB 设备侧连接（BLE/WebSocket），只能通过 Sysmodule IPC
+  使用 DG-LAB 能力（见根 `AGENTS.md` 的"单一 DG-LAB 连接所有者"）。
 - Game Mod 只负责游戏事件到 Sysmodule IPC 的映射。
 
 ## 版本信息

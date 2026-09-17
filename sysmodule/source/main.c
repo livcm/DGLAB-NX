@@ -155,9 +155,9 @@ static bool dglabHandleRequest(void)
     switch (command_id) {
         case DGLAB_IPC_CMD_GET_VERSION: {
             const DglabIpcVersion version = {
-                .major = 0,
-                .minor = 2,
-                .patch = 0,
+                .major = (u32)((DGLAB_IPC_PROTOCOL_VERSION >> 16) & 0xFFu),
+                .minor = (u32)((DGLAB_IPC_PROTOCOL_VERSION >> 8) & 0xFFu),
+                .patch = (u32)(DGLAB_IPC_PROTOCOL_VERSION & 0xFFu),
             };
             dglabMakeResponse(CmifCommandType_Request, token, 0, &version, sizeof(version));
             break;

@@ -4,10 +4,12 @@
 
 `sysmodule/` 是项目的核心后端。
 
-负责：
+负责（传输分两种模式，当前只实现 WebSocket 模式）：
 
-- DG-LAB Bluetooth/BLE 连接；
-- DG-LAB Bluetooth Protocol；
+- **WebSocket 模式**：与手机 DG-LAB App 的 WebSocket 会话（Switch 是服务端、App 扫码连入）、
+  Socket 协议、把事件源的波形数据转发给 App（见 `docs/dglab-socket.md`）；
+- **BLE 模式**：直接连接 DG-LAB 设备（Coyote 协议）——**未实现，该模式已搁置**，
+  见 `docs/ble-poc.md`；
 - DG-LAB 设备发现、连接、断开；
 - 设备状态管理；
 - Effect / Wave / Command 等协议层功能；
@@ -15,14 +17,14 @@
 - 管理 DG-LAB 连接生命周期；
 - 处理来自多个客户端的请求。
 
-## BLE 所有权
+## 设备侧连接所有权（BLE / WebSocket）
 
-Sysmodule 是 DG-LAB 设备连接的唯一所有者。
+Sysmodule 是 DG-LAB 设备侧连接（BLE 或 WebSocket）的唯一所有者：连接由它建立、持有，
+也由它关闭。其它组件只能通过 IPC 与 Sysmodule 通信，不得自己建立或持有这类连接。
 
-除非有明确的架构理由，不允许 NRO、Overlay 或 Game Mod 自己建立
-DG-LAB Bluetooth 连接。
+规则与理由见根 `AGENTS.md` 的"单一 DG-LAB 连接所有者"。
 
-## 蓝牙兼容性
+## 蓝牙兼容性（仅 BLE 模式，当前未实现）
 
 只要HOS支持，DG-LAB BLE 连接必须与 Nintendo Switch 无线控制器
 和蓝牙音频共存。
@@ -42,55 +44,32 @@ DG-LAB Bluetooth 连接。
 
 不要仅仅基于成功的 BLE 连接来声明蓝牙是完美兼容的。
 
-## DG-LAB 官方协议参考仓库
+## DG-LAB 官方协议参考仓库（BLE 模式 / Coyote）
 
-本项目的 DG-LAB Bluetooth Protocol 实现必须以官方开源协议仓库作为主要协议参考：
+本节只管蓝牙这条协议线（Coyote V2 / V3）。本项目的 DG-LAB Bluetooth Protocol 实现必须
+以官方开源协议仓库作为主要协议参考（简称 `dglab-bluetooth-protocol`）：
 
-https://github.com/dungeonlab-open/dglab-bluetooth-protocol
+    https://github.com/dungeonlab-open/dglab-bluetooth-protocol
 
-简称：
-
-    dglab-bluetooth-protocol
+（WebSocket 那条协议线的来源见 `docs/dglab-socket.md`。）
 
 ### 外部协议实现约束
 
-如果任务涉及 DG-LAB Bluetooth Protocol，在实现、修改或调试 DG-LAB Bluetooth Protocol 相关代码之前，
-必须先检查 `dglab-bluetooth-protocol` 中的相关文档和实现。操作步骤必须是：
+任务涉及 DG-LAB Bluetooth Protocol 时，实现、修改或调试之前必须先检查
+`dglab-bluetooth-protocol` 的相关文档与实现，步骤固定为：
 
-    1. 定位官方协议仓库
-    2. 确认设备型号
-    3. 确认协议版本
-    4. 阅读对应协议文档
-    5. 提取所需协议细节
-    6. 检查当前项目已有实现
-    7. 再开始编码
+    1. 定位官方协议仓库   2. 确认设备型号   3. 确认协议版本   4. 阅读对应协议文档
+    5. 提取所需协议细节   6. 检查当前项目已有实现   7. 再开始编码
 
-不得跳过第 1～4 步直接编写协议代码。
-
-不要仅凭模型已有知识、其他第三方项目或对协议的猜测实现 DG-LAB Protocol。
-
-如果本项目代码与官方协议文档不一致，应首先确认差异原因，而不是直接假设
-本项目的实现是正确的。
+不得跳过第 1~4 步直接写协议代码；不得仅凭模型已有知识、其他第三方项目或对协议的猜测实现
+DG-LAB Protocol。如果本项目代码与官方文档不一致，先确认差异原因，不要直接假设本项目的
+实现是对的。
 
 ### 优先参考的内容
 
-对于 DG-LAB 郊狼设备，优先检查：
-
-    coyote/
-    ├── README.md
-    ├── v2/
-    │   └── README.md
-    └── v3/
-        └── README.md
-
-根据实际设备和协议版本选择对应文档。
-
-官方仓库目前包含：
-
-- Coyote V2 Bluetooth Protocol；
-- Coyote V3 Bluetooth Protocol；
-- Pulse Waveform 相关说明；
-- 其他 DG-LAB 设备的 Bluetooth Protocol。
+Coyote 设备优先看仓库里的 `coyote/README.md`、`coyote/v2/README.md`、
+`coyote/v3/README.md`，按实际设备与协议版本选对应文档。不要因为其他 DG-LAB 设备的协议
+结构相似就把它的协议套到 Coyote 上。
 
 不要因为其他设备的协议结构相似，就将其协议直接用于 Coyote。
 
@@ -115,99 +94,43 @@ https://github.com/dungeonlab-open/dglab-bluetooth-protocol
 - reconnect 后需要重新设置的参数；
 - protocol version differences。
 
-例如，如果实现 Coyote V3，不得直接套用 V2 的数据格式。
-V3 文档明确说明其数据处理方式与 V2 存在差异，应以 V3 文档为准。
+例：实现 Coyote V3 时不得直接套用 V2 的数据格式——V3 文档明确说明两者的数据处理方式
+存在差异，以 V3 文档为准。
 
 ### Source of Truth
 
-协议相关信息的优先级：
+优先级：① DG-LAB 官方 `dglab-bluetooth-protocol` 仓库；② 本项目已验证的实现与测试结果；
+③ libnx / Switch 官方接口文档；④ 其他第三方实现；⑤ Agent 自身知识。
 
-1. DG-LAB 官方 `dglab-bluetooth-protocol` 仓库；
-2. 本项目已经验证过的实现和测试结果；
-3. libnx / Switch 官方相关接口文档；
-4. 其他第三方实现；
-5. Agent 自身知识。
-
-如果不同来源存在冲突：
-
-- 不要自行选择一个看起来合理的答案；
-- 标记冲突；
-- 检查官方协议仓库对应版本；
-- 必要时通过实机测试确认；
-- 在代码或 `docs/dglab-protocol.md` 中记录结论。
+来源冲突时：不要自行选一个"看起来合理"的答案 → 标记冲突 → 检查官方仓库对应版本 →
+必要时实机确认 → 在代码或 `docs/dglab-protocol.md` 里记录结论。
 
 ### 协议版本
 
-协议版本必须显式记录。
-
-不要创建一个含糊的：
-
-    DGLabProtocol
-
-然后把 V2、V3 的行为混在一起。
-
-推荐：
-
-    DGLabCoyoteV2Protocol
-    DglabCoyoteV3Protocol
-
-或者在协议层通过明确的版本结构进行区分。
-
-如果当前只支持一个版本，也必须在代码和文档中明确说明。
+协议版本必须显式记录，不要造一个含糊的 `DGLabProtocol` 把 V2、V3 的行为混在一起：用
+`DglabCoyoteV2Protocol` / `DglabCoyoteV3Protocol` 这类命名，或在协议层用明确的版本结构
+区分。只支持一个版本时也必须在代码与文档里写明。
 
 ### 外部仓库的使用方式
 
-当 Agent 可以访问网络时：
+能上网时：打开官方仓库 → 读根 README → 定位当前设备与协议版本的目录 → 读对应 README →
+按需检查其他相关文件 → 再开始实现。
 
-1. 打开官方仓库；
-2. 阅读根 README；
-3. 定位到当前设备和协议版本的目录；
-4. 阅读对应 README；
-5. 根据需要检查仓库中的其他相关文件；
-6. 再开始实现。
-
-如果网络不可用：
-
-- 不得假装已经阅读官方仓库；
-- 应使用项目已有的 `docs/dglab-protocol.md` 或本地缓存资料；
-- 如果资料不足，应明确指出缺少官方协议依据。
+不能上网时：不得假装已经读过官方仓库；改用 `docs/dglab-protocol.md` 或本地缓存资料，
+资料不足就明确指出缺少官方协议依据。
 
 ### 不要复制整个外部仓库
 
-`dglab-bluetooth-protocol` 是协议参考来源，不意味着应该把整个仓库直接复制到本项目。
+`dglab-bluetooth-protocol` 是参考来源，不是要整仓复制进本项目；按 Switch / libnx 的架构
+重新实现，保持协议定义与平台实现解耦：
 
-本项目应根据 Switch / libnx 的架构重新实现协议：
-
-    Official DG-LAB Protocol
-             ↓
-       Protocol Layer
-             ↓
-      BLE Transport
-             ↓
-        Sysmodule
-             ↓
-           IPC
-
-协议定义与 Switch 平台实现应该保持解耦。
+    Official DG-LAB Protocol → Protocol Layer → BLE Transport → Sysmodule → IPC
 
 ### 协议文档
 
-当本项目完成协议移植后，应在：
-
-    docs/dglab-protocol.md
-
-记录：
-
-- 支持的 DG-LAB 设备；
-- 支持的协议版本；
-- 官方协议来源；
-- Switch 侧 BLE 实现方式；
-- 官方协议与 Switch 实现之间的映射；
-- 已验证的指令；
-- 尚未验证的指令；
-- 已知限制。
-
-文档中应注明官方参考仓库：
+协议移植完成后，在 `docs/dglab-protocol.md` 记录：支持的设备与协议版本、官方协议来源、
+Switch 侧 BLE 实现方式、官方协议到本实现的映射、已验证 / 尚未验证的指令、已知限制，并注明
+官方参考仓库地址：
 
     https://github.com/dungeonlab-open/dglab-bluetooth-protocol
 
