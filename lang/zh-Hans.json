@@ -58,7 +58,7 @@
     "touch_half_right": "右半区（B 通道）",
     "touch_not_touched": "未触摸",
     "touch_density": "密度",
-    "touch_docked": "底座模式下触摸屏够不到：把主机从底座取下，或按 B 退出玩法。",
+    "touch_docked": "主机模式下无法触摸屏幕，请取下主机",
     "advanced_title": "高级参数（体感）",
     "advanced_saved": "已保存到 sdmc:/switch/DGLAB-NX/config/motion.cfg",
     "advanced_save_failed": "无法写入 motion.cfg（设置对本次运行仍然有效）",

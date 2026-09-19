@@ -159,25 +159,66 @@ static void testValueAxis(void)
     CHECK(half(HALF_A)->level == 0.0f);
 }
 
-// The horizontal axis runs across each half on its own: the left edge of a half
-// is the sparsest pulse and its right edge the densest, for both of them.
+// The horizontal axis runs across each half on its own, and its ends are page
+// geometry rather than the edges of the screen: the left half runs from the first
+// column of the two white rules to the column beside the centre line, the right
+// half from the centre line to the last column of the rules. A fingertip cannot
+// reach the panel's own edge, and an axis drawn to it never produced the
+// frequency parameters at all (docs/touch-input.md, hardware report 2026-09-19).
+// Outside an axis the reading is clamped, so pushing past an end still asks for
+// that end's extreme.
 static void testDensityAxis(void)
 {
     resetFeed();
-    CHECK(dglabTouchDensityForX(0) == 0.0f);
-    CHECK(dglabTouchDensityForX(DGLAB_TOUCH_HALF_WIDTH - 1) == 1.0f);
-    CHECK(dglabTouchDensityForX(DGLAB_TOUCH_SPLIT) == 0.0f);
-    CHECK(dglabTouchDensityForX(DGLAB_TOUCH_SPLIT + DGLAB_TOUCH_HALF_WIDTH - 1) == 1.0f);
-    // The middle of a half is the middle of the range, within a column.
-    CHECK(dglabTouchDensityForX(320) > 0.49f && dglabTouchDensityForX(320) < 0.51f);
-    CHECK(dglabTouchDensityForX(960) > 0.49f && dglabTouchDensityForX(960) < 0.51f);
 
-    holdAt(DGLAB_TOUCH_HALF_WIDTH - 1, 300, 1);
+    // The left half.
+    CHECK(dglabTouchDensityForX(DGLAB_TOUCH_DENSITY_LEFT) == 0.0f);
+    CHECK(dglabTouchDensityForX(DGLAB_TOUCH_SPLIT - 1) == 1.0f);
+    CHECK(dglabTouchDensityForX(0) == 0.0f);
+    CHECK(dglabTouchDensityForX(DGLAB_TOUCH_DENSITY_LEFT - 1) == 0.0f);
+
+    // The right half, the same the other way round.
+    CHECK(dglabTouchDensityForX(DGLAB_TOUCH_SPLIT) == 0.0f);
+    CHECK(dglabTouchDensityForX(DGLAB_TOUCH_DENSITY_RIGHT) == 1.0f);
+    CHECK(dglabTouchDensityForX(DGLAB_TOUCH_DENSITY_RIGHT + 1) == 1.0f);
+    CHECK(dglabTouchDensityForX(DGLAB_TOUCH_PANEL_WIDTH - 1) == 1.0f);
+
+    // The three ticks the page draws are the quarters of that axis, so they read
+    // as 25% / 50% / 75% of the range they divide.
+    {
+        static const struct {
+            uint32_t x;
+            float quarter;
+        } ticks[] = {
+            { 177, 0.25f }, { 331, 0.50f }, { 485, 0.75f },  // left half
+            { 793, 0.25f }, { 947, 0.50f }, { 1101, 0.75f }, // right half
+        };
+
+        for (size_t i = 0; i < sizeof(ticks) / sizeof(ticks[0]); i++) {
+            float density = dglabTouchDensityForX(ticks[i].x);
+
+            CHECK(density > ticks[i].quarter - 0.01f && density < ticks[i].quarter + 0.01f);
+        }
+    }
+
+    // And through the feed: the same numbers, and the two clamp bands reach the
+    // extremes rather than something near them.
+    holdAt(DGLAB_TOUCH_SPLIT - 1, 300, 1);
     CHECK(half(HALF_A)->density == 1.0f);
+
+    resetFeed();
+    holdAt(0, 300, 1);
+    CHECK(half(HALF_A)->held);
+    CHECK(half(HALF_A)->density == 0.0f);
 
     resetFeed();
     holdAt(DGLAB_TOUCH_SPLIT, 300, 1);
     CHECK(half(HALF_B)->density == 0.0f);
+
+    resetFeed();
+    holdAt(DGLAB_TOUCH_PANEL_WIDTH - 1, 300, 1);
+    CHECK(half(HALF_B)->held);
+    CHECK(half(HALF_B)->density == 1.0f);
 }
 
 // Two fingers, one per half: both halves are driven at once, each with its own
@@ -300,7 +341,7 @@ static void testPositionsBecomeSlots(void)
 
     // Top right of the left half: full value, densest pulses.
     resetFeed();
-    holdAt(DGLAB_TOUCH_HALF_WIDTH - 1, DGLAB_TOUCH_VALUE_TOP, 1);
+    holdAt(DGLAB_TOUCH_SPLIT - 1, DGLAB_TOUCH_VALUE_TOP, 1);
 
     for (int i = 0; i < 40; i++)
         produced = stepSlot(&g_stream_a, HALF_A);
@@ -336,8 +377,9 @@ static void testDensityIsNotTheValue(void)
     resetStreams(&config);
 
     resetFeed();
-    // Near the bottom of the value axis, at the right edge of the left half.
-    holdAt(DGLAB_TOUCH_HALF_WIDTH - 1, DGLAB_TOUCH_VALUE_BOTTOM - 56, 1);
+    // Near the bottom of the value axis, at the right end of the left half's
+    // density axis.
+    holdAt(DGLAB_TOUCH_SPLIT - 1, DGLAB_TOUCH_VALUE_BOTTOM - 56, 1);
 
     for (int i = 0; i < 40; i++)
         stepSlot(&g_stream_a, HALF_A);
@@ -360,7 +402,7 @@ static void testSharedParameters(void)
     resetStreams(&config);
 
     resetFeed();
-    holdAt(DGLAB_TOUCH_HALF_WIDTH - 1, DGLAB_TOUCH_VALUE_TOP, 1);
+    holdAt(DGLAB_TOUCH_SPLIT - 1, DGLAB_TOUCH_VALUE_TOP, 1);
 
     for (int i = 0; i < 40; i++)
         stepSlot(&g_stream_a, HALF_A);
@@ -420,6 +462,41 @@ static void testReleaseThenStop(void)
     CHECK(last.frequency_ms < config.frequency_still_ms);
 }
 
+// Past either end of the density axis the reading is clamped rather than ignored:
+// a finger that cannot quite reach the end of the axis still asks for that end's
+// pulse interval, which is exactly why the axis ends where the two rules do
+// instead of at the edge of the panel.
+static void testClampBandsReachTheEnds(void)
+{
+    DglabMotionFeedConfig config;
+
+    dglabMotionSettingsDefault(&config);
+    config.frequency_follows_level = false;
+
+    // Left of the left rule's end: the sparsest interval, not silence and not
+    // something near the end.
+    resetStreams(&config);
+    resetFeed();
+    holdAt(0, DGLAB_TOUCH_VALUE_TOP, 1);
+
+    for (int i = 0; i < 40; i++)
+        stepSlot(&g_stream_a, HALF_A);
+
+    CHECK(g_slots[0].strength == config.strength_max);
+    CHECK(g_slots[0].frequency_ms == config.frequency_still_ms);
+
+    // Right of the right rule's end: the densest one, on the right half.
+    resetStreams(&config);
+    resetFeed();
+    holdAt(DGLAB_TOUCH_PANEL_WIDTH - 1, DGLAB_TOUCH_VALUE_TOP, 1);
+
+    for (int i = 0; i < 40; i++)
+        stepSlot(&g_stream_b, HALF_B);
+
+    CHECK(g_slots[0].strength == config.strength_max);
+    CHECK(g_slots[0].frequency_ms == config.frequency_fast_ms);
+}
+
 // A finger held on the bottom rule asks for a waveform value of zero; the mode
 // uploads nothing for it, which is the same "an all-zero batch does not leave the
 // console" rule the motion mode's still periods use.
@@ -462,6 +539,7 @@ int main(void)
     testDensityIsNotTheValue();
     testSharedParameters();
     testReleaseThenStop();
+    testClampBandsReachTheEnds();
     testHeldAtZeroIsSilent();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

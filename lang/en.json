@@ -58,7 +58,7 @@
     "touch_half_right": "Right half (B)",
     "touch_not_touched": "No finger",
     "touch_density": "Density",
-    "touch_docked": "Docked: the touch panel cannot be reached. Take the console out of the dock, or press B to leave the mode.",
+    "touch_docked": "No touch input while the console is docked",
     "advanced_title": "Advanced (motion)",
     "advanced_saved": "Saved to sdmc:/switch/DGLAB-NX/config/motion.cfg",
     "advanced_save_failed": "Could not write motion.cfg (Settings still apply now)",

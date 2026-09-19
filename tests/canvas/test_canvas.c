@@ -862,15 +862,21 @@ static void checkPageStaysInItsRegions(const char* name, uint32_t background, Pa
     // rule, the title and the bottom bar alone are a few thousand pixels.
     CHECK(drawn > 2000);
 
-    // Both rules are white and one pixel tall, and the margin beside them is
-    // left alone: the console reserves the grey #4D4D4D for the rows inside the
-    // page (docs/nro-ui.md).
+    // Both rules are white and one pixel tall. The margin beside them is left
+    // alone as well - the console reserves the grey #4D4D4D for the rows inside
+    // the page (docs/nro-ui.md) - except on a page whose own content is the band,
+    // where a line at the first column of the rules is the point: the touch mode
+    // draws the density axis' ends there, on purpose.
     CHECK(screenPixel(dglabCanvasScale(&g_page_canvas, 640),
               dglabCanvasScale(&g_page_canvas, DGLAB_PAGE_RULE_Y)) == dglabThemeGet()->rule);
     CHECK(screenPixel(dglabCanvasScale(&g_page_canvas, 640),
               dglabCanvasScale(&g_page_canvas, DGLAB_PAGE_BAR_Y)) == dglabThemeGet()->rule);
-    CHECK(screenPixel(dglabCanvasScale(&g_page_canvas, 24),
-              dglabCanvasScale(&g_page_canvas, DGLAB_PAGE_BAR_Y) - 3) == page_background);
+
+    if (region != PageRegion_Playfield) {
+        CHECK(screenPixel(dglabCanvasScale(&g_page_canvas, 24),
+                  dglabCanvasScale(&g_page_canvas, DGLAB_PAGE_BAR_Y) - 3) == page_background);
+    }
+
     CHECK(screenPixel(dglabCanvasScale(&g_page_canvas, 24),
               dglabCanvasScale(&g_page_canvas, DGLAB_PAGE_BAR_Y) + 3) == page_background);
 }
@@ -1127,11 +1133,12 @@ static void checkContentClearsTheBar(const char* name)
 static void checkFieldClearsTheBar(const char* name)
 {
     // The vertical lines the field draws, in buffer pixels: the centre line and
-    // the three ticks of each half, from the drawing code's own formula.
-    static const int half_lefts[2] = { 0, DGLAB_TOUCH_SPLIT };
+    // the two lines that close the density axis, plus the three ticks of each
+    // half - all from the drawing code's own formulas.
+    const uint32_t probes[2] = { 0u, (uint32_t)DGLAB_TOUCH_SPLIT };
     uint32_t background = dglabThemeGet()->background;
     const DglabCanvas* canvas = &g_page_canvas;
-    int lines[1 + 2 * 3];
+    int lines[3 + 2 * 3];
     int line_count = 0;
     int top = dglabCanvasScale(canvas, DGLAB_PAGE_BAR_Y - 6);
     int bottom = dglabCanvasScale(canvas, DGLAB_PAGE_BAR_Y);
@@ -1140,10 +1147,15 @@ static void checkFieldClearsTheBar(const char* name)
     int found = 0;
 
     lines[line_count++] = dglabCanvasScale(canvas, DGLAB_TOUCH_SPLIT);
+    lines[line_count++] = dglabCanvasScale(canvas, DGLAB_TOUCH_DENSITY_LEFT);
+    lines[line_count++] = dglabCanvasScale(canvas, DGLAB_TOUCH_DENSITY_RIGHT);
 
     for (int half = 0; half < 2; half++) {
+        uint32_t start = dglabTouchDensityStart(probes[half]);
+        int density_span = (int)(dglabTouchDensityEnd(probes[half]) - start);
+
         for (int step = 1; step < 4; step++) {
-            int tick = half_lefts[half] + (DGLAB_TOUCH_HALF_WIDTH - 1) * step / 4;
+            int tick = (int)start + density_span * step / 4;
 
             lines[line_count++] = dglabCanvasScale(canvas, tick);
         }
@@ -1173,6 +1185,48 @@ static void checkFieldClearsTheBar(const char* name)
         printf("  %s: %d pixels of content run into the bottom bar\n", name, found);
 
     CHECK(found == 0);
+}
+
+// A docked console gets no field at all: no grid, no centre line, no axis ends,
+// no markers - the panel is inside the dock, there is nothing to point at, and
+// lines nobody can use would only look like they could be used. What is left in
+// the band under the page's rows is the one line that says so, and it has to be
+// centred: a stray grid line, or a line that was not centred, moves the middle of
+// that ink away from the middle of the panel and this fails.
+static void checkDockedField(const char* name)
+{
+    const DglabCanvas* canvas = &g_page_canvas;
+    uint32_t background = dglabThemeGet()->background;
+    // Under the five rows the page always lays out, from the same origin the
+    // screens use (dglabListMeasure + the list style's own offset).
+    int top = dglabCanvasScale(canvas,
+        DGLAB_PAGE_CONTENT_TOP + DGLAB_NOTE_LINE + 8 + DGLAB_ROW_HEIGHT * 5 + 8);
+    int bottom = dglabCanvasScale(canvas, DGLAB_PAGE_BAR_Y);
+    int centre = dglabCanvasScale(canvas, DGLAB_TOUCH_PANEL_WIDTH / 2);
+    int min_x = -1;
+    int max_x = -1;
+    int ink = 0;
+
+    for (int y = top; y < bottom; y++) {
+        for (int x = 0; x < g_screen_width; x++) {
+            if (screenPixel(x, y) == background)
+                continue;
+
+            ink++;
+
+            if (min_x < 0 || x < min_x)
+                min_x = x;
+
+            if (x > max_x)
+                max_x = x;
+        }
+    }
+
+    if (ink == 0)
+        printf("  %s: the docked page does not say why there is nothing to touch\n", name);
+
+    CHECK(ink > 0);
+    CHECK(min_x >= 0 && (min_x + max_x) / 2 > centre - 8 && (min_x + max_x) / 2 < centre + 8);
 }
 
 // A QR code is only worth showing while a socket is listening behind it. The
@@ -1420,10 +1474,9 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
         }
 
         // The touch page, in the states that change what it draws: one half held,
-        // both halves held, no finger at all, and the docked console, which adds
-        // the tallest row of the four - and then the two extremes of the panel,
-        // which are allowed to reach the corners of the field like a real finger
-        // would.
+        // both halves held, nothing held, the docked console (which draws no field
+        // at all), and a finger in each clamp band beside the density axis - the
+        // cases the axis ends exist for.
         for (unsigned variant = 0; variant < 5; variant++) {
             DglabTouchScreenState touch;
             char name[96];
@@ -1437,7 +1490,7 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             touch.last_upload_tone = DglabCmdTone_Error;
             touch.server_running = variant != 2;
 
-            if (variant != 2) {
+            if (variant == 0 || variant == 1) {
                 touch.held_a = true;
                 touch.x_a = 300;
                 touch.y_a = 200;
@@ -1453,21 +1506,23 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
                 touch.frequency_b = 70;
             }
 
-            touch.docked = variant == 3;
-
             if (variant == 4) {
-                // The panel's own corners: the marker is clamped into the field,
-                // and the row values are the ends of both axes.
-                touch.x_a = 0;
+                // Past both ends of the density axis, and at both ends of the
+                // value axis: the marker is clamped into the field, and the
+                // numbers are the extremes (far left sparsest, far right densest).
+                touch.held_a = true;
+                touch.x_a = 10;
                 touch.y_a = 0;
                 touch.level_a = 100;
                 touch.frequency_a = 100;
                 touch.held_b = true;
-                touch.x_b = DGLAB_TOUCH_PANEL_WIDTH - 1;
+                touch.x_b = DGLAB_TOUCH_PANEL_WIDTH - 10;
                 touch.y_b = DGLAB_TOUCH_PANEL_HEIGHT - 1;
                 touch.level_b = 0;
                 touch.frequency_b = 30;
             }
+
+            touch.docked = variant == 3;
 
             snprintf(name, sizeof(name), "%s touch %u", frames, variant);
             beginPage(&canvas, blue);
@@ -1475,12 +1530,13 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             checkPageStaysInItsRegions(name, blue, PageRegion_Playfield);
 
             // The field runs to the rules on purpose - it is the input - so the
-            // "content clears the bar" check cannot read that band. What it has to
-            // guard for this page is the one row that can overflow, the docked
-            // note, which is why the field's own fixed geometry is masked out
-            // below instead of the check being skipped.
-            if (variant != 4)
-                checkFieldClearsTheBar(name);
+            // "content clears the bar" check cannot read that band the way it
+            // reads a page of rows: the field's own fixed lines are masked out
+            // instead, and anything else down there is a row that did not fit.
+            checkFieldClearsTheBar(name);
+
+            if (variant == 3)
+                checkDockedField(name);
         }
 
         // The advanced page, on the first and the last setting: the description is

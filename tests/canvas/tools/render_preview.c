@@ -23,6 +23,7 @@
 //   /tmp/preview /tmp/font.bin /tmp/menu.bmp menu       (the mode menu)
 //   /tmp/preview /tmp/font.bin /tmp/motion.bmp motion   (the Joy-Con mode)
 //   /tmp/preview /tmp/font.bin /tmp/touch.bmp touch     (the touch mode)
+//   /tmp/preview /tmp/font.bin /tmp/touchdock.bmp touchdock  (a docked console)
 //   /tmp/preview /tmp/font.bin /tmp/advanced.bmp advanced  (the motion parameters)
 //   /tmp/preview /tmp/font.bin /tmp/log.bmp log        (the sysmodule log page)
 //   /tmp/preview /tmp/font.bin /tmp/aboutlow.bmp aboutlow  (the About page, end)
@@ -138,7 +139,7 @@ int main(int argc, char** argv)
 
     if (argc < 3) {
         fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> [normal|nowifi|stopped|"
-                        "log|menu|motion|touch|advanced|about|aboutlow] [dock]\n");
+                        "log|menu|motion|touch|touchdock|advanced|about|aboutlow] [dock]\n");
         return 2;
     }
 
@@ -358,20 +359,23 @@ int main(int argc, char** argv)
         motion.server_running = true;
 
         dglabMotionScreenDraw(&canvas, &g_fonts, &motion);
-    } else if (argc >= 4 && strcmp(argv[3], "touch") == 0) {
+    } else if (argc >= 4 && (strcmp(argv[3], "touch") == 0 ||
+                                strcmp(argv[3], "touchdock") == 0)) {
         DglabTouchScreenState touch;
+        bool docked = strcmp(argv[3], "touchdock") == 0;
 
         memset(&touch, 0, sizeof(touch));
-        touch.held_a = true;
+        touch.held_a = !docked;
         touch.x_a = 300;
         touch.y_a = 260;
         touch.level_a = 69;
         touch.frequency_a = 52;
-        touch.held_b = true;
+        touch.held_b = !docked;
         touch.x_b = 900;
         touch.y_b = 420;
         touch.level_b = 41;
         touch.frequency_b = 60;
+        touch.docked = docked;
         touch.channel_strength_a = 20;
         touch.channel_strength_b = 0;
         touch.link = dglabString(DglabString_StateConnected);

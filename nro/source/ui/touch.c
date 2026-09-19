@@ -15,6 +15,16 @@
 // Nothing is focused and nothing scrolls: the rows are a handful of fixed lines,
 // which is why the mode can spend the rest of the band on the field.
 
+// The density axis ends where the two white rules end, so the two numbers have to
+// be the page frame's own margin. They live in two layers that cannot include
+// each other (the mapping is platform independent), and this is the one place
+// both are in scope: change DGLAB_PAGE_MARGIN without the axis and the build
+// stops here instead of the picture quietly disagreeing with the output.
+_Static_assert(DGLAB_TOUCH_DENSITY_LEFT == DGLAB_PAGE_MARGIN,
+    "the density axis must start where the page rules start");
+_Static_assert(DGLAB_TOUCH_DENSITY_RIGHT == DGLAB_PAGE_WIDTH - DGLAB_PAGE_MARGIN - 1,
+    "the density axis must end where the page rules end");
+
 // The finger marker: a filled disc with a ring around it, so it stays visible
 // over the centre line and the grid.
 #define TOUCH_MARKER_RADIUS 12
@@ -60,53 +70,91 @@ static void drawMarker(DglabCanvas* canvas, unsigned x, unsigned y)
 }
 
 // The grid: the quarter lines of both axes. The ends of the value axis are the
-// page's own white rules and the middle of the density axis is the centre line,
-// so only the three lines between them are drawn - enough to read a position off
-// the panel by eye without turning the field into graph paper.
+// page's own white rules, and the ends of a half's density axis are the rules'
+// ends and the centre line, so only the three lines between them are drawn -
+// enough to read a position off the panel by eye without turning the field into
+// graph paper. The ticks come from the axis the mapping uses, not from the width
+// of the panel: that is what keeps them evenly spaced now that the axis no longer
+// starts at the edge of the screen.
 static void drawGrid(DglabCanvas* canvas)
 {
     const DglabTheme* theme = dglabThemeGet();
-    int span = DGLAB_TOUCH_VALUE_BOTTOM - DGLAB_TOUCH_VALUE_TOP;
+    int field_height = TOUCH_FIELD_BOTTOM - TOUCH_FIELD_TOP;
+    int value_span = DGLAB_TOUCH_VALUE_BOTTOM - DGLAB_TOUCH_VALUE_TOP;
+    // One column of each half, so the axis helpers can answer where that half's
+    // density axis begins and ends.
+    const uint32_t probes[2] = { 0u, (uint32_t)DGLAB_TOUCH_SPLIT };
 
     for (int step = 1; step < 4; step++) {
-        int y = DGLAB_TOUCH_VALUE_TOP + span * step / 4;
+        int y = DGLAB_TOUCH_VALUE_TOP + value_span * step / 4;
 
         dglabCanvasFill(canvas, 0, y, DGLAB_TOUCH_PANEL_WIDTH, 1, theme->muted);
     }
 
     for (int half = 0; half < 2; half++) {
-        int left = half * DGLAB_TOUCH_HALF_WIDTH;
+        uint32_t start = dglabTouchDensityStart(probes[half]);
+        int density_span = (int)(dglabTouchDensityEnd(probes[half]) - start);
 
         for (int step = 1; step < 4; step++) {
-            int x = left + (DGLAB_TOUCH_HALF_WIDTH - 1) * step / 4;
+            int x = (int)start + density_span * step / 4;
 
-            dglabCanvasFill(canvas, x, TOUCH_FIELD_TOP, 1, TOUCH_FIELD_BOTTOM - TOUCH_FIELD_TOP,
-                theme->muted);
+            dglabCanvasFill(canvas, x, TOUCH_FIELD_TOP, 1, field_height, theme->muted);
         }
     }
 }
 
 // The field: the two halves' grid, the centre line they are split by, and one
-// marker per finger. Clipped to the band, so the page header and the bottom bar
-// keep their own background no matter what the panel reports - the full width
-// between the two rules is the input (nro/AGENTS.md).
+// marker per finger - plus the two lines that close the density axis by joining
+// the ends of the white rules, which is what makes the axis ends visible (they
+// are not the edges of the screen: a fingertip cannot reach those, so an axis
+// drawn to them never reached the frequency parameters - docs/touch-input.md).
+// Clipped to the band, so the page header and the bottom bar keep their own
+// background no matter what the panel reports - the full width between the two
+// rules is the input (nro/AGENTS.md).
 static void drawField(DglabCanvas* canvas, const DglabTouchScreenState* state)
 {
     const DglabTheme* theme = dglabThemeGet();
+    int field_height = TOUCH_FIELD_BOTTOM - TOUCH_FIELD_TOP;
 
-    dglabCanvasSetClip(canvas, 0, TOUCH_FIELD_TOP, DGLAB_TOUCH_PANEL_WIDTH,
-        TOUCH_FIELD_BOTTOM - TOUCH_FIELD_TOP);
+    dglabCanvasSetClip(canvas, 0, TOUCH_FIELD_TOP, DGLAB_TOUCH_PANEL_WIDTH, field_height);
 
     drawGrid(canvas);
 
-    dglabCanvasFill(canvas, DGLAB_TOUCH_SPLIT, TOUCH_FIELD_TOP, 1,
-        TOUCH_FIELD_BOTTOM - TOUCH_FIELD_TOP, theme->rule);
+    dglabCanvasFill(canvas, DGLAB_TOUCH_DENSITY_LEFT, TOUCH_FIELD_TOP, 1, field_height,
+        theme->rule);
+    dglabCanvasFill(canvas, DGLAB_TOUCH_SPLIT, TOUCH_FIELD_TOP, 1, field_height, theme->rule);
+    dglabCanvasFill(canvas, DGLAB_TOUCH_DENSITY_RIGHT, TOUCH_FIELD_TOP, 1, field_height,
+        theme->rule);
 
     if (state->held_a)
         drawMarker(canvas, state->x_a, state->y_a);
 
     if (state->held_b)
         drawMarker(canvas, state->x_b, state->y_b);
+
+    dglabCanvasClearClip(canvas);
+}
+
+// A docked console cannot be touched at all - the panel is inside the dock - and
+// there is nothing to point at, so the field is left empty instead of being drawn
+// dead: no grid, no lines, no markers. The line that says why used to be a grey
+// row under the channels, which is easy to miss on a TV, so it is now a title
+// sized line in the space under the rows - where the rows are measured, not
+// guessed, so a change to them cannot push the line out of the page. The bottom
+// bar already says B leaves (hardware request, 2026-09-19).
+static void drawDockedNotice(DglabCanvas* canvas, const DglabFontSet* fonts, int rows_bottom)
+{
+    const DglabTheme* theme = dglabThemeGet();
+    const char* text = dglabString(DglabString_TouchDocked);
+    int width = dglabTextWidth(fonts->title, text);
+    int top = rows_bottom > TOUCH_FIELD_TOP ? rows_bottom : TOUCH_FIELD_TOP;
+    int y = (top + TOUCH_FIELD_BOTTOM) / 2 - fonts->title->cell_height / 2;
+
+    dglabCanvasSetClip(canvas, 0, TOUCH_FIELD_TOP, DGLAB_TOUCH_PANEL_WIDTH,
+        TOUCH_FIELD_BOTTOM - TOUCH_FIELD_TOP);
+
+    dglabTextDraw(canvas, fonts->title, (DGLAB_TOUCH_PANEL_WIDTH - width) / 2, y, text,
+        theme->text);
 
     dglabCanvasClearClip(canvas);
 }
@@ -131,8 +179,8 @@ void dglabTouchScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
 {
     const DglabTheme* theme = dglabThemeGet();
     DglabListFonts list_fonts = { fonts->body, fonts->value, fonts->note };
-    DglabRow rows[6];
-    DglabRowBox boxes[6];
+    DglabRow rows[5];
+    DglabRowBox boxes[5];
     DglabHint hints[4];
     DglabHint adjust[2] = {
         { DglabButton_Up, DglabButton_Down, dglabString(DglabString_HintAdjustA) },
@@ -147,26 +195,13 @@ void dglabTouchScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     char label_a[64];
     char label_b[64];
     int count = 0;
+    int origin_y = DGLAB_PAGE_CONTENT_TOP + DGLAB_NOTE_LINE + 8;
     int x = DGLAB_PAGE_CONTENT_X;
 
     snprintf(strength_a, sizeof(strength_a), "%u/100", state->channel_strength_a);
     snprintf(strength_b, sizeof(strength_b), "%u/100", state->channel_strength_b);
     snprintf(label_a, sizeof(label_a), "%s A", dglabString(DglabString_MotionVolume));
     snprintf(label_b, sizeof(label_b), "%s B", dglabString(DglabString_MotionVolume));
-
-    dglabPageBegin(canvas);
-    dglabPageHeader(canvas, &title, dglabString(DglabString_TouchTitle));
-    dglabPageHeaderStatus(canvas, fonts->value, state->sysmodule_ok);
-
-    drawField(canvas, state);
-
-    dglabPageClipContent(canvas);
-
-    for (int i = 0; i < 2; i++) {
-        dglabHintDraw(canvas, fonts->icon, fonts->note, &adjust[i], x, DGLAB_PAGE_CONTENT_TOP,
-            theme->text);
-        x += dglabHintWidth(fonts->note, &adjust[i]) + DGLAB_PAGE_HINT_GAP;
-    }
 
     memset(rows, 0, sizeof(rows));
 
@@ -203,20 +238,33 @@ void dglabTouchScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
         .value_color = theme->text,
     };
 
-    // A docked console cannot be touched at all, which is worth a line of its
-    // own: without it the mode looks like it stopped working.
-    if (state->docked)
-        rows[count++] = (DglabRow){
-            .kind = DglabRow_Note,
-            .label = dglabString(DglabString_TouchDocked),
-        };
-
+    // Measured before anything is drawn: the field needs the rows' bottom to know
+    // where the docked line goes, and the rows themselves are drawn last, over
+    // the field.
     dglabListMeasure(&list_fonts, rows, count, DGLAB_PAGE_CONTENT_WIDTH, boxes,
         (int)(sizeof(boxes) / sizeof(boxes[0])));
 
+    dglabPageBegin(canvas);
+    dglabPageHeader(canvas, &title, dglabString(DglabString_TouchTitle));
+    dglabPageHeaderStatus(canvas, fonts->value, state->sysmodule_ok);
+
+    if (state->docked)
+        drawDockedNotice(canvas, fonts,
+            origin_y + boxes[count - 1].y + boxes[count - 1].height);
+    else
+        drawField(canvas, state);
+
+    dglabPageClipContent(canvas);
+
+    for (int i = 0; i < 2; i++) {
+        dglabHintDraw(canvas, fonts->icon, fonts->note, &adjust[i], x, DGLAB_PAGE_CONTENT_TOP,
+            theme->text);
+        x += dglabHintWidth(fonts->note, &adjust[i]) + DGLAB_PAGE_HINT_GAP;
+    }
+
     style = (DglabListStyle){
         .x = DGLAB_PAGE_CONTENT_X,
-        .origin_y = DGLAB_PAGE_CONTENT_TOP + DGLAB_NOTE_LINE + 8,
+        .origin_y = origin_y,
         .width = DGLAB_PAGE_CONTENT_WIDTH,
         .focus = -1,
         .navigation = false,

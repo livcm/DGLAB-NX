@@ -27,10 +27,19 @@
 /// Where the two halves meet: x < this is channel A, x >= it is channel B. It is
 /// the middle of the panel, and the page draws its white centre line here.
 #define DGLAB_TOUCH_SPLIT 640
-/// The width of one half, in the panel's pixels. The rightmost column of a half
-/// is left + DGLAB_TOUCH_HALF_WIDTH - 1, which is what a full density reading
-/// comes from.
-#define DGLAB_TOUCH_HALF_WIDTH 640
+
+/// The density axis. Its ends are page geometry, not the edges of the panel: on
+/// hardware a fingertip cannot get closer than about 20px to the edge, so an axis
+/// that ran edge to edge left the pulse interval stuck between 32ms and 98ms
+/// instead of reaching the parameters at all (docs/touch-input.md).
+///
+/// The outer ends are where the two white rules stop - x = DGLAB_PAGE_MARGIN and
+/// one pixel short of the right margin, i.e. the first and last column of the
+/// rules the page already draws. The page keeps them in step with the page frame
+/// with a compile time assertion (nro/source/ui/touch.c); nothing in this header
+/// includes a UI header, so the two numbers are repeated here on purpose.
+#define DGLAB_TOUCH_DENSITY_LEFT 24
+#define DGLAB_TOUCH_DENSITY_RIGHT 1255
 
 /// The value axis. Both y values are lines the page already draws - the rule
 /// under the title bar and the one above the bottom bar - so the axes need no
@@ -66,8 +75,17 @@ static inline bool dglabTouchIsLeft(uint32_t x)
     return x < DGLAB_TOUCH_SPLIT;
 }
 
-/// The left edge of the half the reading is in.
-static inline uint32_t dglabTouchHalfLeft(uint32_t x)
+/// The column a half's density axis starts at, and the one it ends at: the left
+/// half runs from the left end of the rules to the middle of the panel, the right
+/// half from the middle to the right end of the rules. Both spans are 615
+/// columns, so both halves offer the same travel.
+static inline uint32_t dglabTouchDensityStart(uint32_t x)
 {
-    return dglabTouchIsLeft(x) ? 0u : (uint32_t)DGLAB_TOUCH_SPLIT;
+    return dglabTouchIsLeft(x) ? (uint32_t)DGLAB_TOUCH_DENSITY_LEFT : (uint32_t)DGLAB_TOUCH_SPLIT;
+}
+
+static inline uint32_t dglabTouchDensityEnd(uint32_t x)
+{
+    return dglabTouchIsLeft(x) ? (uint32_t)(DGLAB_TOUCH_SPLIT - 1)
+                               : (uint32_t)DGLAB_TOUCH_DENSITY_RIGHT;
 }

@@ -6,10 +6,17 @@
 //
 //   y = 647 (the rule above the bottom bar) -> waveform value 0
 //   y =  87 (the rule under the title bar)  -> waveform value 100
-//   x = the left edge of a half             -> the sparsest pulses (freq still)
-//   x = the right edge of a half            -> the densest ones (freq fast)
+//   x = the left end of a half's axis       -> the sparsest pulses (freq still)
+//   x = the right end of a half's axis      -> the densest ones (freq fast)
 //
 // The halves are split at the middle of the panel: x < 640 is A, x >= 640 is B.
+// The horizontal axis does *not* run edge to edge: its outer ends are the ends of
+// the two white rules and its inner ends are that middle, because a fingertip
+// cannot reach the panel's own edge - an axis drawn to the edge never reached the
+// frequency parameters at all (docs/touch-input.md, hardware report 2026-09-19).
+// Outside an axis the reading is clamped, so pushing past the end still gets the
+// extreme value instead of something near it.
+//
 // Nothing here reads a clock or a sensor, which is what makes every one of those
 // sentences a line in tests/touch.
 
@@ -38,12 +45,13 @@ float dglabTouchLevelForY(uint32_t y)
 
 float dglabTouchDensityForX(uint32_t x)
 {
-    // Each half reaches the full density range on its own: its rightmost column
-    // is the densest pulse the frequency parameters allow, whether that column is
-    // 639 or 1279.
-    float offset = (float)x - (float)dglabTouchHalfLeft(x);
+    // Each half reaches the full density range on its own: its own last column is
+    // the densest pulse the frequency parameters allow, whether that column is
+    // 639 (next to the centre line) or 1255 (next to the right rule's end).
+    float offset = (float)x - (float)dglabTouchDensityStart(x);
+    float span = (float)(dglabTouchDensityEnd(x) - dglabTouchDensityStart(x));
 
-    return clamp01(offset / (float)(DGLAB_TOUCH_HALF_WIDTH - 1));
+    return clamp01(offset / span);
 }
 
 // Which reading owns a half this frame.
