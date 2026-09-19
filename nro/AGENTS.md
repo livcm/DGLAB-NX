@@ -38,6 +38,16 @@
 Joy-Con 按键输入和六轴传感器应优先使用 libnx 提供的 HID API，而不是自行实现
 HOS HID 协议。libnx 和官方 `switch-examples` 都可以作为 API 和用法的参考。
 
+## 触屏输入
+
+- 触屏**只在玩法页里读**，菜单与其它页面一律不碰：`hidInitializeTouchScreen()` 没有返回
+  值，失败就是 libnx 的致命错误页，所以"什么时候初始化"必须是有意识的选择，不能顺手在
+  启动时调一次（见 `docs/touch-input.md`）；
+- 唯一碰 libnx 触屏 API 的文件是 `nro/source/platform/touchscreen.c`；映射（分区、两轴、
+  指归属）在平台无关的 `nro/source/touch/touch_feed.c` 里，由 `tests/touch` 守住；
+- 触屏玩法不新增参数：它读体感那份 `config/motion.cfg`（见 `docs/touch-input.md` 的
+  「参数复用」）。
+
 ## UI 原则
 
 应该先用 Console 来呈现字符 UI，待 NRO 的业务逻辑全部实现后再实现 GUI。
@@ -101,6 +111,12 @@ UI 风格可以模仿 HOS，但实现应与 HOS 系统 UI 解耦。
   **界面里没有滑块**，数值一律用文字显示；
 - 行以外的控件（二维码、日志正文）由屏幕自己按列/按行距画在内容区里，位置必须来自
   `dglabListMeasure` 之类的实测结果，不要另写常数；
+- **玩法页可以声明"整块玩法区"**：页面仍画页头、页头状态与底栏，但 y=88..646 的整个宽度
+  归页面自己（触屏玩法的玩法区就是输入本身）。这是唯一一条超出内容列的许可，
+  `tests/canvas` 会按页面声明的区域检查，而**墨迹仍不得越过那两条白线**：新增这类页面时
+  在 `test_canvas.c` 的 `checkPageStaysInItsRegions` 里选 `PageRegion_Playfield`，并且不要
+  用 `checkContentClearsTheBar`（那一条对满幅玩法区没有意义；触屏页用
+  `checkFieldClearsTheBar` 守住会溢出的那一行）；
 - 字号只能用 `text.h` 里的五个（`DGLAB_TEXT_TITLE` 28 / `BODY` 24 / `VALUE` 22 /
   `ICON` 20 / `NOTE` 18），由 `DglabFontSet` 一起传给屏幕。不要在屏幕里挑新字号，也不要
   假设只有一个字体实例；

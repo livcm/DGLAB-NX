@@ -30,6 +30,7 @@
 #include <dglab/ui/text.h>
 #include <dglab/nro/motion_feed.h>
 #include <dglab/nro/motion_settings.h>
+#include <dglab/nro/touch_feed.h>
 #include <dglab/nro/touch_panel.h>
 #include <dglab/nro/ble_poc_view.h>
 #include <dglab/platform/framebuffer.h>
@@ -1305,40 +1306,28 @@ static void runMotionView(Service* dglab, PadState* pad)
 // The touch mode
 // ---------------------------------------------------------------------------
 
-// Step one of the touch mode (docs/touch-input.md): read the panel and show what
-// it says, without turning a position into a waveform yet. The point of this
-// build is to answer, on hardware, the one question the sources cannot - whether
-// the console hands the touch screen to this process at all, both in applet mode
-// and as a title override - and to print the readings' own coordinates, so the
-// axes can be checked against the panel before anything is mapped to them.
+// The mode itself. Everything it decides about a position - which half, which
+// finger, and what value and density that means - lives in
+// dglab/nro/touch_feed.h and is held down by tests/touch; what is left here is
+// the frame loop, and the same 25ms slot producer the motion mode drives.
 #define TOUCH_DISPLAY_FRAMES 2
 #define TOUCH_LOG_MAX 200
 
-// Which half a reading is in, and where it is. One finger per half is all this
-// needs: the mode's own rule for several fingers, and the axes, arrive with
-// dglab/nro/touch_feed.h, which the host tests cover - so the probe does not
-// grow a second copy of any of it.
-static void touchProbeFrame(const DglabTouchFrame* frame, DglabTouchScreenState* state)
+// The DG-LAB channels the two halves drive, and the strings the "last cmd" line
+// names them with. The halves are A and B, the channels are 1 and 2 (dglab/ipc.h);
+// the two numberings stay apart on purpose (docs/touch-input.md).
+#define TOUCH_CHANNEL_A 1u
+#define TOUCH_CHANNEL_B 2u
+
+static u32 touchChannelNumber(unsigned channel)
 {
-    state->held_a = false;
-    state->held_b = false;
+    return channel == (unsigned)DglabTouchChannelValue_A ? TOUCH_CHANNEL_A : TOUCH_CHANNEL_B;
+}
 
-    for (unsigned i = 0; i < frame->count; i++) {
-        const DglabTouchPoint* point = &frame->points[i];
-
-        if (point->end)
-            continue;
-
-        if (dglabTouchIsLeft(point->x)) {
-            state->held_a = true;
-            state->x_a = point->x;
-            state->y_a = point->y;
-        } else {
-            state->held_b = true;
-            state->x_b = point->x;
-            state->y_b = point->y;
-        }
-    }
+static DglabString touchChannelCommand(unsigned channel)
+{
+    return channel == (unsigned)DglabTouchChannelValue_A ? DglabString_CmdWaveformA
+                                                         : DglabString_CmdWaveformB;
 }
 
 // One log line: what the last poll saw, plus what the mode made of it. Written
@@ -1360,7 +1349,12 @@ static void touchLogLine(const char* tag)
 
 static void runTouchView(Service* dglab, PadState* pad)
 {
+    DglabMotionFeedConfig config;
+    DglabTouchFeed touch_feed;
+    DglabMotionFeed stream[DglabTouchChannelValue_Count];
     DglabTouchScreenState state;
+    DglabNetWaveformSlot slots[DGLAB_NET_WAVEFORM_MAX_SLOTS];
+    u64 last_ticks;
     u32 frame = 0;
     u32 drawn_generation = 0;
     bool described = false;
@@ -1371,8 +1365,21 @@ static void runTouchView(Service* dglab, PadState* pad)
     // Entering the mode is what initializes the panel: nothing else in this NRO
     // touches it (nro/AGENTS.md). libnx has no error to report here - a refusal
     // is its fatal error page - which is why the log's first line is the answer
-    // this build exists for.
+    // the probe run exists for.
     dglabTouchStart();
+
+    // One parameter file for both modes (docs/touch-input.md): the envelope, the
+    // idle stop, the two frequency ends and the strength ceiling are the numbers
+    // the Advanced page edits for the motion mode. The one thing this mode decides
+    // for itself is that its density is the panel's horizontal axis and not its
+    // level.
+    motionSettingsLoad(&config);
+    config.frequency_follows_level = false;
+
+    for (unsigned channel = 0; channel < (unsigned)DglabTouchChannelValue_Count; channel++)
+        dglabMotionFeedInit(&stream[channel], &config);
+
+    dglabTouchFeedInit(&touch_feed);
 
     memset(&state, 0, sizeof(state));
     state.link = dglabString(DglabString_StateNotStarted);
@@ -1381,9 +1388,19 @@ static void runTouchView(Service* dglab, PadState* pad)
     // Whatever the test buttons left queued should not play underneath the mode.
     noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
 
+    last_ticks = armGetSystemTick();
+
     while (appletMainLoop()) {
-        DglabTouchFrame touch;
+        DglabTouchFrame readings;
+        u32 elapsed_ns;
+        u64 now;
         u64 down;
+
+        // The slots stay paced by time rather than by frames, like the motion
+        // mode's: a slow frame produces several of them at once.
+        now = armGetSystemTick();
+        elapsed_ns = (u32)armTicksToNs(now - last_ticks);
+        last_ticks = now;
 
         padUpdate(pad);
         down = padGetButtonsDown(pad);
@@ -1423,16 +1440,75 @@ static void runTouchView(Service* dglab, PadState* pad)
         repeatStrengthFromDirections(dglab, padGetButtons(pad),
             armTicksToNs(armGetSystemTick()));
 
-        dglabTouchPoll(&touch);
-        touchProbeFrame(&touch, &state);
+        // The panel, then the mapping, then the slots: the same three steps the
+        // motion mode takes with a sensor sample, which is what lets the two modes
+        // share the envelope, the idle stop and the parameters.
+        dglabTouchPoll(&readings);
+        dglabTouchFeedUpdate(&touch_feed, &readings);
+
+        for (unsigned channel = 0; channel < (unsigned)DglabTouchChannelValue_Count; channel++) {
+            const DglabTouchChannelState* target = dglabTouchFeedChannel(&touch_feed, channel);
+
+            if (target->held)
+                dglabMotionFeedSetTarget(&stream[channel], target->level, target->density);
+        }
+
+        // An all-zero batch is not uploaded, which is the rule the motion mode
+        // already works by: a finger held on the bottom rule, and everything after
+        // a release has decayed, costs no traffic at all.
+        for (unsigned channel = 0; channel < (unsigned)DglabTouchChannelValue_Count; channel++) {
+            size_t produced = dglabMotionFeedAdvance(&stream[channel], elapsed_ns, slots,
+                DGLAB_NET_WAVEFORM_MAX_SLOTS);
+
+            if (produced > 0 && slotsHaveStrength(slots, produced))
+                noteCommand(dglabString(touchChannelCommand(channel)),
+                    uploadSlots(dglab, touchChannelNumber(channel), slots, produced), NULL);
+        }
+
+        {
+            const DglabTouchChannelState* a =
+                dglabTouchFeedChannel(&touch_feed, DglabTouchChannelValue_A);
+            const DglabTouchChannelState* b =
+                dglabTouchFeedChannel(&touch_feed, DglabTouchChannelValue_B);
+
+            state.held_a = a->held;
+            state.x_a = a->x;
+            state.y_a = a->y;
+            state.level_a = (unsigned)(dglabMotionFeedLevel(&stream[DglabTouchChannelValue_A]) *
+                                       100.0f + 0.5f);
+            state.frequency_a = dglabMotionFeedFrequencyMs(&stream[DglabTouchChannelValue_A]);
+
+            state.held_b = b->held;
+            state.x_b = b->x;
+            state.y_b = b->y;
+            state.level_b = (unsigned)(dglabMotionFeedLevel(&stream[DglabTouchChannelValue_B]) *
+                                       100.0f + 0.5f);
+            state.frequency_b = dglabMotionFeedFrequencyMs(&stream[DglabTouchChannelValue_B]);
+        }
+
         state.docked = !dglabTouchHandheld();
 
+        // One line at the start and one per change of which halves have a finger:
+        // the log then holds the whole session - the LIFO depth the panel answered
+        // with, the coordinates, and what the mode made of them.
         if (!described) {
             described = true;
             touchLogLine("start");
         } else if (!have_last || state.held_a != last_held_a || state.held_b != last_held_b) {
-            touchLogLine(state.held_a && state.held_b ? "both"
-                : state.held_a ? "A" : state.held_b ? "B" : "none");
+            char tag[80];
+
+            if (state.held_a && state.held_b) {
+                snprintf(tag, sizeof(tag), "both A %u/%ums B %u/%ums", state.level_a,
+                    state.frequency_a, state.level_b, state.frequency_b);
+            } else if (state.held_a) {
+                snprintf(tag, sizeof(tag), "A %u/%ums", state.level_a, state.frequency_a);
+            } else if (state.held_b) {
+                snprintf(tag, sizeof(tag), "B %u/%ums", state.level_b, state.frequency_b);
+            } else {
+                snprintf(tag, sizeof(tag), "none");
+            }
+
+            touchLogLine(tag);
         }
 
         last_held_a = state.held_a;
@@ -1460,8 +1536,8 @@ static void runTouchView(Service* dglab, PadState* pad)
         frame++;
     }
 
-    // Leaving the mode clears what the test keys may have left playing: the mode
-    // itself uploads nothing yet.
+    // Leaving the mode clears what the mode and the test keys may have left
+    // playing, the same way the motion mode does.
     noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
 }
 

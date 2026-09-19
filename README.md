@@ -19,15 +19,16 @@
 | 组件 | 状态 |
 | --- | --- |
 | `sysmodule/` DG-LAB 服务（服务名 `dglab`，Title ID `0x00FF072107210721`） | 可用（WebSocket 模式）：Coyote V3 协议层 + WebSocket 服务端 + IPC |
-| `nro/` 前端 | 可用：菜单选择玩法——测试屏（地址/二维码/测试键/日志）与体感玩法（Joy-Con 驱动波形） |
+| `nro/` 前端 | 可用：菜单选择玩法——测试屏（地址/二维码/测试键/日志）、体感玩法（Joy-Con 驱动波形）与触屏玩法（左右半区对应 A/B 通道） |
 | `overlay/` | 未实现 |
 | `mods/` | 未实现 |
 | BLE 模式（sysmodule 直连设备） | 未实现，已搁置，见 `docs/ble-poc.md` |
 
 进度与顺序见 `AGENTS.md` §15：骨架、Sysmodule、IPC、Coyote V3 协议层、WebSocket 模式
 传输、波形接入、NRO 交互、Joy-Con 输入、基础 UI、NRO 元信息与版本管理、浅色模式都已完成；
-接着做触屏拖动玩法 → deko3d UI 后端 → Overlay → Game Mod 示例 → V4 Socket 协议，
-文档/测试/错误处理是持续项。
+触屏玩法的输入层、映射层与玩法页也已实现，就差实机确认触屏能不能读、以及调手感
+（见 `docs/touch-input.md`）。接着做 deko3d UI 后端 → Overlay → Game Mod 示例 →
+V4 Socket 协议，文档/测试/错误处理是持续项。
 
 协议层、IPC 布局、WebSocket/Socket 服务端、二维码与 NRO 绘制都有主机侧测试，见
 [测试](#测试)。
@@ -160,15 +161,21 @@ NRO 的运行期文件都在这一个目录下，并且固定分层：
 波形值越大、脉冲越密；通道强度仍然是上面的"音量"。做法与参数见
 `docs/joycon-input.md`。
 
-同一菜单里的 `advanced (motion)` 是体感玩法的参数页（死区、灵敏度、包络、频率、波形
-强度上限），改完自动存到 `sdmc:/switch/DGLAB-NX/config/motion.cfg`。
+菜单里的 `touch (screen)` 把屏幕左右均分：左半区是 A 通道、右半区是 B 通道，手指越高
+波形值越大、在每个半区里越靠右脉冲越密；抬手后输出按释放曲线淡出。它和体感玩法共用同一
+份参数与同一个槽位发生器，做法见 `docs/touch-input.md`。**触屏只在玩法页里读**，
+菜单用 `D-pad` 与 `A` 操作。
+
+同一菜单里的 `advanced (motion)` 是两种玩法共用的参数页（死区、灵敏度、包络、频率、波形
+强度上限；死区/量程/权重只对体感玩法有效），改完自动存到
+`sdmc:/switch/DGLAB-NX/config/motion.cfg`。
 
 按了没反应先看界面上的 `last cmd` 行：它显示最近一次按键的结果（`ok` / `no app bound`
 / `socket error`），红色是失败、黄色是"命令发出去了但听不到"（那一路强度还是 0）。
 
 菜单本身：`D-pad` 上下选择、`A` 进入；**`B` 退出 NRO**（`+` 只在 console 页——
-BLE PoC 与启动出错提示——有效）。菜单有 5 项：`socket server`、`motion (Joy-Con)`、
-`advanced (motion)`、`about`、`BLE PoC console`。
+BLE PoC 与启动出错提示——有效）。菜单有 6 项：`socket server`、`motion (Joy-Con)`、
+`touch (screen)`、`advanced (motion)`、`about`、`BLE PoC console`。
 
 | 按键 | 动作 |
 | --- | --- |
@@ -237,6 +244,7 @@ make -C tests/stack      # sysmodule 的线程栈预算（用 devkitA64 的 gcc 
 | `docs/ipc.md` | IPC 服务名、版本与命令表 |
 | `docs/nro-ui.md` | NRO 界面方案调研与实现记录 |
 | `docs/joycon-input.md` | Joy-Con 六轴资料，以及"动作越大波形值越大"这个可选玩法的设计 |
+| `docs/touch-input.md` | 触屏玩法：libnx 触屏资料、左右半区与两轴映射、与体感共用的参数、实机验收清单 |
 | `docs/ble-poc.md` | BLE 模式（sysmodule 直连设备）的实测记录（未实现，已搁置） |
 | `docs/docs-audit.md` | 文档约定（谁放哪一层）与 2026-09-17 审计的处置结果 |
 | `docs/history.md` | 文档压缩时移出的历史原文（各文档的迭代过程与审计明细） |

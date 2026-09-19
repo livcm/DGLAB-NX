@@ -471,12 +471,16 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
 
 ### 未完成
 
-1. 触屏拖动玩法：触屏位置与拖动速度映射到 A/B 通道的波形强度与频率，复用
-    `NET_WAVEFORM` 与 `motion_feed` 的包络/节奏逻辑，参数页沿用 Advanced 的结构；
-    停手后 250ms 内停流（沿用“全零批次不上传”）。
-    验收：实机触摸拖动能驱动对应通道、停手即停流；主机侧有逻辑测试；单位与手感参数
-    按 `docs/joycon-input.md` 的格式记进文档。若之后还要第二种玩法，候选是摇杆、按键
-    连打、旋转角度，做完第一种再定。
+1. 触屏玩法：屏幕左右均分，左半区→A 通道、右半区→B 通道；纵轴＝波形值（页头那条白线
+    100、底栏上方那条 0），横轴＝脉冲密度（每个半区内部左缘最疏、右缘最密），纯位置
+    驱动；抬手沿 `release` 曲线淡出、超 `idle stop` 停流（沿用“全零批次不上传”）。
+    参数与体感玩法共用一份 `config/motion.cfg`，不新增参数，复用 `NET_WAVEFORM` 与
+    `motion_feed` 的包络/节奏逻辑。输入层、映射层、玩法页与上传都已实现，主机测试在
+    `tests/touch`（83 项）与 `tests/canvas`/`tests/lang`，资料与设计见 `docs/touch-input.md`。
+    **剩余：实机确认触屏可用性**（`hidInitializeTouchScreen()` 没有返回值，失败＝libnx
+    致命错误页，必须在相册 applet 模式与 title override 各测一次）、手感调参，然后把实测
+    数据（LIFO 深度、坐标、采样率观感）写回 `docs/touch-input.md`。
+    若之后还要第二种玩法，候选是摇杆、按键连打、旋转角度，做完第一种再定。
 2. deko3d UI 后端（路线 A）**：把呈现层从 libnx framebuffer 换成 deko3d，绘制层
     （`canvas.c` 与三屏布局）零改动。做法：device/queue/swapchain + PitchLinear 图像，
     CPU 照旧写像素（`dkMemBlockGetCpuAddr` + `dkMemBlockFlushCpuCache`），再用

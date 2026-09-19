@@ -20,14 +20,21 @@ typedef struct {
     /// page says so instead of looking broken, and stays usable with the pad.
     bool docked;
 
-    /// Which half has a finger in it, and where the panel says it is (panel
-    /// coordinates, which are the screen's own logical units).
+    /// Which half has a finger in it, where the panel says it is (panel
+    /// coordinates, which are the screen's own logical units), and what the mode
+    /// makes of that position. The value and the interval are the smoothed ones
+    /// the slots actually carry, not the raw axes: what is being uploaded is what
+    /// the page has to show.
     bool held_a;
     bool held_b;
     unsigned x_a;
     unsigned y_a;
     unsigned x_b;
     unsigned y_b;
+    unsigned level_a;     ///< 0..100 waveform value
+    unsigned level_b;
+    unsigned frequency_a; ///< ms between pulses, from the horizontal axis
+    unsigned frequency_b;
 
     // The channel strengths the socket screen set. They are the volume this
     // mode's waveform is multiplied with, so they belong on screen - the same

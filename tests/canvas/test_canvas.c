@@ -13,6 +13,7 @@
 #include <dglab/ui/list.h>
 #include <dglab/ui/menu.h>
 #include <dglab/ui/motion.h>
+#include <dglab/ui/touch.h>
 #include <dglab/ui/page.h>
 #include <dglab/ui/screen.h>
 #include <dglab/ui/strings.h>
@@ -778,7 +779,17 @@ static void setScreenSize(int width, int height, int scale_num, int scale_den)
 // The bounds are logical and go through the canvas, which is drawing the page:
 // the same check then holds for the docked 1080p frame, whose pixels are the
 // logical ones 1.5x larger.
-static bool pageRegion(int x, int y, bool wide)
+// What a page is allowed to paint. The console's own pages are one column of
+// rows, or - for the two column socket page - a wider band; the touch mode is the
+// first page whose content *is* the band between the two rules, so it declares
+// that instead of a column (nro/AGENTS.md).
+typedef enum {
+    PageRegion_Rows = 0,
+    PageRegion_Wide,
+    PageRegion_Playfield,
+} PageRegion;
+
+static bool pageRegion(int x, int y, PageRegion region)
 {
     const DglabCanvas* canvas = &g_page_canvas;
 
@@ -791,11 +802,20 @@ static bool pageRegion(int x, int y, bool wide)
     if (x >= dglabCanvasScale(canvas, DGLAB_PAGE_WIDTH - 20))
         return true;
 
+    // A page whose content is the whole band: the touch mode's field reaches the
+    // screen edges between the rules, because the field is what the user is
+    // aiming at. It is confined to that band all the same - the title bar, the
+    // bottom bar and the page margin outside the rules are still off limits,
+    // which is what this check is here for.
+    if (region == PageRegion_Playfield)
+        return y >= dglabCanvasScale(canvas, DGLAB_PAGE_CLIP_TOP - 1) &&
+               y < dglabCanvasScale(canvas, DGLAB_PAGE_BAR_Y);
+
     // A one column page keeps to x=220..1060; a two column page uses the wider
     // band, because that is what the console does (docs/nro-ui.md). The clip
     // starts one pixel under the title rule, so a focused first row's ring is
     // drawn whole.
-    if (wide && x >= dglabCanvasScale(canvas, DGLAB_PAGE_WIDE_X - 1) &&
+    if (region == PageRegion_Wide && x >= dglabCanvasScale(canvas, DGLAB_PAGE_WIDE_X - 1) &&
         x <= dglabCanvasScale(canvas, DGLAB_PAGE_WIDE_X + DGLAB_PAGE_WIDE_WIDTH))
         return y >= dglabCanvasScale(canvas, DGLAB_PAGE_CLIP_TOP - 1) &&
                y < dglabCanvasScale(canvas, DGLAB_PAGE_CONTENT_BOTTOM);
@@ -806,7 +826,7 @@ static bool pageRegion(int x, int y, bool wide)
            y < dglabCanvasScale(canvas, DGLAB_PAGE_CONTENT_BOTTOM);
 }
 
-static void checkPageStaysInItsRegions(const char* name, uint32_t background, bool wide)
+static void checkPageStaysInItsRegions(const char* name, uint32_t background, PageRegion region)
 {
     // The page fills itself with the theme's own background, so both colours are
     // "nothing was drawn here": what the check looks for is ink.
@@ -823,7 +843,7 @@ static void checkPageStaysInItsRegions(const char* name, uint32_t background, bo
 
             drawn++;
 
-            if (pageRegion(x, y, wide))
+            if (pageRegion(x, y, region))
                 continue;
 
             if (outside < 8)
@@ -1097,6 +1117,64 @@ static void checkContentClearsTheBar(const char* name)
     CHECK(found == 0);
 }
 
+// The touch page's field runs from rule to rule on purpose - it *is* the input -
+// so the band above the bottom bar holds its own ink (the centre line, the tick
+// marks, the marker) and the check above cannot read it the way it reads a page
+// of rows. What still has to hold is the one row that can overflow, the note a
+// docked console gets, so the field's own fixed geometry is masked out instead of
+// the check being dropped: anything else in the last pixels above the bar is a
+// row that did not fit.
+static void checkFieldClearsTheBar(const char* name)
+{
+    // The vertical lines the field draws, in buffer pixels: the centre line and
+    // the three ticks of each half, from the drawing code's own formula.
+    static const int half_lefts[2] = { 0, DGLAB_TOUCH_SPLIT };
+    uint32_t background = dglabThemeGet()->background;
+    const DglabCanvas* canvas = &g_page_canvas;
+    int lines[1 + 2 * 3];
+    int line_count = 0;
+    int top = dglabCanvasScale(canvas, DGLAB_PAGE_BAR_Y - 6);
+    int bottom = dglabCanvasScale(canvas, DGLAB_PAGE_BAR_Y);
+    int left = dglabCanvasScale(canvas, DGLAB_PAGE_CONTENT_X);
+    int right = dglabCanvasScale(canvas, DGLAB_PAGE_CONTENT_X + DGLAB_PAGE_CONTENT_WIDTH);
+    int found = 0;
+
+    lines[line_count++] = dglabCanvasScale(canvas, DGLAB_TOUCH_SPLIT);
+
+    for (int half = 0; half < 2; half++) {
+        for (int step = 1; step < 4; step++) {
+            int tick = half_lefts[half] + (DGLAB_TOUCH_HALF_WIDTH - 1) * step / 4;
+
+            lines[line_count++] = dglabCanvasScale(canvas, tick);
+        }
+    }
+
+    for (int y = top; y < bottom; y++) {
+        for (int x = left; x < right; x++) {
+            bool masked = false;
+
+            for (int i = 0; i < line_count; i++) {
+                if (x >= lines[i] - 2 && x <= lines[i] + 2)
+                    masked = true;
+            }
+
+            if (masked || screenPixel(x, y) == background)
+                continue;
+
+            if (found < 4)
+                printf("    %s: %d,%d is content in the last pixels above the bar\n", name, x,
+                    y);
+
+            found++;
+        }
+    }
+
+    if (found)
+        printf("  %s: %d pixels of content run into the bottom bar\n", name, found);
+
+    CHECK(found == 0);
+}
+
 // A QR code is only worth showing while a socket is listening behind it. The
 // payload reaches the page as soon as the console has a LAN address - NET_QR
 // answers then, because the address on its own is useful - and the page used to
@@ -1241,7 +1319,7 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             snprintf(name, sizeof(name), "%s menu %u", frames, item);
             beginPage(&canvas, blue);
             dglabMenuDraw(&canvas, fonts, &menu);
-            checkPageStaysInItsRegions(name, blue, false);
+            checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
         }
 
         // The socket page, in the states that change what it draws: the server
@@ -1293,7 +1371,7 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             snprintf(name, sizeof(name), "%s socket %u", frames, variant);
             beginPage(&canvas, blue);
             dglabScreenDraw(&canvas, fonts, &screen);
-            checkPageStaysInItsRegions(name, blue, true);
+            checkPageStaysInItsRegions(name, blue, PageRegion_Wide);
             checkContentClearsTheBar(name);
 
             // And the log page it opens with Y: scrolled to the newest line, then
@@ -1304,13 +1382,13 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
                 beginPage(&canvas, blue);
                 dglabScreenDraw(&canvas, fonts, &screen);
                 snprintf(name, sizeof(name), "%s log top", frames);
-                checkPageStaysInItsRegions(name, blue, false);
+                checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
 
                 screen.log_offset = 400;
                 beginPage(&canvas, blue);
                 dglabScreenDraw(&canvas, fonts, &screen);
                 snprintf(name, sizeof(name), "%s log scrolled", frames);
-                checkPageStaysInItsRegions(name, blue, false);
+                checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
             }
         }
 
@@ -1337,8 +1415,72 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             snprintf(name, sizeof(name), "%s motion %u", frames, variant);
             beginPage(&canvas, blue);
             dglabMotionScreenDraw(&canvas, fonts, &motion);
-            checkPageStaysInItsRegions(name, blue, false);
+            checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
             checkContentClearsTheBar(name);
+        }
+
+        // The touch page, in the states that change what it draws: one half held,
+        // both halves held, no finger at all, and the docked console, which adds
+        // the tallest row of the four - and then the two extremes of the panel,
+        // which are allowed to reach the corners of the field like a real finger
+        // would.
+        for (unsigned variant = 0; variant < 5; variant++) {
+            DglabTouchScreenState touch;
+            char name[96];
+
+            memset(&touch, 0, sizeof(touch));
+            touch.channel_strength_a = 60;
+            touch.channel_strength_b = 100;
+            touch.link = "app connected";
+            touch.link_tone = DglabCmdTone_Ok;
+            touch.last_upload = "waveform A  no app bound";
+            touch.last_upload_tone = DglabCmdTone_Error;
+            touch.server_running = variant != 2;
+
+            if (variant != 2) {
+                touch.held_a = true;
+                touch.x_a = 300;
+                touch.y_a = 200;
+                touch.level_a = 80;
+                touch.frequency_a = 40;
+            }
+
+            if (variant == 1) {
+                touch.held_b = true;
+                touch.x_b = 900;
+                touch.y_b = 500;
+                touch.level_b = 26;
+                touch.frequency_b = 70;
+            }
+
+            touch.docked = variant == 3;
+
+            if (variant == 4) {
+                // The panel's own corners: the marker is clamped into the field,
+                // and the row values are the ends of both axes.
+                touch.x_a = 0;
+                touch.y_a = 0;
+                touch.level_a = 100;
+                touch.frequency_a = 100;
+                touch.held_b = true;
+                touch.x_b = DGLAB_TOUCH_PANEL_WIDTH - 1;
+                touch.y_b = DGLAB_TOUCH_PANEL_HEIGHT - 1;
+                touch.level_b = 0;
+                touch.frequency_b = 30;
+            }
+
+            snprintf(name, sizeof(name), "%s touch %u", frames, variant);
+            beginPage(&canvas, blue);
+            dglabTouchScreenDraw(&canvas, fonts, &touch);
+            checkPageStaysInItsRegions(name, blue, PageRegion_Playfield);
+
+            // The field runs to the rules on purpose - it is the input - so the
+            // "content clears the bar" check cannot read that band. What it has to
+            // guard for this page is the one row that can overflow, the docked
+            // note, which is why the field's own fixed geometry is masked out
+            // below instead of the check being skipped.
+            if (variant != 4)
+                checkFieldClearsTheBar(name);
         }
 
         // The advanced page, on the first and the last setting: the description is
@@ -1359,7 +1501,7 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
                 snprintf(name, sizeof(name), "%s advanced %u", frames, settings[i]);
                 beginPage(&canvas, blue);
                 dglabAdvancedDraw(&canvas, fonts, &advanced);
-                checkPageStaysInItsRegions(name, blue, false);
+                checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
             }
         }
 
@@ -1388,7 +1530,7 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             snprintf(name, sizeof(name), "%s about %u", frames, variant);
             beginPage(&canvas, blue);
             dglabAboutDraw(&canvas, fonts, &about);
-            checkPageStaysInItsRegions(name, blue, false);
+            checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
         }
     }
 }
@@ -1602,6 +1744,7 @@ static void drawStatusProbe(unsigned page, bool ok, const DglabFontSet* fonts)
     DglabAdvancedState advanced;
     DglabMenuState menu;
     DglabMotionScreenState motion;
+    DglabTouchScreenState touch;
     DglabScreenState screen;
     DglabCanvas canvas;
 
@@ -1612,6 +1755,7 @@ static void drawStatusProbe(unsigned page, bool ok, const DglabFontSet* fonts)
     memset(&motion, 0, sizeof(motion));
     memset(&advanced, 0, sizeof(advanced));
     memset(&about, 0, sizeof(about));
+    memset(&touch, 0, sizeof(touch));
 
     menu.sysmodule_ok = ok;
 
@@ -1634,6 +1778,15 @@ static void drawStatusProbe(unsigned page, bool ok, const DglabFontSet* fonts)
     about.build_id = "8a2fcb6";
     about.github_url = "https://github.com/livcm/DGLAB-NX";
 
+    touch.sysmodule_ok = ok;
+    touch.link = dglabNetStateText(DglabNetState_Paired);
+    touch.last_upload = "-";
+    touch.held_a = true;
+    touch.x_a = 300;
+    touch.y_a = 200;
+    touch.level_a = 80;
+    touch.frequency_a = 40;
+
     beginPage(&canvas, blue);
 
     switch (page) {
@@ -1644,7 +1797,8 @@ static void drawStatusProbe(unsigned page, bool ok, const DglabFontSet* fonts)
             dglabScreenDraw(&canvas, fonts, &screen);
             break;
         case 3: dglabMotionScreenDraw(&canvas, fonts, &motion); break;
-        case 4: dglabAdvancedDraw(&canvas, fonts, &advanced); break;
+        case 4: dglabTouchScreenDraw(&canvas, fonts, &touch); break;
+        case 5: dglabAdvancedDraw(&canvas, fonts, &advanced); break;
         default: dglabAboutDraw(&canvas, fonts, &about); break;
     }
 }
@@ -1655,7 +1809,7 @@ static void drawStatusProbe(unsigned page, bool ok, const DglabFontSet* fonts)
 // put its status anywhere else, or that shows a status of its own, fails here.
 static void testEveryPageShowsTheSysmoduleStatus(void)
 {
-    static const char* const names[] = { "menu", "socket", "log", "motion", "advanced",
+    static const char* const names[] = { "menu", "socket", "log", "motion", "touch", "advanced",
         "about" };
     static uint8_t base[DOCK_PIXEL_WIDTH * DOCK_PIXEL_HEIGHT * 4];
     DglabFontSet fonts = blockFonts();

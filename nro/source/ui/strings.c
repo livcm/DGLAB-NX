@@ -79,6 +79,7 @@ static const char* const kKeys[DglabString_Count] = {
     [DglabString_TouchHalfLeft] = "touch_half_left",
     [DglabString_TouchHalfRight] = "touch_half_right",
     [DglabString_TouchNotTouched] = "touch_not_touched",
+    [DglabString_TouchDensity] = "touch_density",
     [DglabString_TouchDocked] = "touch_docked",
 
     // advanced screen

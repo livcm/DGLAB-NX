@@ -95,6 +95,7 @@ typedef enum {
     DglabString_TouchHalfLeft,
     DglabString_TouchHalfRight,
     DglabString_TouchNotTouched,
+    DglabString_TouchDensity,
     DglabString_TouchDocked,
 
     // advanced screen

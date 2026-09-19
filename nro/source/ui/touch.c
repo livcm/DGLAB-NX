@@ -59,15 +59,45 @@ static void drawMarker(DglabCanvas* canvas, unsigned x, unsigned y)
     dglabCanvasRing(canvas, cx, cy, TOUCH_MARKER_RING, TOUCH_MARKER_RING_WIDTH, theme->accent);
 }
 
-// The field: the centre line the halves are split by, and one marker per finger.
-// Clipped to the band, so the page header and the bottom bar keep their own
-// background no matter what the panel reports.
+// The grid: the quarter lines of both axes. The ends of the value axis are the
+// page's own white rules and the middle of the density axis is the centre line,
+// so only the three lines between them are drawn - enough to read a position off
+// the panel by eye without turning the field into graph paper.
+static void drawGrid(DglabCanvas* canvas)
+{
+    const DglabTheme* theme = dglabThemeGet();
+    int span = DGLAB_TOUCH_VALUE_BOTTOM - DGLAB_TOUCH_VALUE_TOP;
+
+    for (int step = 1; step < 4; step++) {
+        int y = DGLAB_TOUCH_VALUE_TOP + span * step / 4;
+
+        dglabCanvasFill(canvas, 0, y, DGLAB_TOUCH_PANEL_WIDTH, 1, theme->muted);
+    }
+
+    for (int half = 0; half < 2; half++) {
+        int left = half * DGLAB_TOUCH_HALF_WIDTH;
+
+        for (int step = 1; step < 4; step++) {
+            int x = left + (DGLAB_TOUCH_HALF_WIDTH - 1) * step / 4;
+
+            dglabCanvasFill(canvas, x, TOUCH_FIELD_TOP, 1, TOUCH_FIELD_BOTTOM - TOUCH_FIELD_TOP,
+                theme->muted);
+        }
+    }
+}
+
+// The field: the two halves' grid, the centre line they are split by, and one
+// marker per finger. Clipped to the band, so the page header and the bottom bar
+// keep their own background no matter what the panel reports - the full width
+// between the two rules is the input (nro/AGENTS.md).
 static void drawField(DglabCanvas* canvas, const DglabTouchScreenState* state)
 {
     const DglabTheme* theme = dglabThemeGet();
 
     dglabCanvasSetClip(canvas, 0, TOUCH_FIELD_TOP, DGLAB_TOUCH_PANEL_WIDTH,
         TOUCH_FIELD_BOTTOM - TOUCH_FIELD_TOP);
+
+    drawGrid(canvas);
 
     dglabCanvasFill(canvas, DGLAB_TOUCH_SPLIT, TOUCH_FIELD_TOP, 1,
         TOUCH_FIELD_BOTTOM - TOUCH_FIELD_TOP, theme->rule);
@@ -81,14 +111,17 @@ static void drawField(DglabCanvas* canvas, const DglabTouchScreenState* state)
     dglabCanvasClearClip(canvas);
 }
 
-// One half's live line. The probe build shows where the panel says the finger
-// is; what the mode makes of that position is the next step (docs/touch-input.md).
-static const char* channelText(bool held, unsigned x, unsigned y, char* buffer, size_t size)
+// One half's live line: where the finger is, in the two numbers the position
+// means. Both are the values the slots carry, so the row is the same thing the
+// device is being told.
+static const char* channelText(bool held, unsigned level, unsigned frequency, char* buffer,
+    size_t size)
 {
     if (!held)
         snprintf(buffer, size, "%s", dglabString(DglabString_TouchNotTouched));
     else
-        snprintf(buffer, size, "x %u  y %u", x, y);
+        snprintf(buffer, size, "%s %u  %s %ums", dglabString(DglabString_MotionLevel), level,
+            dglabString(DglabString_TouchDensity), frequency);
 
     return buffer;
 }
@@ -146,13 +179,15 @@ void dglabTouchScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     rows[count++] = (DglabRow){
         .kind = DglabRow_Item,
         .label = dglabString(DglabString_TouchHalfLeft),
-        .value = channelText(state->held_a, state->x_a, state->y_a, left, sizeof(left)),
+        .value = channelText(state->held_a, state->level_a, state->frequency_a, left,
+            sizeof(left)),
         .value_color = state->held_a ? theme->accent : theme->muted,
     };
     rows[count++] = (DglabRow){
         .kind = DglabRow_Item,
         .label = dglabString(DglabString_TouchHalfRight),
-        .value = channelText(state->held_b, state->x_b, state->y_b, right, sizeof(right)),
+        .value = channelText(state->held_b, state->level_b, state->frequency_b, right,
+            sizeof(right)),
         .value_color = state->held_b ? theme->accent : theme->muted,
     };
     rows[count++] = (DglabRow){

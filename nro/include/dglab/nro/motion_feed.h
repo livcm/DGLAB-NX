@@ -61,6 +61,14 @@ typedef struct {
     uint16_t frequency_fast_ms;
 
     uint8_t strength_max; ///< 0..100 waveform strength at full scale
+
+    // Whether the pulse interval follows the level, which is what the motion mode
+    // wants: a harder swing is also a denser one. A mode that names its own
+    // targets (dglabMotionFeedSetTarget below - the touch mode, whose density is
+    // the other axis of the panel) turns this off and gets exactly the interval it
+    // asks for. It is not a stored setting: motion_settings.c neither reads nor
+    // writes it, the mode decides.
+    bool frequency_follows_level;
 } DglabMotionFeedConfig;
 
 typedef struct {
@@ -69,6 +77,7 @@ typedef struct {
     bool streaming;     ///< false while idle for longer than idle_stop_ms
     float level;        ///< 0..1 envelope, what the UI shows
     float window_peak;  ///< highest raw intensity in the current slot window
+    float window_density; ///< pulse density asked for by SetTarget, 0..1
     uint32_t window_ns; ///< time accumulated towards the next slot
     uint32_t idle_ms;   ///< time since the last window with any movement
     float last_acceleration[3];
@@ -85,6 +94,15 @@ void dglabMotionFeedInit(DglabMotionFeed* feed, const DglabMotionFeedConfig* con
 
 /// Feeds one sensor sample. Interpolated samples are ignored on purpose.
 void dglabMotionFeedAddSample(DglabMotionFeed* feed, const DglabMotionSample* sample);
+
+/// Hands the envelope a target directly, for a mode whose input is not an IMU:
+/// `level` is the waveform value 0..1 this window wants and `density` the pulse
+/// density 0..1 (0 = frequency_still, 1 = frequency_fast). Call it once per frame
+/// while the input is there, and simply stop calling it when the input goes away:
+/// the release curve, the idle stop and the "an all-zero batch is not uploaded"
+/// rule are then the same ones the sensor path runs, which is the point of the
+/// two modes sharing this feed.
+void dglabMotionFeedSetTarget(DglabMotionFeed* feed, float level, float density);
 
 /// Advances the clock and writes the slots that are due. Returns how many slots
 /// were written (never more than `max`), which is 0 or 1 on most frames and

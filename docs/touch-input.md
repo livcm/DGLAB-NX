@@ -1,0 +1,181 @@
+# 触屏玩法（左右半区：位置 → 波形值与密度）
+
+本文是 NRO 触屏玩法的资料与设计。资料部分核对了本机 libnx
+（`/opt/devkitpro/libnx/include/switch/services/hid.h`、`libnx.a` 里 `hid.o` 的反汇编）与官方
+示例 `/opt/devkitpro/examples/switch/hid/touch-screen`；设计部分确定的是：**Switch 屏幕左右
+均分，左半区驱动 A 通道、右半区驱动 B 通道；手指的高低是波形值，手指在该半区里的左右是
+波形密度**。玩法只在玩法页里读触屏，不参与菜单导航。
+
+参数与体感玩法共用一份（见「参数复用」），sysmodule、IPC 与协议层一行不用改。
+
+## 状态
+
+| 步骤 | 状态 |
+| --- | --- |
+| 触屏输入层（初始化、drain LIFO、坐标） | 已实现，**待实机**（见「实机验收」第 1 步） |
+| 映射层（分区、两轴、每半区一指） | 已实现，`tests/touch` 覆盖 |
+| 玩法页（中线、刻度网格、触点、数值行、底座提示） | 已实现，`tests/canvas` 覆盖 |
+| 接到 `NET_WAVEFORM`（复用 `motion_feed` 的槽位与包络） | 已实现，`tests/touch` 覆盖 |
+| 实机手感与调参、本文的实测数据 | **未做** |
+
+## libnx 提供的东西
+
+| 目的 | API |
+| --- | --- |
+| 初始化 | `hidInitializeTouchScreen()`，进入玩法时调一次（`hidScanInput` 已经不在了，现有 NRO 的 `padUpdate` 只读手柄状态，不会顺手初始化触屏） |
+| 批量读取 | `hidGetTouchScreenStates(HidTouchScreenState *states, size_t count)`，`count` 可以大于 1，返回实际写出的条数；共享内存里的环形缓冲是 17 条（`HidTouchScreenLifo.storage[17]`） |
+| 手指数与坐标 | `HidTouchScreenState.count` + `touches[i].x/y`（都是 `u32`） |
+| 按下与抬起 | `touches[i].attributes` 的 `HidTouchAttribute_Start` / `_End`（只在边沿发生的那一条快照上置位） |
+| 手指身份 | `touches[i].finger_id`；另有 `delta_time`、`diameter_x/y`、`rotation_angle`（本玩法不用，但探针日志会带上后半段的原始读数） |
+| 掌机 / 底座 | `appletGetOperationMode()`（`AppletOperationMode_Handheld` / `_Console`，由 `appletMainLoop()` 更新，无 Result） |
+
+核对到的关键事实：
+
+- **`hidInitializeTouchScreen()` 没有返回值**：它给 hid 发一条带本进程 AppletResourceUserId
+  的命令（反汇编里是 `_hidCmdInAruidNoOut(0xb)`，失败即 `diagAbortWithResult`），所以"这台
+  机器、这种方式启动的 NRO 能不能读触屏"**只能实机回答**。探针（进玩法时写一行日志）就是
+  为了先回答这一条，而不是把它和映射一起赌；
+- **共享内存必须先有**：`hidGetTouchScreenStates()` 先取 `hidGetSharedmemAddr()`，取不到直接
+  abort（libnx 内部错误码 0x1159），所以它必须在 hid 已初始化之后调用（本 NRO 由
+  `padUpdate` 那条路已经初始化过）；
+- **坐标就是 720p 逻辑单位**：掌机面板是 1280×720，与项目所有屏幕的布局坐标系相同，屏幕
+  代码**不乘任何比例**（底座 1080p 的缩放由 `canvas` 层负责）；
+- **底座模式下读不到**：面板够不着，`count` 恒为 0。这不是 bug，页面会写一行说明；
+- 触屏**只在玩法页里读**：菜单与其它页面一次都不碰这条 API（`nro/AGENTS.md`）。
+
+## 玩法定义
+
+### 区域与两轴
+
+    y = 87   页头那条白线      → 波形值 100
+    y = 647  底栏上方那条白线  → 波形值 0
+
+    x < 640  左半区（A 通道）  x = 0 最疏(100ms)   x = 639 最密(30ms)
+    x >= 640 右半区（B 通道）  x = 640 最疏        x = 1279 最密
+
+- 两条白线本来就是这个页面的页头线与底栏线，页框架照画，**它们同时就是纵轴的上下端**；
+  摸到 87 以上一律夹到 100，摸到 647 以下一律 0（0 就是不出声）；
+- 横轴在**每个半区内部**满量程：左半区 0..639、右半区 640..1279 各自从最疏到最密；
+- 玩法区是**整幅**：x=0..1279、y=88..646 全部可触，页头（标题 + Sysmodule 状态）与底栏
+  提示照常画在玩法区之上。这是唯一一个不属于内容列的页面，`tests/canvas` 按"页面声明的
+  玩法区"检查它的墨迹（`nro/AGENTS.md`）；
+- 拖动速度**不参与**：波形只由手指当前坐标决定，甩一下和慢移到一个位置是一回事。
+
+### 通道与指
+
+- 每个半区只认一根手指：该半区当前指的是上一帧仍在的那一指；**这一帧新按下的指会接管**
+  （同一帧有两根新指时取读数数组里靠后的那一条——面板没有按压时间戳，帧内顺序就是唯一的
+  顺序）；当前指抬起而该半区还有别的指时，由那一指接管，半区不会因为"我认的那一指走了"
+  而停；
+- 左右各一指可以同时驱动两路（这是这套布局的用处）；
+- 手指拖过中线：原来的半区释放，另一半接管——也就是" A 通道松手、B 通道开始"。
+
+### 抬手与停流
+
+- 手指抬起（读数消失，或这一帧带 `End` 位）：该半区停止写目标，**波形值与密度停在最后
+  的位置**，输出沿 `release` 曲线回落；
+- 回落到底（量化后的波形值为 0）且静止超过 `idle_stop` 之后停止上传——与体感玩法同一套
+  规则、同一份实现（`motion_feed`）。抬手后**密度不归零**：脉冲间隔停在手指离开时的位置，
+  波形值单独衰减，所以尾巴不会突然变稀；
+- 底层规则仍是"全零批次不上传"，因此手指按在底栏（波形值 0）时完全不产生流量。
+
+### 安全
+
+- 摸到页头带（y<88）就是波形值满量程，这是**刻意的**：两条白线是坐标轴端点。真正的上限
+  仍是用户在 `strength` 行上设的通道强度（设备把通道强度与波形值相乘），随时可以按 `X`
+  清空；
+- 玩法页与体感页共用同一套快捷键：`A` 起停服务端、`X` 清空、`ZL`/`ZR` 测试单通道、
+  `D-pad` 调两路通道强度、`B` 返回菜单。
+
+## 参数复用
+
+触屏玩法**不新增参数**：它读的是体感玩法那份
+`sdmc:/switch/DGLAB-NX/config/motion.cfg`（唯一所有者仍是
+`nro/source/motion/motion_settings.c`），在 Advanced 页面改。
+
+| 参数 | 体感玩法里的意思 | 触屏玩法里的意思 |
+| --- | --- | --- |
+| `attack` / `release` | 动作跟上 / 松开回落的时间常数 | 手指移动后输出跟上、抬手后回落的时间常数 |
+| `idle stop` | 静止多久后完全停上传 | 抬手后多久完全停上传（回落先走完） |
+| `freq fast` | 最剧烈时的脉冲间隔 | **半区右边缘**的脉冲间隔 |
+| `freq still` | 静止时的脉冲间隔 | **半区左边缘**的脉冲间隔 |
+| `strength max` | 满强度时的波形值 | 纵轴顶端（波形值 100）对应的波形值 |
+| `deadzone enter/exit`、`gyro range`、`accel range`、`gyro/accel weight` | 动作判定与灵敏度 | **不参与**（文案里注明"仅体感模式使用"） |
+
+没写进文件的另一项由模式自己决定：`DglabMotionFeedConfig::frequency_follows_level`。
+体感玩法保持 `true`（越猛越密），触屏玩法置 `false`（密度由横轴单独给出）。它是运行时的
+开关，不是设置项。
+
+## 模块划分
+
+    HID 触屏（libnx）
+        ↓  每帧 drain LIFO ≤17 条快照，取最新一条并合并本帧的按下/抬起
+    nro/source/platform/touchscreen.c      ← 唯一碰 libnx 触屏 API 的文件
+        ↓  DglabTouchFrame（面板坐标 + 边界位）
+    nro/source/touch/touch_feed.c          ← 平台无关：分区、每半区一指、两轴公式
+        ↓  (level, density) 每半区
+    nro/source/motion/motion_feed.c        ← 与体感共用的 25ms 槽位发生器（包络、停流、频率、上限）
+        ↓  DglabNetWaveformSlot
+    NET_WAVEFORM（Append）→ sysmodule → App → 郊狼
+
+| 文件 | 内容 | 能否主机测试 |
+| --- | --- | --- |
+| `nro/include/dglab/nro/touch_panel.h` | 面板几何（分界、两轴端点、最大手指数）与原始读数类型 | 是（纯类型） |
+| `nro/include/dglab/platform/touchscreen.h` + `nro/source/platform/touchscreen.c` | libnx 侧：初始化、drain、诊断行、掌机判定 | 否（要实机） |
+| `nro/include/dglab/nro/touch_feed.h` + `nro/source/touch/touch_feed.c` | 分区、指归属、两轴公式 | **是**（`tests/touch`，83 项） |
+| `nro/include/dglab/ui/touch.h` + `nro/source/ui/touch.c` | 玩法页（中线、网格、触点、数值行、底座提示） | **是**（`tests/canvas`） |
+| `nro/source/main.c` 的 `runTouchView` | 每帧驱动、上传、按键、日志 | 否 |
+
+文件名有意错开：NRO 的 Makefile 把所有源文件按 **basename** 展平到同一个 build 目录，
+两个都叫 `touch.c` 就会是同一个目标文件（这一步真的撞上过链接错误），所以页面叫
+`ui/touch.c`、平台层叫 `platform/touchscreen.c`。
+
+## 界面
+
+- 页头：标题 + 右侧 Sysmodule 状态（每一页都一样）；
+- 玩法区：中线（白色 `theme->rule`）、每半区 25/50/75% 的竖向刻度、纵向 25/50/75% 的横向
+  刻度（灰色 `theme->muted`）、每个按下的手指一个圆点（`theme->accent`，实心 + 外环，
+  绘制位置夹在 y=88..646 内）；
+- 内容列里的行（沿用体感页的结构）：`连接` / `左半区（A 通道）` / `右半区（B 通道）` /
+  `通道强度 A` / `通道强度 B`，两行的值就是当前上传的波形值与脉冲间隔（如
+  `波形值 62  密度 45ms`），没按到显示"未触摸"；
+- 底座模式下多一行说明；底栏：`ZL`+`ZR` 测试、`X` 清空、`B` 返回、`A` 起停服务端，
+  玩法区内还有 `D-pad` 调强度的两个提示。
+- **不新增调色板条目**：网格、中线、触点都取 `theme` 已有的字段，浅色主题不需要重新量色。
+
+## 日志
+
+进玩法时写一行、每次"哪几个半区有手指"变化再写一行，整段会话落进
+`sdmc:/switch/DGLAB-NX/logs/dglab-net.log`：
+
+    touch lifo 3, count 1, #0 x=512 y=300 id=1 start | start
+    touch lifo 3, count 2, #0 x=200 y=150 id=1 | #1 x=900 y=500 id=2 start | both A 88/38ms B 26/70ms
+    touch lifo 0, count 0 | none
+
+第一段是平台层的事实（这一帧 drain 到几条快照、最新快照里有什么），`|` 之后是玩法层由此
+得到的结果。
+
+## 实机验收
+
+1. **触屏可用性（先做这一步）**：相册启动（applet 模式）与 title override 各进一次玩法，
+   确认没有落到 libnx 的致命错误页，并且日志里出现上面的 `touch lifo ...` 行；手指位置与
+   日志里的坐标对得上（左上角是 0,0，右边缘接近 1279，下边缘接近 719）；
+2. **映射**：左半区抬高→波形值变大、右移→脉冲变密（`last cmd` 行的 `waveform A/B ok`），
+   右半区独立；抬手后输出淡出、`last cmd` 不再刷新（确实停流）；
+3. **多指**：左右各一指同时按，两路都在输出；同一半区再按一指，输出跟着新按下的那一指；
+4. **边界**：摸页头带＝满值、摸底栏＝不出声；把手指从中间拖到另一半，前一路停了、后一路
+   开始；
+5. **底座**：插上底座后页面显示"无法触摸"那一行，`B` 仍能退出；
+6. 记录：LIFO 深度、每帧 drain 到的快照数、采样率观感、实际能否读到坐标（写回本文）。
+
+## 待实机确认（写进文档前不许猜）
+
+1. `hidInitializeTouchScreen()` 在本项目两种启动方式下是否都成功（失败＝致命错误页，没有
+   Result 可判）；
+2. `hidGetTouchScreenStates()` 写出的数组里**最后一条是不是最新快照**（这里沿用六轴侧同一
+   套 `_hidStates` 语义的假设；探针日志按顺序打印读数，若顺序相反就改取第一条）；
+3. 每帧 drain 到的快照数（六轴是 16 条，触屏的稳态值未知）与 `IsInterpolated` 一类的
+   attributes 组合；
+4. `x` / `y` 是否真的从左上角起算、右下角是否接近 (1279, 719)；
+5. 手掌贴屏、按压力度不同时的坐标抖动，是否需要给边缘加余量（**要加就是新参数**，目前没加）；
+6. 体感默认的 `freq fast = 30ms` 在触屏上是否偏强/偏弱，以及 `strength max` 的合适默认。

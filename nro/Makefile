@@ -59,7 +59,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET		:=	DGLAB-NX
 BUILD		:=	build
-SOURCES		:=	source source/ui source/platform source/motion source/util
+SOURCES		:=	source source/ui source/platform source/motion source/touch source/util
 DATA		:=	data
 INCLUDES	:=	include ../common/include ../third_party
 #ROMFS	:=	romfs

@@ -33,6 +33,10 @@ void dglabMotionFeedDefaultConfig(DglabMotionFeedConfig* config)
     config->frequency_fast_ms = 30u;
 
     config->strength_max = 100u;
+
+    // The motion mode's own shape: it only ever writes a level, and the pulse
+    // interval follows it.
+    config->frequency_follows_level = true;
 }
 
 void dglabMotionFeedInit(DglabMotionFeed* feed, const DglabMotionFeedConfig* config)
@@ -120,6 +124,38 @@ void dglabMotionFeedAddSample(DglabMotionFeed* feed, const DglabMotionSample* sa
     feed->have_last_acceleration = true;
 }
 
+void dglabMotionFeedSetTarget(DglabMotionFeed* feed, float level, float density)
+{
+    if (!feed)
+        return;
+
+    level = clamp01(level);
+    density = clamp01(density);
+
+    // The window keeps the highest level it was asked for, exactly like it keeps
+    // the highest sample intensity. The density is simply the last one asked for:
+    // it is where a finger is, and smoothing that would only make the output
+    // disagree with the marker the page draws under it.
+    if (level > feed->window_peak)
+        feed->window_peak = level;
+
+    feed->window_density = density;
+    feed->moving = level > 0.0f;
+}
+
+// The pulse interval for the window that is going out. The motion mode's density
+// is its own level (a harder swing is also a denser one); a mode that names
+// targets gets the interval it asked for.
+static uint16_t frequencyMs(const DglabMotionFeed* feed, float level)
+{
+    float norm = feed->config.frequency_follows_level ? clamp01(level)
+                                                      : clamp01(feed->window_density);
+    float frequency = (float)feed->config.frequency_still_ms +
+        ((float)feed->config.frequency_fast_ms - (float)feed->config.frequency_still_ms) * norm;
+
+    return (uint16_t)(frequency + 0.5f);
+}
+
 // Moves the envelope towards `target`, using the attack time when rising and the
 // release time when falling.
 static void envelopeStep(DglabMotionFeed* feed, float target, uint32_t step_ms)
@@ -157,7 +193,6 @@ size_t dglabMotionFeedAdvance(DglabMotionFeed* feed, uint32_t elapsed_ns,
         float target = feed->moving ? feed->window_peak : 0.0f;
         bool saw_peak = feed->window_peak > 0.0f;
         float level;
-        float frequency;
 
         feed->window_ns -= SLOT_MS * NS_PER_MS;
 
@@ -172,9 +207,7 @@ size_t dglabMotionFeedAdvance(DglabMotionFeed* feed, uint32_t elapsed_ns,
 
         level = clamp01(feed->level);
         slots[written].strength = (u8)(level * (float)feed->config.strength_max + 0.5f);
-        frequency = (float)feed->config.frequency_still_ms +
-                    ((float)feed->config.frequency_fast_ms - (float)feed->config.frequency_still_ms) * level;
-        slots[written].frequency_ms = (u16)(frequency + 0.5f);
+        slots[written].frequency_ms = frequencyMs(feed, level);
         slots[written].pad = 0;
         written++;
 
@@ -209,17 +242,10 @@ float dglabMotionFeedLevel(const DglabMotionFeed* feed)
 
 uint16_t dglabMotionFeedFrequencyMs(const DglabMotionFeed* feed)
 {
-    float level;
-    float frequency;
-
     if (!feed)
         return 0;
 
-    level = clamp01(feed->level);
-    frequency = (float)feed->config.frequency_still_ms +
-                ((float)feed->config.frequency_fast_ms - (float)feed->config.frequency_still_ms) * level;
-
-    return (uint16_t)(frequency + 0.5f);
+    return frequencyMs(feed, feed->level);
 }
 
 bool dglabMotionFeedIsStreaming(const DglabMotionFeed* feed)
