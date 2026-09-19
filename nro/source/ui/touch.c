@@ -61,7 +61,13 @@ static int clampInt(int value, int min, int max)
 static void drawMarker(DglabCanvas* canvas, unsigned x, unsigned y)
 {
     const DglabTheme* theme = dglabThemeGet();
-    int cx = clampInt((int)x, TOUCH_MARKER_RING, DGLAB_TOUCH_PANEL_WIDTH - 1 - TOUCH_MARKER_RING);
+    // The marker is clamped into the box the field is: the two white rules above
+    // and below, the two lines that close the density axis on the left and right.
+    // A finger that is past an edge - in a clamp band, or on the page header -
+    // shows just inside that edge rather than outside the axis its reading is
+    // being clamped to (hardware report, 2026-09-19).
+    int cx = clampInt((int)x, DGLAB_TOUCH_DENSITY_LEFT + TOUCH_MARKER_RING,
+        DGLAB_TOUCH_DENSITY_RIGHT - TOUCH_MARKER_RING);
     int cy = clampInt((int)y, TOUCH_FIELD_TOP + TOUCH_MARKER_RING,
         TOUCH_FIELD_BOTTOM - TOUCH_MARKER_RING);
 

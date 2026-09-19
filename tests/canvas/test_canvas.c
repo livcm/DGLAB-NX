@@ -1187,12 +1187,13 @@ static void checkFieldClearsTheBar(const char* name)
     CHECK(found == 0);
 }
 
-// The field's grid is bounded by the density axis: the horizontal quarter lines
-// start and stop at the two vertical lines the page draws, and not at the edges of
-// the screen. The strip outside the axis is exactly where a reading is clamped to
-// the end of the range, so a tick drawn out there would describe a position nobody
-// can dial in (and the pixels just past the lines are the page's own background).
-static void checkGridStaysInsideTheAxis(const char* name)
+// Nothing the field draws goes past the density axis: the horizontal quarter lines
+// stop at the two vertical lines that close it, and the finger markers are clamped
+// into the same box, so a finger in a clamp band - or on the page header, or below
+// the bottom rule - shows just inside the edge it went past. The strips outside the
+// axis are exactly where a reading is clamped to the end of the range, so ink there
+// would describe a position nobody can dial in.
+static void checkFieldStaysInsideTheAxis(const char* name)
 {
     const DglabCanvas* canvas = &g_page_canvas;
     uint32_t background = dglabThemeGet()->background;
@@ -1201,15 +1202,35 @@ static void checkGridStaysInsideTheAxis(const char* name)
     int outside_right = dglabCanvasScale(canvas, DGLAB_TOUCH_DENSITY_RIGHT + 1);
     int inside = dglabCanvasScale(canvas,
         (DGLAB_TOUCH_DENSITY_LEFT + DGLAB_TOUCH_DENSITY_RIGHT) / 2);
+    int band_top = dglabCanvasScale(canvas, DGLAB_PAGE_CLIP_TOP - 1);
+    int band_bottom = dglabCanvasScale(canvas, DGLAB_PAGE_BAR_Y);
+    int strips[2][2] = {
+        { 0, outside_left },
+        { outside_right, g_screen_width },
+    };
+    int outside = 0;
+
+    for (int strip = 0; strip < 2; strip++) {
+        for (int y = band_top; y < band_bottom; y++) {
+            for (int x = strips[strip][0]; x < strips[strip][1]; x++) {
+                if (screenPixel(x, y) == background)
+                    continue;
+
+                if (outside < 4)
+                    printf("    %s: %d,%d is ink outside the density axis\n", name, x, y);
+
+                outside++;
+            }
+        }
+    }
+
+    if (outside)
+        printf("  %s: %d pixels outside the density axis\n", name, outside);
+
+    CHECK(outside == 0);
 
     for (int step = 1; step < 4; step++) {
         int y = dglabCanvasScale(canvas, DGLAB_TOUCH_VALUE_TOP + value_span * step / 4);
-
-        if (screenPixel(outside_left, y) != background ||
-            screenPixel(outside_right, y) != background) {
-            printf("    %s: the horizontal grid at y=%d runs past the density axis\n", name,
-                DGLAB_TOUCH_VALUE_TOP + value_span * step / 4);
-        }
 
         CHECK(screenPixel(outside_left, y) == background);
         CHECK(screenPixel(outside_right, y) == background);
@@ -1569,7 +1590,7 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             if (variant == 3) {
                 checkDockedField(name);
             } else {
-                checkGridStaysInsideTheAxis(name);
+                checkFieldStaysInsideTheAxis(name);
             }
         }
 
