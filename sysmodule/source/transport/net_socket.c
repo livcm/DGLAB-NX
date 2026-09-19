@@ -4,6 +4,7 @@
 #include <dglab/net/net_server.h>
 
 #include <errno.h>
+#include <malloc.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -22,10 +23,81 @@
 #define NET_TRANSFER_TIMEOUT_S 5
 
 #define NET_LISTEN_BACKLOG 2
-#define NET_THREAD_STACK_SIZE 0x4000
+// Stall safety net: a stage marker plus a watchdog that reports and tries to
+// break a send() loose once the marker stops moving. See netStage() /
+// netWatchdogThreadMain(). It is what turned "must reboot the console" into
+// "stalls for a few seconds".
+#define NET_STALL_PATH "sdmc:/switch/DGLAB-NX/logs/dglab-stall.log"
+#define NET_STALL_POLL_MS 500u
+#define NET_STALL_MS 3000u
+
+// Usable stack per thread. libnx's threadCreate() also has to fit the thread's
+// TLS block and reent struct above it, and when it is not handed a stack it takes
+// the whole thing from the heap with aligned_alloc(0x1000, ...) - a heap that is
+// this sysmodule's fixed 512KB inner array (INNER_HEAP_SIZE in
+// sysmodule/source/main.c). These threads are created and released on every
+// start/stop round, so they are given static stacks instead and the heap stays out
+// of thread creation entirely; the thread lifecycle bug that made those rounds
+// leak is described in docs/dglab-socket.md, "反复启停后服务端起不来".
+#define NET_THREAD_STACK_SIZE 0x4000u
+// Page aligned total handed to threadCreate(): the usable stack above plus the
+// TLS and reent underneath (rounded up; libnx wants 0x30 of slack on top of
+// them). It rejects a stack that is not page aligned, or one too small to hold
+// TLS + reent + that slack.
+#define NET_THREAD_STACK_TOTAL 0x5000u
 #define NET_THREAD_PRIORITY 0x2C
 #define NET_TICK_INTERVAL_MS 100
 #define NET_TICK_INTERVAL_NS (NET_TICK_INTERVAL_MS * 1000000ull)
+
+_Static_assert((NET_THREAD_STACK_TOTAL & 0xFFFu) == 0,
+    "threadCreate() requires a page aligned stack");
+_Static_assert(NET_THREAD_STACK_TOTAL >= NET_THREAD_STACK_SIZE + 0x800u,
+    "NET_THREAD_STACK_TOTAL must leave NET_THREAD_STACK_SIZE usable after TLS + reent");
+
+// One static stack per thread, .bss like the frames in net_server.c: the accept,
+// tick and power-state threads are created again on every start, so the heap must
+// not be involved in creating a thread at all.
+static u8 g_accept_thread_stack[NET_THREAD_STACK_TOTAL] __attribute__((aligned(0x1000)));
+static u8 g_tick_thread_stack[NET_THREAD_STACK_TOTAL] __attribute__((aligned(0x1000)));
+static u8 g_pm_thread_stack[NET_THREAD_STACK_TOTAL] __attribute__((aligned(0x1000)));
+// Each row is a whole number of pages, so the array's alignment is every slot's.
+static u8 g_client_thread_stack[DGLAB_NET_MAX_CLIENTS][NET_THREAD_STACK_TOTAL]
+    __attribute__((aligned(0x1000)));
+
+// Stall safety net: where each thread currently is. Plain stores only - no locks,
+// no file system - because added I/O in the hot path hid this bug twice already.
+// The watchdog below reports it once it stops moving.
+typedef enum {
+    NetStage_None = 0,
+    NetStage_Start,
+    NetStage_Tick,
+    NetStage_SendBegin,
+    NetStage_SendEnd,
+    NetStage_LogBegin,
+    NetStage_LogEnd,
+} NetStage;
+
+typedef enum {
+    NetStageThread_Ipc = 0,
+    NetStageThread_Tick,
+    NetStageThread_Accept,
+    NetStageThread_Client,
+    NetStageThread_Watchdog,
+} NetStageThread;
+
+static volatile int g_stage = NetStage_None;
+static volatile uint64_t g_stage_ms;
+static volatile uint32_t g_stage_count;
+static volatile int g_stage_thread;
+static volatile int g_stage_fd = -1;
+static volatile uint32_t g_stage_bytes;
+static volatile int g_stage_errno;
+
+static u8 g_watchdog_thread_stack[NET_THREAD_STACK_TOTAL] __attribute__((aligned(0x1000)));
+static Thread g_watchdog_thread;
+static bool g_watchdog_started;
+static FILE* g_stall_log;
+static bool g_stall_log_failed;
 
 typedef struct {
     int fd; ///< -1 while the slot is unused
@@ -34,6 +106,20 @@ typedef struct {
     bool active;       ///< a running connection owns the slot
     Mutex write_mutex; ///< serialises frames from the core and from wsConnRecv
     bool write_mutex_ready;
+    // Frames the core produced while holding the transport lock. They are
+    // memcpy'd here (never written from under that lock) and flushed right after
+    // the lock is released, so a bsd:u send that never returns can only park the
+    // thread that flushes - not the IPC thread and not the console's NRO.
+    uint8_t tx[4096];
+    size_t tx_pending;
+    // A failed write is reported by the tick thread, never from inside the write
+    // itself: the connection thread reaches this while holding the frame lock,
+    // and taking the transport lock there inverts the order the IPC and tick
+    // threads use (transport -> frame) and deadlocks both of them.
+    bool write_fail_pending; ///< the tick thread still has to log it
+    int write_fail_errno;
+    int write_fail_left;
+    int write_fail_fd;
     WsConn conn;
 } NetSocketClient;
 
@@ -75,6 +161,57 @@ static struct {
 static FILE* g_sd_log;
 static bool g_sd_log_failed;
 
+// Opens a file under sdmc:/switch/DGLAB-NX/logs/, mounting what has to be mounted
+// first. Both calls are ignored on purpose: whichever part is already up (fs or
+// the sdmc mount) simply reports "already initialised", and the fopen below is
+// the real test of whether the path is usable.
+static FILE* netSdOpen(const char* path, const char* mode)
+{
+    fsInitialize();
+    fsdevMountSdmc();
+
+    mkdir("sdmc:/switch", 0777);
+    mkdir("sdmc:/switch/DGLAB-NX", 0777);
+    mkdir(NET_SD_LOG_DIR, 0777);
+
+    return fopen(path, mode);
+}
+
+// Stall safety net: the stage marker. Everything here is a plain store, so it can
+// run inside any of the hot paths without changing their timing. (Both are defined
+// further down; the watchdog needs them first.)
+static uint64_t netNowMs(void* context);
+static void netLog(const char* fmt, ...);
+
+static int netStageThreadNow(void)
+{
+    Handle self = threadGetCurHandle();
+
+    if (self == g_net.tick_thread.handle)
+        return NetStageThread_Tick;
+
+    if (self == g_net.accept_thread.handle)
+        return NetStageThread_Accept;
+
+    for (size_t i = 0; i < DGLAB_NET_MAX_CLIENTS; i++) {
+        if (g_net.clients[i].thread_valid && self == g_net.clients[i].thread.handle)
+            return NetStageThread_Client;
+    }
+
+    return NetStageThread_Ipc;
+}
+
+static void netStage(int stage, int thread, int fd, uint32_t bytes, int err)
+{
+    g_stage_thread = thread;
+    g_stage_fd = fd;
+    g_stage_bytes = bytes;
+    g_stage_errno = err;
+    g_stage_ms = netNowMs(NULL);
+    g_stage = stage;
+    g_stage_count++;
+}
+
 static void netSdLog(void* context, const char* line)
 {
     (void)context;
@@ -83,16 +220,7 @@ static void netSdLog(void* context, const char* line)
         return;
 
     if (g_sd_log == NULL) {
-        // Both calls are ignored on purpose: whichever part is already up (fs or
-        // the sdmc mount) simply reports "already initialised", and the fopen
-        // below is the real test of whether the path is usable.
-        fsInitialize();
-        fsdevMountSdmc();
-
-        mkdir("sdmc:/switch", 0777);
-        mkdir("sdmc:/switch/DGLAB-NX", 0777);
-        mkdir(NET_SD_LOG_DIR, 0777);
-        g_sd_log = fopen(NET_SD_LOG_PATH, "w");
+        g_sd_log = netSdOpen(NET_SD_LOG_PATH, "w");
 
         if (g_sd_log == NULL) {
             g_sd_log_failed = true;
@@ -100,8 +228,119 @@ static void netSdLog(void* context, const char* line)
         }
     }
 
+    netStage(NetStage_LogBegin, netStageThreadNow(), -1, (uint32_t)strlen(line), 0);
+
     fprintf(g_sd_log, "%s\n", line);
     fflush(g_sd_log);
+
+    netStage(NetStage_LogEnd, netStageThreadNow(), -1, 0, 0);
+}
+
+static const char* netStageName(int stage)
+{
+    switch (stage) {
+        case NetStage_Start: return "server start";
+        case NetStage_Tick: return "tick loop";
+        case NetStage_SendBegin: return "send begin";
+        case NetStage_SendEnd: return "send end";
+        case NetStage_LogBegin: return "log write begin";
+        case NetStage_LogEnd: return "log write end";
+        default: return "none";
+    }
+}
+
+static const char* netStageThreadName(int thread)
+{
+    switch (thread) {
+        case NetStageThread_Tick: return "tick";
+        case NetStageThread_Accept: return "accept";
+        case NetStageThread_Client: return "client";
+        case NetStageThread_Watchdog: return "watchdog";
+        default: return "ipc";
+    }
+}
+
+// Reports the stage marker once it has not moved for NET_STALL_MS, and shuts the
+// stalled socket down to break the caller loose. It only writes after the stall
+// has already happened, so it cannot hide the bug. If dglab-stall.log is missing
+// or empty after a hang, the stall is in the file system path itself (this thread
+// could not write either).
+static void netWatchdogThreadMain(void* arg)
+{
+    uint64_t last_count = 0;
+    uint64_t last_change_ms = 0;
+    bool reported = true; // nothing to report until the marker moved once
+
+    (void)arg;
+
+    for (;;) {
+        uint64_t now_ms;
+
+        svcSleepThread((u64)NET_STALL_POLL_MS * 1000000ull);
+
+        now_ms = netNowMs(NULL);
+
+        if (g_stage_count != last_count) {
+            last_count = g_stage_count;
+            last_change_ms = now_ms;
+            reported = false;
+            continue;
+        }
+
+        if (reported || now_ms - last_change_ms < NET_STALL_MS)
+            continue;
+
+        reported = true;
+
+        if (g_stall_log == NULL && !g_stall_log_failed) {
+            g_stall_log = netSdOpen(NET_STALL_PATH, "a");
+
+            if (g_stall_log == NULL)
+                g_stall_log_failed = true;
+        }
+
+        if (g_stall_log != NULL) {
+            fprintf(g_stall_log,
+                "stall: %s for %u ms, thread=%s, fd=%d, bytes=%u, errno=%d, "
+                "clients=%u, state=%u\n",
+                netStageName(g_stage), (unsigned)(now_ms - g_stage_ms),
+                netStageThreadName(g_stage_thread), g_stage_fd, (unsigned)g_stage_bytes,
+                g_stage_errno, (unsigned)g_net.server.status.clients,
+                (unsigned)g_net.server.status.state);
+
+            // The stage says a send() never came back: shut the socket down from
+            // here to break the caller loose (hardware confirmed 2026-09-19 that
+            // this recovers instead of freezing the sysmodule for good).
+            if (g_stage == NetStage_SendBegin && g_stage_fd >= 0) {
+                fprintf(g_stall_log, "stall: shutting down fd %d\n", g_stage_fd);
+                shutdown(g_stage_fd, SHUT_RDWR);
+            }
+
+            fflush(g_stall_log);
+        }
+    }
+}
+
+// Created with the first successful start and deliberately never joined.
+static void netWatchdogEnsureStarted(void)
+{
+    Result rc;
+
+    if (g_watchdog_started)
+        return;
+
+    rc = threadCreate(&g_watchdog_thread, netWatchdogThreadMain, NULL, g_watchdog_thread_stack,
+        sizeof(g_watchdog_thread_stack), NET_THREAD_PRIORITY, -2);
+
+    if (R_SUCCEEDED(rc))
+        rc = threadStart(&g_watchdog_thread);
+
+    if (R_FAILED(rc)) {
+        netLog("watchdog thread failed rc=0x%08X", (unsigned)rc);
+        return;
+    }
+
+    g_watchdog_started = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +463,86 @@ void dglabNetSocketLogNote(const char* fmt, ...)
     va_end(args);
 }
 
+// The transport's heap probe. The sysmodule's heap is a fixed 512KB array, so a
+// retained allocation never shows up as a crash - it shows up as a later start
+// failing to create a thread. One line per start and per stop makes that visible
+// in dglab-sys.log and in the ring the NRO copies to dglab-net.log; the delta is
+// against the same phase of the previous cycle, which is the number that has to
+// stay flat.
+//
+// Which lock to hold follows netLog and dglabNetServerLog: the start path calls
+// this with no lock held, the stop path calls it while the transport lock is
+// still held.
+//
+// newlib's mallinfo() walks the arena without taking its own malloc lock, so it
+// is only called where nothing else can be allocating: on start before a client
+// can exist, on stop after the server's threads have been joined.
+static bool netFormatHeap(char* out, size_t out_size, bool starting)
+{
+    struct mallinfo info = mallinfo();
+    static unsigned last_start_used_kb;
+    static unsigned last_stop_used_kb;
+    static bool start_valid;
+    static bool stop_valid;
+    unsigned used_kb = (unsigned)(info.uordblks / 1024);
+    unsigned free_kb = (unsigned)(info.fordblks / 1024);
+    unsigned arena_kb = (unsigned)(info.arena / 1024);
+    unsigned* previous = starting ? &last_start_used_kb : &last_stop_used_kb;
+    bool* valid = starting ? &start_valid : &stop_valid;
+    long delta_kb = *valid ? (long)used_kb - (long)*previous : 0;
+
+    *previous = used_kb;
+    *valid = true;
+
+    return snprintf(out, out_size, "heap %s: used=%uk free=%uk arena=%uk (delta %+ldk)",
+               starting ? "start" : "stop", used_kb, free_kb, arena_kb, delta_kb) > 0;
+}
+
+static void netLogHeap(bool starting)
+{
+    char line[96];
+
+    if (netFormatHeap(line, sizeof(line), starting))
+        netLog("%s", line);
+}
+
+static void netLogHeapLocked(bool starting)
+{
+    char line[96];
+
+    if (netFormatHeap(line, sizeof(line), starting))
+        dglabNetServerLog(&g_net.server, "%s", line);
+}
+
+// Waits for one thread that has already been asked to leave and releases it.
+//
+// The Thread handed in has to be the live one, never a copy taken before the
+// wait: libnx's threadClose() refuses a Thread that is still in its thread list
+// (tls_array, offset 32, which _EntryWrap sets when the thread starts and
+// threadExit clears when it ends) and returns LibnxError_BadInput (0x1759)
+// without releasing anything. A copy still carries the value from the moment it
+// was taken - while the thread was running - so closing one silently leaked the
+// thread's stack, mirror mapping and handle on every single start/stop round,
+// which is what made the server refuse to start (docs/dglab-socket.md, "反复启停
+// 后服务端起不来").
+//
+// The results are logged rather than dropped, for the same reason. Callers hold
+// no lock (netLog takes it).
+static void netJoinThread(const char* what, Thread* thread)
+{
+    Result rc = threadWaitForExit(thread);
+    Result close_rc;
+
+    if (R_FAILED(rc))
+        netLog("thread %s did not exit, rc=0x%08X", what, (unsigned)rc);
+
+    close_rc = threadClose(thread);
+
+    if (R_FAILED(close_rc))
+        netLog("thread close (%s) rc=0x%08X (the thread's stack was not released)",
+            what, (unsigned)close_rc);
+}
+
 // Creates the server core on first use (defined below, next to the public API).
 static void netCoreEnsureReady(u16 port);
 // Marks an idle server for shutdown (defined with the sleep handling).
@@ -271,26 +590,71 @@ static int netSocketRead(void* context, uint8_t* buffer, size_t size)
     return (int)rc;
 }
 
-static int netSocketWrite(void* context, const uint8_t* buffer, size_t size)
+// The frame lock the frame layer uses around "build the frame, write it once".
+// It used to sit inside netSocketWrite(), which meant the header and the payload
+// of one frame were two separately locked writes: another sender could slip a
+// frame in between them, and a failure could leave half a frame on the wire.
+static void netWriteLock(void* context)
 {
     NetSocketClient* slot = context;
+
+    mutexLock(&slot->write_mutex);
+}
+
+static void netWriteUnlock(void* context)
+{
+    NetSocketClient* slot = context;
+
+    mutexUnlock(&slot->write_mutex);
+}
+
+// The actual syscall path. The frame lock is already held here (by the frame
+// layer, or by netFlushPending), never the transport lock.
+static int netWriteNow(NetSocketClient* slot, const uint8_t* buffer, size_t size)
+{
     int fd = slot->fd;
     size_t written = 0;
     int result;
 
-    // The core (heartbeats, commands) and the client thread (pong and close
-    // replies inside wsConnRecv) both write to the same socket, so frames have
-    // to be serialised here or they interleave.
-    mutexLock(&slot->write_mutex);
+    // The frame lock is held by the caller (WS layer) for the whole frame. A
+    // failure is logged once per connection and also drops it: a socket that
+    // cannot take one whole frame has a peer that is not keeping up, and the
+    // server would rather lose that peer than park a thread inside send().
 
     while (written < size) {
-        ssize_t rc = send(fd, buffer + written, size - written, 0);
+        // Blocking, bounded by the socket's SO_SNDTIMEO (5 s). Not MSG_DONTWAIT:
+        // a 2026-09-19 hardware run (see docs/dglab-socket.md, "socket 写路径")
+        // showed a bsd:u send that never came back with that flag set - the caller
+        // parks in the kernel, which the flag cannot prevent. Only a frame header
+        // or one payload goes through here, and the waveform batches are sent by
+        // the tick thread, so a slow peer cannot park the IPC thread either.
+        ssize_t rc;
+        int err;
 
-        if (rc < 0 && errno == EINTR)
+        netStage(NetStage_SendBegin, netStageThreadNow(), fd, (uint32_t)(size - written), 0);
+
+        rc = send(fd, buffer + written, size - written, MSG_NOSIGNAL);
+        err = errno;
+
+        netStage(NetStage_SendEnd, netStageThreadNow(), fd, (uint32_t)(size - written), err);
+
+        if (rc < 0 && err == EINTR)
             continue;
 
-        if (rc <= 0) {
-            mutexUnlock(&slot->write_mutex);
+        if (rc <= 0 || (size_t)rc < size - written) {
+            // Recorded, not logged: this runs with the frame lock held, and the
+            // transport lock is the wrong one to take from here (netTickThreadMain
+            // prints it on its next pass). Callers are serialised by the frame
+            // lock, so writing these fields needs no lock of its own.
+            if (!slot->write_fail_pending) {
+                slot->write_fail_pending = true;
+                slot->write_fail_errno = err;
+                slot->write_fail_left = (int)(size - written);
+                slot->write_fail_fd = fd;
+            }
+
+            shutdown(fd, SHUT_RDWR);
+
             return -1;
         }
 
@@ -299,9 +663,63 @@ static int netSocketWrite(void* context, const uint8_t* buffer, size_t size)
 
     result = (int)size;
 
-    mutexUnlock(&slot->write_mutex);
-
     return result;
+}
+
+// The WS layer's write callback. When the caller holds the transport lock the
+// bytes are only copied into the slot's queue: doing the socket call from under
+// that lock is what let a stalled bsd:u send freeze the whole sysmodule (the IPC
+// thread waited for the lock). The copy is done under the frame lock, and the
+// queue is flushed by netFlushPending() once the transport lock is gone.
+static int netSocketWrite(void* context, const uint8_t* buffer, size_t size)
+{
+    NetSocketClient* slot = context;
+
+    if (!mutexIsLockedByCurrentThread(&g_net.mutex))
+        return netWriteNow(slot, buffer, size);
+
+    if (size > sizeof(slot->tx) - slot->tx_pending) {
+        // Cannot happen with one frame per send; dropping is better than writing
+        // from here. The line is safe: the caller holds the transport lock.
+        dglabNetServerLog(&g_net.server, "tx queue full, dropped %u bytes", (unsigned)size);
+        return (int)size;
+    }
+
+    memcpy(slot->tx + slot->tx_pending, buffer, size);
+    slot->tx_pending += size;
+
+    return (int)size;
+}
+
+// Writes what the core queued. Called without the transport lock, so a send that
+// never returns parks only the calling thread.
+static void netFlushPending(NetSocketClient* slot)
+{
+    size_t offset = 0;
+
+    if (slot->tx_pending == 0)
+        return;
+
+    mutexLock(&slot->write_mutex);
+
+    while (offset < slot->tx_pending) {
+        int rc = netWriteNow(slot, slot->tx + offset, slot->tx_pending - offset);
+
+        if (rc <= 0)
+            break;
+
+        offset += (size_t)rc;
+    }
+
+    slot->tx_pending = 0;
+
+    mutexUnlock(&slot->write_mutex);
+}
+
+static void netFlushAllPending(void)
+{
+    for (size_t i = 0; i < DGLAB_NET_MAX_CLIENTS; i++)
+        netFlushPending(&g_net.clients[i]);
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +800,6 @@ static void netStartClient(int fd)
 {
     NetSocketClient* slot = NULL;
     size_t index = 0;
-    Thread previous;
     bool join_previous = false;
     Result rc;
 
@@ -420,7 +837,6 @@ static void netStartClient(int fd)
     }
 
     if (slot->thread_valid) {
-        previous = slot->thread;
         slot->thread_valid = false;
         join_previous = true;
     }
@@ -429,10 +845,10 @@ static void netStartClient(int fd)
 
     // Join before touching the slot: the previous thread clears the slot as its
     // last step, and it must not clear the fd this connection is about to use.
-    if (join_previous) {
-        threadWaitForExit(&previous);
-        threadClose(&previous);
-    }
+    // netJoinThread() works on the slot's own Thread: closing a copy taken here
+    // would be refused by libnx and leave that thread's stack behind.
+    if (join_previous)
+        netJoinThread("client", &slot->thread);
 
     mutexLock(&g_net.mutex);
 
@@ -446,16 +862,22 @@ static void netStartClient(int fd)
     slot->conn.read = netSocketRead;
     slot->conn.write = netSocketWrite;
     slot->conn.context = slot;
+    // The frame layer builds and writes a whole frame under this lock.
+    slot->conn.lock = netWriteLock;
+    slot->conn.unlock = netWriteUnlock;
     slot->fd = fd;
     slot->active = true;
+    slot->write_fail_pending = false;
+    slot->tx_pending = 0;
 
     if (!slot->write_mutex_ready) {
         mutexInit(&slot->write_mutex);
         slot->write_mutex_ready = true;
     }
 
-    rc = threadCreate(&slot->thread, netClientThreadMain, (void*)(uintptr_t)index, NULL,
-        NET_THREAD_STACK_SIZE, NET_THREAD_PRIORITY, -2);
+    rc = threadCreate(&slot->thread, netClientThreadMain, (void*)(uintptr_t)index,
+        g_client_thread_stack[index], sizeof(g_client_thread_stack[index]),
+        NET_THREAD_PRIORITY, -2);
 
     if (R_SUCCEEDED(rc))
         rc = threadStart(&slot->thread);
@@ -508,11 +930,34 @@ static void netTickThreadMain(void* arg)
     while (!g_net.stopping) {
         svcSleepThread((u64)NET_TICK_INTERVAL_NS);
 
+        netStage(NetStage_Tick, NetStageThread_Tick, -1, 0, 0);
+
         netCheckIdle();
 
         mutexLock(&g_net.mutex);
+
+        // Write failures arrive here instead of being logged where they happen:
+        // the connection thread reports them while holding the frame lock, and
+        // taking the transport lock from there would deadlock against this very
+        // thread (transport -> frame is the only allowed order).
+        for (size_t i = 0; i < DGLAB_NET_MAX_CLIENTS; i++) {
+            NetSocketClient* slot = &g_net.clients[i];
+
+            if (!slot->write_fail_pending)
+                continue;
+
+            slot->write_fail_pending = false;
+
+            dglabNetServerLog(&g_net.server, "write failed: %d bytes left, errno %d, fd %d",
+                slot->write_fail_left, slot->write_fail_errno, slot->write_fail_fd);
+        }
+
         dglabNetServerPoll(&g_net.server, netNowMs(NULL));
         mutexUnlock(&g_net.mutex);
+
+        // Outside the transport lock: a send that never returns parks this thread
+        // only, and the IPC thread (the NRO) keeps working.
+        netFlushAllPending();
     }
 }
 
@@ -652,8 +1097,8 @@ static void netPmStart(void)
 
     g_pm_registered = true;
 
-    rc = threadCreate(&g_pm_thread, netPmThreadMain, NULL, NULL, NET_THREAD_STACK_SIZE,
-        NET_THREAD_PRIORITY, -2);
+    rc = threadCreate(&g_pm_thread, netPmThreadMain, NULL, g_pm_thread_stack,
+        sizeof(g_pm_thread_stack), NET_THREAD_PRIORITY, -2);
 
     if (R_SUCCEEDED(rc))
         rc = threadStart(&g_pm_thread);
@@ -861,8 +1306,8 @@ Result dglabNetSocketStart(u16 port)
     g_net.sd_log_enabled = true; // from here on the log also lands on the SD card
     dglabNetServerSetListening(&g_net.server, port);
 
-    rc = threadCreate(&g_net.accept_thread, netAcceptThreadMain, NULL, NULL, NET_THREAD_STACK_SIZE,
-        NET_THREAD_PRIORITY, -2);
+    rc = threadCreate(&g_net.accept_thread, netAcceptThreadMain, NULL, g_accept_thread_stack,
+        sizeof(g_accept_thread_stack), NET_THREAD_PRIORITY, -2);
 
     if (R_SUCCEEDED(rc))
         rc = threadStart(&g_net.accept_thread);
@@ -881,8 +1326,8 @@ Result dglabNetSocketStart(u16 port)
     // stop() even if the timer thread below fails.
     g_net.running = true;
 
-    rc = threadCreate(&g_net.tick_thread, netTickThreadMain, NULL, NULL, NET_THREAD_STACK_SIZE,
-        NET_THREAD_PRIORITY, -2);
+    rc = threadCreate(&g_net.tick_thread, netTickThreadMain, NULL, g_tick_thread_stack,
+        sizeof(g_tick_thread_stack), NET_THREAD_PRIORITY, -2);
 
     if (R_SUCCEEDED(rc))
         rc = threadStart(&g_net.tick_thread);
@@ -908,6 +1353,17 @@ Result dglabNetSocketStart(u16 port)
     // dglab-sys.log: whoever reads that file can tell which build wrote it.
     dglabNetSocketLogNote("server start, dglab %s", DGLAB_BUILD_STAMP);
 
+    netStage(NetStage_Start, NetStageThread_Ipc, -1, 0, 0);
+
+    // Everything the server needs is up (socket, accept thread, tick thread), so
+    // this is the figure to compare with the previous start: it has to stay flat
+    // however often the user presses A.
+    netLogHeap(true);
+
+    // Stall safety net: the watchdog writes nothing until the stage marker stops
+    // moving, so it cannot hide the stall it exists to catch.
+    netWatchdogEnsureStarted();
+
     // The power state watch needs its own IPC and a thread, so it is started
     // here rather than at boot: the watch only matters while the server runs.
     netPmStart();
@@ -917,9 +1373,10 @@ Result dglabNetSocketStart(u16 port)
 
 Result dglabNetSocketStop(void)
 {
-    Thread accept_thread;
-    Thread tick_thread;
-    Thread client_threads[DGLAB_NET_MAX_CLIENTS];
+    // Only the decisions are snapshotted: which threads exist and which fds to
+    // wake. The Thread structs themselves are always used live, never copied -
+    // libnx refuses to release a thread that has not finished unregistering
+    // itself yet, and only the live struct carries that state (netJoinThread).
     bool client_valid[DGLAB_NET_MAX_CLIENTS];
     int client_fds[DGLAB_NET_MAX_CLIENTS];
     bool have_accept = false;
@@ -936,20 +1393,17 @@ Result dglabNetSocketStop(void)
     g_net.stopping = true;
 
     if (g_net.accept_valid) {
-        accept_thread = g_net.accept_thread;
         g_net.accept_valid = false;
         have_accept = true;
     }
 
     if (g_net.tick_valid) {
-        tick_thread = g_net.tick_thread;
         g_net.tick_valid = false;
         have_tick = true;
     }
 
     for (size_t i = 0; i < DGLAB_NET_MAX_CLIENTS; i++) {
         client_valid[i] = g_net.clients[i].thread_valid;
-        client_threads[i] = g_net.clients[i].thread;
         client_fds[i] = g_net.clients[i].fd;
     }
 
@@ -958,11 +1412,19 @@ Result dglabNetSocketStop(void)
     // Say goodbye properly before the sockets go: a plain shutdown leaves the
     // App with a dead TCP connection it does not always notice.
     for (size_t i = 0; i < DGLAB_NET_MAX_CLIENTS; i++) {
-        if (g_net.clients[i].active && g_net.clients[i].conn.handshake_done)
+        if (g_net.clients[i].active && g_net.clients[i].conn.handshake_done) {
+            // Whatever was still queued for the App is dropped: only the close
+            // frame has to get out, so the flush below stays a few bytes.
+            g_net.clients[i].tx_pending = 0;
             wsConnSend(&g_net.clients[i].conn, WsOpcode_Close, NULL, 0);
+        }
     }
 
     mutexUnlock(&g_net.mutex);
+
+    // Outside the transport lock, so the App gets its close frame and the rest of
+    // the shutdown does not wait for anything else to go out.
+    netFlushAllPending();
 
     // shutdown() wakes the blocking accept()/recv() the threads are sitting in.
     if (listen_fd >= 0)
@@ -973,23 +1435,18 @@ Result dglabNetSocketStop(void)
             shutdown(client_fds[i], SHUT_RDWR);
     }
 
-    if (have_accept) {
-        threadWaitForExit(&accept_thread);
-        threadClose(&accept_thread);
-    }
+    if (have_accept)
+        netJoinThread("accept", &g_net.accept_thread);
 
-    if (have_tick) {
-        threadWaitForExit(&tick_thread);
-        threadClose(&tick_thread);
-    }
+    if (have_tick)
+        netJoinThread("tick", &g_net.tick_thread);
 
     for (size_t i = 0; i < DGLAB_NET_MAX_CLIENTS; i++) {
         if (!client_valid[i])
             continue;
 
         // The client thread closes its own socket, so only the handle is freed.
-        threadWaitForExit(&client_threads[i]);
-        threadClose(&client_threads[i]);
+        netJoinThread("client", &g_net.clients[i].thread);
     }
 
     mutexLock(&g_net.mutex);
@@ -1004,9 +1461,17 @@ Result dglabNetSocketStop(void)
         g_net.clients[i].fd = -1;
         g_net.clients[i].active = false;
         g_net.clients[i].thread_valid = false;
+        // Dropped, not flushed: the socket is going away, and a queued frame that
+        // cannot be written must not keep the stop path waiting.
+        g_net.clients[i].tx_pending = 0;
     }
 
     dglabNetServerSetStopped(&g_net.server);
+
+    // Logged while the SD mirror is still open, hence the locked variant: the
+    // stop figure is the one that says whether the threads handed their memory
+    // back, and it has to reach dglab-sys.log as well as the ring.
+    netLogHeapLocked(false);
 
     if (g_sd_log != NULL) {
         fclose(g_sd_log);
@@ -1065,6 +1530,8 @@ Result dglabNetSocketSend(const DglabNetSendRequest* request)
     result = dglabNetServerSend(&g_net.server, request);
     mutexUnlock(&g_net.mutex);
 
+    netFlushAllPending();
+
     switch (result) {
         case DglabNetSend_Ok:
             return 0;
@@ -1091,6 +1558,8 @@ Result dglabNetSocketUploadWaveform(const DglabNetWaveformRequest* request)
     mutexLock(&g_net.mutex);
     result = dglabNetServerUploadWaveform(&g_net.server, request);
     mutexUnlock(&g_net.mutex);
+
+    netFlushAllPending();
 
     switch (result) {
         case DglabNetSend_Ok:

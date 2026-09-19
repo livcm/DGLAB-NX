@@ -579,6 +579,7 @@ static void waveformClearQueue(DglabNetWaveformQueue* queue)
     queue->head = 0;
     queue->count = 0;
     queue->next_send_ms = 0;
+    queue->clear_pending = false;
 }
 
 static void waveformDrop(DglabNetWaveformQueue* queue, size_t count)
@@ -662,6 +663,7 @@ static bool waveformSendBatch(DglabNetServer* server, DglabNetClient* client,
         return false;
 
     slots = elements * DGLAB_COYOTE_V3_WAVEFORM_SLOTS;
+
     result = sendCommand(server, client, command, false);
 
     if (result != DglabNetSend_Ok)
@@ -702,6 +704,20 @@ static void waveformPump(DglabNetServer* server, uint64_t now_ms)
     for (size_t i = 0; i < 2; i++) {
         DglabSocketChannel channel = (i == 0) ? DglabSocketChannel_A : DglabSocketChannel_B;
         DglabNetWaveformQueue* queue = &server->waveform[i];
+
+        // A replacement drops what the App is playing before the new slots go
+        // out. The clear travels with the batch, from this thread: the IPC
+        // thread only ever enqueues, so it can never be parked inside a socket
+        // write (docs/dglab-socket.md, "排查连接问题看什么").
+        if (queue->clear_pending) {
+            char command[64];
+
+            queue->clear_pending = false;
+
+            if (dglabSocketBuildClear(command, sizeof(command), channel) != 0 &&
+                sendCommand(server, client, command, true) != DglabNetSend_Ok)
+                return;
+        }
 
         if (queue->count < DGLAB_COYOTE_V3_WAVEFORM_SLOTS) {
             // Nothing whole is left: the App should send again as soon as the
@@ -754,30 +770,18 @@ DglabNetSendResult dglabNetServerUploadWaveform(DglabNetServer* server,
 
     for (size_t i = 0; i < channel_count; i++) {
         DglabNetWaveformQueue* queue = waveformQueue(server, channels[i]);
-        DglabNetSendResult result;
 
         if (request->mode == DglabNetWaveform_Replace) {
-            // An event replaces the gesture that is playing, so both our queue
-            // and the App's have to be dropped before the new slots go out.
-            // .bss for the same reason as in waveformSendBatch.
-            static char command[DGLAB_SOCKET_MAX_MESSAGE];
-
+            // An event replaces the gesture that is playing: drop our queue and
+            // have the pump tell the App to drop its own before the new slots go
+            // out. Nothing is sent from here - an upload only ever enqueues, so
+            // this function (which runs on the IPC thread) can never be parked
+            // inside a socket write.
             waveformClearQueue(queue);
-
-            if (dglabSocketBuildClear(command, sizeof(command), channels[i]) != 0) {
-                result = sendCommand(server, client, command, true);
-
-                if (result != DglabNetSend_Ok)
-                    return result;
-            }
+            queue->clear_pending = true;
         }
 
         waveformPush(server, channels[i], request->slots, request->slot_count);
-
-        if (request->mode == DglabNetWaveform_Replace)
-            waveformSendBatch(server, client, channels[i], nowMs(server));
-        else
-            waveformPump(server, nowMs(server));
     }
 
     return DglabNetSend_Ok;

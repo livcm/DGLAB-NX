@@ -77,6 +77,7 @@ typedef struct {
     size_t head; // next slot to send
     size_t count;
     uint64_t next_send_ms; // when the App is expected to run low
+    bool clear_pending; ///< "drop what the App is playing" still has to be sent
 } DglabNetWaveformQueue;
 
 typedef struct {

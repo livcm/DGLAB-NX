@@ -1275,13 +1275,25 @@ Result blePocStart(const DglabPocStartRequest* request)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
     }
 
-    Thread previous = g_poc.worker_thread;
-
     mutexUnlock(&g_poc.mutex);
 
-    if (previous.handle != INVALID_HANDLE) {
-        threadWaitForExit(&previous);
-        threadClose(&previous);
+    // Wait for and release the live Thread, never a copy: libnx's threadClose()
+    // refuses a thread that is still unregistering itself (LibnxError_BadInput,
+    // 0x1759) and releases nothing, and a copy taken before the wait still has
+    // the running thread's state in it - the worker's stack and its mirror
+    // mapping would then stay behind for good (docs/dglab-socket.md, "反复启停后
+    // 服务端起不来").
+    if (g_poc.worker_thread.handle != INVALID_HANDLE) {
+        Result wait_rc = threadWaitForExit(&g_poc.worker_thread);
+        Result close_rc;
+
+        if (R_FAILED(wait_rc))
+            pocLog("worker did not exit, rc=0x%08X", (u32)wait_rc);
+
+        close_rc = threadClose(&g_poc.worker_thread);
+
+        if (R_FAILED(close_rc))
+            pocLog("worker close rc=0x%08X (its stack was not released)", (u32)close_rc);
     }
 
     mutexLock(&g_poc.mutex);

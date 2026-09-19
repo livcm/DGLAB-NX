@@ -314,35 +314,48 @@ size_t wsBuildHandshakeResponse(const WsHandshake* handshake, char* out, size_t 
 // Frames
 // ---------------------------------------------------------------------------
 
+// Writes the frame header for `size` payload bytes into `out` (at least 4 bytes)
+// and returns its length. Server frames are never masked.
+static size_t wsBuildFrameHeader(uint8_t* out, WsOpcode opcode, size_t size)
+{
+    out[0] = (uint8_t)(0x80u | (uint8_t)opcode);
+
+    if (size < 126) {
+        out[1] = (uint8_t)size;
+        return 2;
+    }
+
+    out[1] = 126;
+    out[2] = (uint8_t)(size >> 8);
+    out[3] = (uint8_t)size;
+    return 4;
+}
+
 bool wsConnSend(WsConn* conn, WsOpcode opcode, const uint8_t* payload, size_t size)
 {
     uint8_t header[10];
-    size_t header_len = 0;
+    size_t header_len;
+    bool written;
 
-    header[0] = (uint8_t)(0x80u | (uint8_t)opcode);
-
-    if (size < 126) {
-        header[1] = (uint8_t)size;
-        header_len = 2;
-    } else if (size <= 0xFFFF) {
-        header[1] = 126;
-        header[2] = (uint8_t)(size >> 8);
-        header[3] = (uint8_t)size;
-        header_len = 4;
-    } else {
-        header[1] = 127;
-        for (unsigned i = 0; i < 8; i++)
-            header[2 + i] = (uint8_t)((uint64_t)size >> (56 - 8 * i));
-        header_len = 10;
-    }
-
-    if (conn->write(conn->context, header, header_len) != (int)header_len)
+    if (!conn || !conn->write || size > WS_MAX_MESSAGE)
         return false;
 
-    if (size && conn->write(conn->context, payload, size) != (int)size)
-        return false;
+    // The lock (when the caller has one) covers the whole frame, so the header
+    // and the payload of one frame cannot be interleaved with another sender's.
+    if (conn->lock)
+        conn->lock(conn->context);
 
-    return true;
+    header_len = wsBuildFrameHeader(header, opcode, size);
+
+    written = conn->write(conn->context, header, header_len) == (int)header_len;
+
+    if (written && size)
+        written = conn->write(conn->context, payload, size) == (int)size;
+
+    if (conn->unlock)
+        conn->unlock(conn->context);
+
+    return written;
 }
 
 // Reads exactly `size` bytes into the connection buffer.
@@ -555,7 +568,17 @@ complete:
     if (response_len == 0)
         return false;
 
-    if (conn->write(conn->context, (const uint8_t*)response, response_len) != (int)response_len)
+    // Same lock as wsConnSend: the reply must not be interleaved with a frame.
+    if (conn->lock)
+        conn->lock(conn->context);
+
+    bool written = conn->write(conn->context, (const uint8_t*)response, response_len) ==
+        (int)response_len;
+
+    if (conn->unlock)
+        conn->unlock(conn->context);
+
+    if (!written)
         return false;
 
     // Keep any bytes that arrived after the header block: the client may already

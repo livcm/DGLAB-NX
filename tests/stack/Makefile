@@ -49,9 +49,12 @@ all: test
 test: $(USAGE)
 	@awk -v limit=$(LIMIT) -v allow="$(ALLOW)" -f check_frames.awk $(USAGE)
 
+# gnu11, not c11: the sysmodule's own build passes no -std either, and -std=c11
+# defines __STRICT_ANSI__, which makes newlib hide the BSD-only declarations that
+# libnx's <sys/socket.h> exposes (MSG_DONTWAIT is one of them).
 $(BUILD)/%.o: $(SYS)/source/%.c $(HEADERS)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c11 -O2 -c -fstack-usage -I$(SYS)/include -I$(COMMON) \
+	$(CC) -std=gnu11 -O2 -c -fstack-usage -I$(SYS)/include -I$(COMMON) \
 		-I$(DEVKITPRO)/libnx/include $< -o $@
 
 # gcc writes the .su next to the object as a side effect of the compile above, so

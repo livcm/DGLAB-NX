@@ -39,11 +39,17 @@ typedef struct {
 typedef int (*WsReadFn)(void* context, uint8_t* buffer, size_t size);
 // Returns the byte count written, or < 0 on error.
 typedef int (*WsWriteFn)(void* context, const uint8_t* buffer, size_t size);
+// Serialises whole frames. Optional: NULL means the caller guarantees that only
+// one thread sends at a time, which is what the host tests do.
+typedef void (*WsLockFn)(void* context);
+typedef void (*WsUnlockFn)(void* context);
 
 typedef struct {
     WsReadFn read;
     WsWriteFn write;
     void* context;
+    WsLockFn lock;
+    WsUnlockFn unlock;
     uint8_t rx[WS_MAX_MESSAGE + 64];
     size_t rx_len;
     bool handshake_done;

@@ -34,6 +34,7 @@ typedef struct {
     size_t rx_chunk; // bytes handed out per read, to exercise partial reads
     uint8_t tx[4096];
     size_t tx_size;
+    int tx_calls; ///< how many times the frame layer called write()
 } MockIo;
 
 static int mockRead(void* context, uint8_t* buffer, size_t size)
@@ -65,6 +66,7 @@ static int mockWrite(void* context, const uint8_t* buffer, size_t size)
     if (io->tx_size + size > sizeof(io->tx))
         return -1;
 
+    io->tx_calls++;
     memcpy(io->tx + io->tx_size, buffer, size);
     io->tx_size += size;
 
@@ -265,7 +267,35 @@ static void testServerFrameEncode(void)
 
     const uint8_t expected[4] = { 0x81, 0x02, 'h', 'i' };
     CHECK(io.tx_size == sizeof(expected));
+    // Header then payload: the frame lock the transport installs is what keeps
+    // another sender from slotting its own frame between them.
+    CHECK(io.tx_calls == 2);
     expectBytes("server text frame", io.tx, expected, sizeof(expected));
+}
+
+static void testFrameGoesOutAsHeaderThenPayload(void)
+{
+    uint8_t payload[200];
+    const uint8_t expected_header[4] = { 0x81, 126, 0x00, 200 };
+    static uint8_t big[WS_MAX_MESSAGE + 1];
+    MockIo io;
+    WsConn conn;
+
+    // Extended length header, same two calls, header in front of the payload.
+    memset(payload, 0x5A, sizeof(payload));
+    ioInit(&conn, &io, NULL, 0, 0);
+
+    CHECK(wsConnSendText(&conn, (const char*)payload, sizeof(payload)));
+    CHECK(io.tx_calls == 2);
+    CHECK(io.tx_size == sizeof(expected_header) + sizeof(payload));
+    expectBytes("extended frame header", io.tx, expected_header, sizeof(expected_header));
+    expectBytes("extended frame payload", io.tx + sizeof(expected_header), payload,
+        sizeof(payload));
+
+    // A payload larger than a socket message is refused before any write.
+    ioInit(&conn, &io, NULL, 0, 0);
+    CHECK(!wsConnSendText(&conn, (const char*)big, sizeof(big)));
+    CHECK(io.tx_calls == 0);
 }
 
 static void testPingIsAnswered(void)
@@ -470,6 +500,7 @@ int main(void)
     testHandshake();
     testFrameDecode();
     testServerFrameEncode();
+    testFrameGoesOutAsHeaderThenPayload();
     testPingIsAnswered();
     testCloseEndsConnection();
     testProtocolErrors();

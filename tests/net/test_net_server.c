@@ -588,20 +588,28 @@ static void testWaveformStream(void)
     CHECK(attachApp(&harness, &conn, &link));
     link.tx_size = 0;
 
-    // Appending sends right away when the App has nothing left to play: two
-    // elements for eight slots, each element being four slots.
+    // An upload only ever enqueues: the thread that handles IPC must never be
+    // the one that ends up inside a socket write. The tick thread feeds the App.
     CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_Ok);
+    CHECK(link.tx_size == 0);
+
+    harness.now += 100;
+    dglabNetServerPoll(&harness.server, harness.now);
     CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
     CHECK(contains(frame, "\"message\":\"pulse-A:["));
-    CHECK(countOccurrences(frame, "\\\"") == 4);
+    CHECK(countOccurrences(frame, "\\\"") == 4); // two elements for eight slots
     CHECK(harness.server.status.commands_sent == 1);
 
     // Pacing: 48 slots are one full batch (32 slots) plus a remainder. The batch
-    // goes out immediately, the remainder only once the App is close to running
-    // dry.
+    // goes out on the next poll, the remainder only once the App is close to
+    // running dry.
     link.tx_size = 0;
     fillSlots(&request, DGLAB_NET_WAVEFORM_MAX_SLOTS, 100, 50);
     CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_Ok);
+    CHECK(link.tx_size == 0);
+
+    harness.now += 100;
+    dglabNetServerPoll(&harness.server, harness.now);
     CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
     CHECK(countOccurrences(frame, "\\\"") == 16); // 8 elements
 
@@ -615,22 +623,31 @@ static void testWaveformStream(void)
     CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
     CHECK(contains(frame, "\"message\":\"pulse-A:["));
 
-    // A replacement drops what is playing first, then starts the new slots now.
+    // A replacement tells the App to drop what it is playing first; the clear
+    // and the new slots leave together on the next poll, in that order.
     link.tx_size = 0;
     fillSlots(&request, 8, 200, 80);
     request.mode = DglabNetWaveform_Replace;
     CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_Ok);
+    CHECK(link.tx_size == 0);
+
+    harness.now += 100;
+    dglabNetServerPoll(&harness.server, harness.now);
     CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
     CHECK(contains(frame, "\"message\":\"clear-1\""));
     CHECK(payloadAt(&link, 1, frame, sizeof(frame)));
     CHECK(contains(frame, "\"message\":\"pulse-A:["));
 
-    // Both channels at once.
+    // Both channels at once: each one clears before it feeds.
     link.tx_size = 0;
     fillSlots(&request, 4, 100, 20);
     request.channel = 0;
     request.mode = DglabNetWaveform_Replace;
     CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_Ok);
+    CHECK(link.tx_size == 0);
+
+    harness.now += 100;
+    dglabNetServerPoll(&harness.server, harness.now);
     CHECK(payloadAt(&link, 0, frame, sizeof(frame)));
     CHECK(contains(frame, "\"message\":\"clear-1\""));
     CHECK(payloadAt(&link, 1, frame, sizeof(frame)));
@@ -640,11 +657,13 @@ static void testWaveformStream(void)
     CHECK(payloadAt(&link, 3, frame, sizeof(frame)));
     CHECK(contains(frame, "\"message\":\"pulse-B:["));
 
-    // Clear stops the stream: nothing queued means nothing to feed.
+    // Clear stops the stream: it is a small command, so it goes out at once, and
+    // a queue with nothing in it feeds nothing.
     link.tx_size = 0;
     fillSlots(&request, DGLAB_NET_WAVEFORM_MAX_SLOTS, 100, 50);
     request.channel = 2;
     CHECK(dglabNetServerUploadWaveform(&harness.server, &request) == DglabNetSend_Ok);
+    CHECK(link.tx_size == 0);
 
     {
         DglabNetSendRequest clear;

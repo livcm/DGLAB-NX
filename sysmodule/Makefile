@@ -193,6 +193,25 @@ $(OUTPUT).elf	:	$(OFILES)
 
 $(OFILES_SRC)	: $(HFILES_BIN)
 
+# The build stamp reaches the sources through -D, and make does not treat a
+# changed command line as a reason to rebuild: a module built across a checkout
+# change kept logging the previous checkout's stamp from a stale main.o ("dglab
+# 2ac34ef-dirty" next to "server start, dglab 243d8ba-dirty", 2026-09-18).
+# Writing the stamp to a file only when it changes turns that into an ordinary
+# prerequisite. The objects are backdated when it does change, so the rebuild
+# does not depend on the clock: two builds inside the same second would otherwise
+# compare equal and keep a half-updated binary (make uses whole seconds here).
+STAMP_FILE	:=	$(CURDIR)/build-stamp
+$(OFILES_SRC)	:	$(STAMP_FILE)
+
+.PHONY: FORCE
+$(STAMP_FILE):	FORCE
+	@printf '%s\n' '$(BUILD_STAMP)' | cmp -s - $@ || { \
+		printf '%s\n' '$(BUILD_STAMP)' > $@; \
+		touch -t 198001010000 $(OFILES_SRC); \
+	}
+FORCE:
+
 %.bin.o	%_bin.h :	%.bin
 	@echo $(notdir $<)
 	@$(bin2o)

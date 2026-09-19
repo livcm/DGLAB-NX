@@ -274,6 +274,24 @@ $(OFILES_SRC)	: $(HFILES_BIN)
 # showing the old one.
 main.o	:	$(APP_VERSION_FILE)
 
+# The build stamp reaches the sources through -D, and make does not treat a
+# changed command line as a reason to rebuild, so the About page could keep
+# showing the previous checkout's stamp from a stale object. Writing the stamp
+# (and the release version) to a file only when it changes turns that into an
+# ordinary prerequisite, and the objects are backdated when it does change so the
+# rebuild does not depend on the clock (two builds inside the same second would
+# otherwise compare equal and keep a half-updated binary).
+STAMP_FILE	:=	$(CURDIR)/build-stamp
+$(OFILES_SRC)	:	$(STAMP_FILE)
+
+.PHONY: FORCE
+$(STAMP_FILE):	FORCE
+	@printf '%s %s\n' '$(APP_VERSION)' '$(BUILD_STAMP)' | cmp -s - $@ || { \
+		printf '%s %s\n' '$(APP_VERSION)' '$(BUILD_STAMP)' > $@; \
+		touch -t 198001010000 $(OFILES_SRC); \
+	}
+FORCE:
+
 #---------------------------------------------------------------------------------
 # you need a rule like this for each extension you use as binary data
 #---------------------------------------------------------------------------------
