@@ -42,6 +42,7 @@ typedef enum {
     DglabString_ItemBlePoc,
     DglabString_DescSocket,
     DglabString_DescMotion,
+    DglabString_DescTouch,
     DglabString_DescAdvanced,
     DglabString_DescAbout,
     DglabString_DescBlePoc,
@@ -84,6 +85,17 @@ typedef enum {
     DglabString_MotionMoving,
     DglabString_MotionLevel,
     DglabString_MotionNotConnected,
+
+    // touch screen
+    //
+    // The two halves are named after the half of the panel, not after the
+    // channel: "channel A" is already the DG-LAB channel's own name on the
+    // socket page, and the two are not the same question (docs/touch-input.md).
+    DglabString_TouchTitle,
+    DglabString_TouchHalfLeft,
+    DglabString_TouchHalfRight,
+    DglabString_TouchNotTouched,
+    DglabString_TouchDocked,
 
     // advanced screen
     DglabString_AdvancedTitle,

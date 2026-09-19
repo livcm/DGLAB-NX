@@ -11,6 +11,7 @@
 typedef enum {
     DglabMenu_ItemSocket = 0, ///< server, QR code, test buttons, log
     DglabMenu_ItemMotion,     ///< Joy-Con driven waveform
+    DglabMenu_ItemTouch,      ///< touch panel driven waveform
     DglabMenu_ItemAdvanced,   ///< the motion parameters
     DglabMenu_ItemAbout,      ///< project info and the language
     DglabMenu_ItemBlePoc,     ///< the abandoned BLE console, kept for diagnostics

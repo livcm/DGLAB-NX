@@ -41,6 +41,7 @@ static const char* const kKeys[DglabString_Count] = {
     [DglabString_ItemBlePoc] = "item_ble_poc",
     [DglabString_DescSocket] = "desc_socket",
     [DglabString_DescMotion] = "desc_motion",
+    [DglabString_DescTouch] = "desc_touch",
     [DglabString_DescAdvanced] = "desc_advanced",
     [DglabString_DescAbout] = "desc_about",
     [DglabString_DescBlePoc] = "desc_ble_poc",
@@ -72,6 +73,13 @@ static const char* const kKeys[DglabString_Count] = {
     [DglabString_MotionMoving] = "motion_moving",
     [DglabString_MotionLevel] = "motion_level",
     [DglabString_MotionNotConnected] = "motion_not_connected",
+
+    // touch screen
+    [DglabString_TouchTitle] = "touch_title",
+    [DglabString_TouchHalfLeft] = "touch_half_left",
+    [DglabString_TouchHalfRight] = "touch_half_right",
+    [DglabString_TouchNotTouched] = "touch_not_touched",
+    [DglabString_TouchDocked] = "touch_docked",
 
     // advanced screen
     [DglabString_AdvancedTitle] = "advanced_title",

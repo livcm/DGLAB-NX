@@ -30,8 +30,10 @@
 #include <dglab/ui/text.h>
 #include <dglab/nro/motion_feed.h>
 #include <dglab/nro/motion_settings.h>
+#include <dglab/nro/touch_panel.h>
 #include <dglab/nro/ble_poc_view.h>
 #include <dglab/platform/framebuffer.h>
+#include <dglab/platform/touchscreen.h>
 #include <dglab/ui/advanced.h>
 #include <dglab/ui/menu.h>
 #include <dglab/ui/motion.h>
@@ -39,6 +41,7 @@
 #include <dglab/ui/screen.h>
 #include <dglab/ui/settings.h>
 #include <dglab/ui/theme.h>
+#include <dglab/ui/touch.h>
 
 #define LOG_POLL_ROUNDS 2
 
@@ -65,6 +68,7 @@ typedef enum {
     DglabMenuResult_Exit = 0,
     DglabMenuResult_Socket,
     DglabMenuResult_Motion,
+    DglabMenuResult_Touch,
     DglabMenuResult_Advanced,
     DglabMenuResult_About,
     DglabMenuResult_BlePoc,
@@ -912,6 +916,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
         if (down & HidNpadButton_A) {
             switch (g_menu_selected) {
                 case DglabMenu_ItemMotion: return DglabMenuResult_Motion;
+                case DglabMenu_ItemTouch: return DglabMenuResult_Touch;
                 case DglabMenu_ItemAdvanced: return DglabMenuResult_Advanced;
                 case DglabMenu_ItemAbout: return DglabMenuResult_About;
                 case DglabMenu_ItemBlePoc: return DglabMenuResult_BlePoc;
@@ -1296,6 +1301,170 @@ static void runMotionView(Service* dglab, PadState* pad)
     noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
 }
 
+// ---------------------------------------------------------------------------
+// The touch mode
+// ---------------------------------------------------------------------------
+
+// Step one of the touch mode (docs/touch-input.md): read the panel and show what
+// it says, without turning a position into a waveform yet. The point of this
+// build is to answer, on hardware, the one question the sources cannot - whether
+// the console hands the touch screen to this process at all, both in applet mode
+// and as a title override - and to print the readings' own coordinates, so the
+// axes can be checked against the panel before anything is mapped to them.
+#define TOUCH_DISPLAY_FRAMES 2
+#define TOUCH_LOG_MAX 200
+
+// Which half a reading is in, and where it is. One finger per half is all this
+// needs: the mode's own rule for several fingers, and the axes, arrive with
+// dglab/nro/touch_feed.h, which the host tests cover - so the probe does not
+// grow a second copy of any of it.
+static void touchProbeFrame(const DglabTouchFrame* frame, DglabTouchScreenState* state)
+{
+    state->held_a = false;
+    state->held_b = false;
+
+    for (unsigned i = 0; i < frame->count; i++) {
+        const DglabTouchPoint* point = &frame->points[i];
+
+        if (point->end)
+            continue;
+
+        if (dglabTouchIsLeft(point->x)) {
+            state->held_a = true;
+            state->x_a = point->x;
+            state->y_a = point->y;
+        } else {
+            state->held_b = true;
+            state->x_b = point->x;
+            state->y_b = point->y;
+        }
+    }
+}
+
+// One log line: what the last poll saw, plus what the mode made of it. Written
+// when the mode starts and whenever the halves that have a finger change, so a
+// whole probe run is one readable stretch of the SD card's log.
+static void touchLogLine(const char* tag)
+{
+    char line[TOUCH_LOG_MAX];
+    size_t length = dglabTouchDescribe(line, sizeof(line));
+
+    if (length == 0)
+        return;
+
+    if (length + 16 < sizeof(line))
+        snprintf(line + length, sizeof(line) - length, " | %s", tag);
+
+    logPushLine(line);
+}
+
+static void runTouchView(Service* dglab, PadState* pad)
+{
+    DglabTouchScreenState state;
+    u32 frame = 0;
+    u32 drawn_generation = 0;
+    bool described = false;
+    bool have_last = false;
+    bool last_held_a = false;
+    bool last_held_b = false;
+
+    // Entering the mode is what initializes the panel: nothing else in this NRO
+    // touches it (nro/AGENTS.md). libnx has no error to report here - a refusal
+    // is its fatal error page - which is why the log's first line is the answer
+    // this build exists for.
+    dglabTouchStart();
+
+    memset(&state, 0, sizeof(state));
+    state.link = dglabString(DglabString_StateNotStarted);
+    state.last_upload = "";
+
+    // Whatever the test buttons left queued should not play underneath the mode.
+    noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
+
+    while (appletMainLoop()) {
+        DglabTouchFrame touch;
+        u64 down;
+
+        padUpdate(pad);
+        down = padGetButtonsDown(pad);
+
+        // The same server poll and shortcuts as the socket and motion pages: A
+        // starts and stops the server, X clears, ZL and ZR fire one channel, and
+        // the D-pad dials the two channel strengths.
+        {
+            DglabNetStatus status;
+            bool status_ok = R_SUCCEEDED(
+                serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, status));
+
+            state.server_running = status_ok &&
+                (status.state == DglabNetState_Listening ||
+                    status.state == DglabNetState_Paired);
+
+            appAutoSleepFollow(state.server_running);
+
+            if (!status_ok) {
+                state.link = dglabString(DglabString_StateIpcFailed);
+                state.link_tone = DglabCmdTone_Error;
+            } else {
+                state.link = dglabNetStateText(status.state);
+                state.link_tone = (status.state == DglabNetState_Paired) ? DglabCmdTone_Ok
+                                                                        : DglabCmdTone_Warn;
+            }
+        }
+
+        if (down & HidNpadButton_B)
+            break;
+
+        if (down & HidNpadButton_A)
+            toggleServer(dglab, state.server_running);
+
+        testChannelButtons(dglab, down);
+        adjustStrengthFromDirections(dglab, down);
+        repeatStrengthFromDirections(dglab, padGetButtons(pad),
+            armTicksToNs(armGetSystemTick()));
+
+        dglabTouchPoll(&touch);
+        touchProbeFrame(&touch, &state);
+        state.docked = !dglabTouchHandheld();
+
+        if (!described) {
+            described = true;
+            touchLogLine("start");
+        } else if (!have_last || state.held_a != last_held_a || state.held_b != last_held_b) {
+            touchLogLine(state.held_a && state.held_b ? "both"
+                : state.held_a ? "A" : state.held_b ? "B" : "none");
+        }
+
+        last_held_a = state.held_a;
+        last_held_b = state.held_b;
+        have_last = true;
+
+        state.sysmodule_ok = appSysmoduleOk(dglab);
+
+        if (frame % TOUCH_DISPLAY_FRAMES == 0 || drawn_generation != g_display_generation) {
+            DglabCanvas canvas;
+
+            state.channel_strength_a = g_test_strength_a;
+            state.channel_strength_b = g_test_strength_b;
+            state.last_upload = g_last_command;
+            state.last_upload_tone = g_last_command_tone;
+
+            if (dglabFramebufferBegin(&canvas)) {
+                dglabTouchScreenDraw(&canvas, &g_fonts, &state);
+                dglabFramebufferEnd();
+
+                drawn_generation = g_display_generation;
+            }
+        }
+
+        frame++;
+    }
+
+    // Leaving the mode clears what the test keys may have left playing: the mode
+    // itself uploads nothing yet.
+    noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);
+}
+
 // Error path: the console is used instead of the framebuffer, because it is the
 // rendering path that is known to work on real hardware. Without the sysmodule
 // there is nothing to draw anyway, and an empty window tells the user nothing.
@@ -1665,6 +1834,11 @@ int main(int argc, char* argv[])
 
         if (selection == DglabMenuResult_Motion) {
             runMotionView(&dglab, &pad);
+            continue;
+        }
+
+        if (selection == DglabMenuResult_Touch) {
+            runTouchView(&dglab, &pad);
             continue;
         }
 
