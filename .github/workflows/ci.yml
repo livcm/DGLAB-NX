@@ -44,32 +44,26 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Report what git sees
-        # Both Makefiles stamp every binary with `git describe --always --dirty`
-        # and fall back to "unknown" when that fails - which is what the v0.3.0
-        # release shipped, so its About page and its dglab-sys.log say nothing
-        # about the build they came from. This prints what git says instead of
-        # leaving it to be found in the binary afterwards.
+      - name: Trust the checkout
+        # Inside the container the steps run as root while the mounted
+        # workspace belongs to the runner's user, so git refused to read the
+        # repository at all: "fatal: detected dubious ownership". That is why
+        # `git describe` failed and the v0.3.0 release shipped "unknown" as its
+        # build stamp, leaving its About page and its dglab-sys.log with no way
+        # to tell which build they came from - the one thing the stamp is for.
         shell: bash
         run: |
-          # The runner gives this shell -e: a failing substitution would end
-          # the step before it can say what went wrong. It is also why the git
-          # call is captured through a file rather than $( ).
-          set +e
-          echo "user: $(id -u):$(id -g), workspace: $GITHUB_WORKSPACE"
-          ls -ld .git 2>&1 | head -n1
-          git status --porcelain 2>&1 | head -n3
+          set -uo pipefail
 
-          describe_log=$(mktemp)
-          git describe --always --dirty >"$describe_log" 2>&1
-          describe_rc=$?
-          echo "::warning::git describe rc=$describe_rc out=[$(tr '\n' '|' <"$describe_log" | sed -e 's/%/%25/g')]"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-          head_log=$(mktemp)
-          git rev-parse --short HEAD >"$head_log" 2>&1
-          echo "::warning::head rc=$? out=[$(tr '\n' '|' <"$head_log" | sed -e 's/%/%25/g')]"
-          git tag --points-at HEAD >"$head_log" 2>&1
-          echo "::warning::tags at head: [$(tr '\n' ' ' <"$head_log" | sed -e 's/%/%25/g')]"
+          # The runner's bash already runs with -e, so a failing substitution
+          # in an assignment would end the step; testing it instead reports it.
+          if ! stamp=$(git describe --always --dirty 2>&1); then
+            echo "::warning::git describe still fails: $stamp"
+            exit 1
+          fi
+          echo "build stamp: $stamp"
 
       - name: Check tag against VERSION
         # Only tag builds: the tag is what names the release, and a release
@@ -116,12 +110,21 @@ jobs:
 
           updated=0
           for attempt in 1 2 3; do
-            if dkp-pacman -Syu --needed --noconfirm switch-dev 2>&1 | tail -n20; then
+            pacman_log=$(mktemp)
+            if dkp-pacman -Syu --needed --noconfirm switch-dev >"$pacman_log" 2>&1; then
               updated=1
+              tail -n5 "$pacman_log"
               break
             fi
+            # The reason is reported, not just the fact: this update is the
+            # difference between building against the libnx the component is
+            # developed with and against the image's older one.
             echo "::warning::dkp-pacman -Syu failed (attempt $attempt)"
-            sleep 10
+            while IFS= read -r line; do
+              line=$(printf '%s' "$line" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | cut -c1-500)
+              echo "::warning::dkp-pacman: $line"
+            done < <(tail -n6 "$pacman_log")
+            sleep 15
           done
           [ "$updated" -eq 1 ] || {
             echo "::error::could not update switch-dev, refusing to build against a stale toolchain"
