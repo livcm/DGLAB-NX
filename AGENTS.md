@@ -463,7 +463,8 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
     文档里的已知边界（`docs/dglab-socket.md` 的「睡眠与唤醒」）。不改 sysmodule：`set:sys` 的
     `setsysSetSleepSettings()` 路线评估后放弃。
     验收：`make -C nro` 编译通过，`tests/canvas` 用两套文案各渲染一遍，`tests/lang` 检查新 key
-    三方一致；实机确认 applet 模式与 title override 下抑制都生效、停服后自动休眠恢复。
+    三方一致；**2026-09-18 实机确认 applet 模式与 title override 下抑制都生效**（服务端运行期间
+    主机不再自动休眠）。
 
 ### 未完成
 
@@ -483,13 +484,11 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
     C++17，也不需要安装 portlibs。
     验收：三屏 × 720p/1080p 的实机截图与改造前一致，`tests/canvas` 不受影响。
 3. Game Mod / Overlay：由于游戏与 NRO 前端不能同时运行，因此需要由 Overlay 来监控和管理 Sysmodule 和 Game Mod 的运行状态，两者同时开发；
-4. Socket V4 协议：V4 的消息外壳（`hello` / `message` / `heartbeat` / `ping` /
-    `pong` / `error` / `client_disconnected`）、`?tid=` 绑定与 V4 二维码。前置是官方
-    beta 稳定与 App 版本确认；在此之前不写半成品代码，只保留 `docs/dglab-socket.md`
-    里已核对的 V4 事实。验收：`tests/net` 增加 V4 外壳用例与回环端到端，再实机。
-5. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
+4. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
 
-### 已搁置：BLE 模式（sysmodule 直连设备）
+### 已搁置
+
+#### BLE 模式（sysmodule 直连设备）
 
 在 HOS 22.5.0 + AMS 1.11.2 上，Switch 后台 Sysmodule 直连 BLE 外设不可用
 （btm/bt 只面向任天堂自家设备；btdrv 的 BLE 事件载荷为空、GATT 客户端注册失败）。
@@ -501,3 +500,12 @@ central"（需要 exefs patch 或直接放弃）。不要在没有逆向结论�
 
 除非任务明确要求，否则不要越过上面的顺序做过早的实现：Overlay 与 Game Mod 排在
 界面与玩法之后，复杂 UI 也不要抢在核心功能稳定之前。
+
+#### Socket V4 协议
+
+由于 DG-LAB V4 App 向下兼容 Socket V3 协议，本条先不做。
+
+V4 的消息外壳（`hello` / `message` / `heartbeat` / `ping` /
+`pong` / `error` / `client_disconnected`）、`?tid=` 绑定与 V4 二维码。前置是官方
+beta 稳定与 App 版本确认；在此之前不写半成品代码，只保留 `docs/dglab-socket.md`
+里已核对的 V4 事实。验收：`tests/net` 增加 V4 外壳用例与回环端到端，再实机。
