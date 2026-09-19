@@ -84,18 +84,12 @@ jobs:
           echo "tag $GITHUB_REF_NAME matches VERSION $file_version"
 
       - name: Check the toolchain
-        # The image is expected to ship devkitA64 + libnx already (that is the
-        # whole point of the image), but the snapshot in it can lag behind the
-        # libnx the component is developed against, so the toolchain is brought
-        # up to date first: a build against an older libnx is not the build the
-        # developer runs. Its npdmtool rejected sysmodule/DGLAB-NX-Core.json
-        # outright, which reads as "the sysmodule does not build" rather than
-        # "the toolchain is stale".
-        #
-        # The update is retried and then fatal on purpose. Letting it fail
-        # quietly (which is what the first runs did) builds against whatever the
-        # image happens to carry, and that failure is far harder to read than
-        # this one.
+        # Nothing is installed here on purpose. Updating switch-dev inside the
+        # container needs pkg.devkitpro.org, which answered the runner with
+        # "failed retrieving file 'dkp-libs.db' ... error: 403" often enough to
+        # matter - and a half applied update is worse than a stale image: the
+        # toolchain it leaves behind cannot build this project at all. The
+        # versions are reported so a broken build can be told from a stale one.
         shell: bash
         run: |
           set -uo pipefail
@@ -103,36 +97,10 @@ jobs:
           echo "cc: $(cc --version 2>&1 | head -n1)"
           ls "$DEVKITPRO/libnx/include/switch" >/dev/null 2>&1 && \
             echo "libnx headers: present" || echo "::warning::libnx headers not found"
-          if ! command -v dkp-pacman >/dev/null 2>&1; then
-            echo "::error::dkp-pacman is not on PATH, so the toolchain cannot be updated"
-            exit 1
-          fi
-
-          updated=0
-          for attempt in 1 2 3; do
-            pacman_log=$(mktemp)
-            if dkp-pacman -Syu --needed --noconfirm switch-dev >"$pacman_log" 2>&1; then
-              updated=1
-              tail -n5 "$pacman_log"
-              break
-            fi
-            # The reason is reported, not just the fact: this update is the
-            # difference between building against the libnx the component is
-            # developed with and against the image's older one.
-            echo "::warning::dkp-pacman -Syu failed (attempt $attempt)"
-            while IFS= read -r line; do
-              line=$(printf '%s' "$line" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | cut -c1-500)
-              echo "::warning::dkp-pacman: $line"
-            done < <(tail -n6 "$pacman_log")
-            sleep 15
+          for pkg in libnx switch-tools devkitA64; do
+            echo "$pkg: $(dkp-pacman -Q "$pkg" 2>/dev/null || echo 'version unknown')"
           done
-          [ "$updated" -eq 1 ] || {
-            echo "::error::could not update switch-dev, refusing to build against a stale toolchain"
-            exit 1
-          }
-
-          echo "libnx: $(dkp-pacman -Q libnx 2>/dev/null || echo 'version unknown')"
-          echo "switch-tools: $(dkp-pacman -Q switch-tools 2>/dev/null || echo 'version unknown')"
+          echo "npdmtool: $(npdmtool 2>&1 | head -n1)"
 
       - name: Host tests
         shell: bash
