@@ -66,9 +66,14 @@ jobs:
         # whole point of the image), but the snapshot in it can lag behind the
         # libnx the component is developed against, so the toolchain is brought
         # up to date first: a build against an older libnx is not the build the
-        # developer runs. A failure here is a warning rather than the end of the
-        # run - a genuinely unusable toolchain still fails at the build step,
-        # and that one prints the reason.
+        # developer runs. Its npdmtool rejected sysmodule/DGLAB-NX-Core.json
+        # outright, which reads as "the sysmodule does not build" rather than
+        # "the toolchain is stale".
+        #
+        # The update is retried and then fatal on purpose. Letting it fail
+        # quietly (which is what the first runs did) builds against whatever the
+        # image happens to carry, and that failure is far harder to read than
+        # this one.
         shell: bash
         run: |
           set -uo pipefail
@@ -76,13 +81,27 @@ jobs:
           echo "cc: $(cc --version 2>&1 | head -n1)"
           ls "$DEVKITPRO/libnx/include/switch" >/dev/null 2>&1 && \
             echo "libnx headers: present" || echo "::warning::libnx headers not found"
-          if command -v dkp-pacman >/dev/null 2>&1; then
-            dkp-pacman -Syu --needed --noconfirm switch-dev || \
-              echo "::warning::dkp-pacman could not run; using what the image provides"
-            echo "libnx: $(dkp-pacman -Q libnx 2>/dev/null || echo 'version unknown')"
-          else
-            echo "::warning::dkp-pacman not on PATH; using what the image provides"
+          if ! command -v dkp-pacman >/dev/null 2>&1; then
+            echo "::error::dkp-pacman is not on PATH, so the toolchain cannot be updated"
+            exit 1
           fi
+
+          updated=0
+          for attempt in 1 2 3; do
+            if dkp-pacman -Syu --needed --noconfirm switch-dev 2>&1 | tail -n20; then
+              updated=1
+              break
+            fi
+            echo "::warning::dkp-pacman -Syu failed (attempt $attempt)"
+            sleep 10
+          done
+          [ "$updated" -eq 1 ] || {
+            echo "::error::could not update switch-dev, refusing to build against a stale toolchain"
+            exit 1
+          }
+
+          echo "libnx: $(dkp-pacman -Q libnx 2>/dev/null || echo 'version unknown')"
+          echo "switch-tools: $(dkp-pacman -Q switch-tools 2>/dev/null || echo 'version unknown')"
 
       - name: Host tests
         shell: bash
