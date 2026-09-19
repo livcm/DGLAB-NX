@@ -1,0 +1,89 @@
+#---------------------------------------------------------------------------------
+# Build, package and publish a release.
+#
+#   push a tag          build (via ci.yml) -> package -> GitHub Release
+#   manual dispatch     dry run: build, package and upload the artifact only
+#
+# The tag has to equal the root VERSION file (v<VERSION>, e.g. v0.3.0); ci.yml
+# enforces that before it compiles anything. See README.md ("发布").
+#---------------------------------------------------------------------------------
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # One definition of "build and test": the same reusable workflow PRs run.
+  build:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  package:
+    name: package + release
+    needs: build
+    # The packaging steps run on the host, not in the devkitPro container: the
+    # runner's zip and gh are what turns dist/ into an asset and a Release.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download the SD card layout
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-sd
+          path: dist
+
+      - name: Package the zip and the checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cat VERSION)
+          zip_name="DGLAB-NX-$version-sd.zip"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
+
+          # The zip's root is the SD card root - atmosphere/ and switch/ with no
+          # wrapper directory - so it extracts straight onto the card.
+          (cd dist && zip -r -X "../$zip_name" .)
+          sha256sum "$zip_name" > SHA256SUMS
+          cat SHA256SUMS
+          unzip -l "$zip_name"
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: DGLAB-NX-${{ env.VERSION }}-sd
+          path: |
+            ${{ env.ZIP_NAME }}
+            SHA256SUMS
+          if-no-files-found: error
+
+      - name: Create the GitHub Release
+        # A manual dispatch only builds and packages: there is no tag for it to
+        # name a release after, so it stays a dry run.
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --title "DGLAB-NX $VERSION" \
+            --generate-notes \
+            "$ZIP_NAME" SHA256SUMS

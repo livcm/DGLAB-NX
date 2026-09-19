@@ -1,0 +1,186 @@
+#---------------------------------------------------------------------------------
+# Build every component and run the host side tests.
+#
+#   pull_request, push to main, manual dispatch - build check
+#   workflow_call                              - release.yml reuses this, so
+#                                                "what gets built and tested"
+#                                                has exactly one definition
+#
+# The release layout is assembled here as well (release/ -> dist/), because the
+# SD card layout only ever changes in the same place as the build.
+#
+# See README.md ("发布") and AGENTS.md §8.1.
+#---------------------------------------------------------------------------------
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build + host tests
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          # The Makefiles stamp the binaries with `git describe --always
+          # --dirty`, so the tags have to be in the checkout: a shallow clone
+          # would stamp a bare commit hash where a tag was available.
+          fetch-depth: 0
+
+      - name: Check tag against VERSION
+        # Only tag builds: the tag is what names the release, and a release
+        # whose tag disagrees with VERSION would ship an NACP and an About page
+        # carrying the other number. Fail before compiling anything.
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          file_version=$(cat VERSION)
+          tag_version=${GITHUB_REF_NAME#v}
+          if [ "$tag_version" != "$file_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match VERSION ($file_version)"
+            echo "tag:     $GITHUB_REF_NAME -> $tag_version"
+            echo "VERSION: $file_version"
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches VERSION $file_version"
+
+      - name: Check the toolchain
+        # Best effort: the image is expected to ship devkitA64 + libnx already
+        # (that is the whole point of the image), and `--needed` makes this a
+        # no-op when it does. A stale package database must not fail a build
+        # that would otherwise succeed, so a failure here is only a warning -
+        # a genuinely missing toolchain still fails at the build step.
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "DEVKITPRO=${DEVKITPRO:-<unset>}"
+          if command -v dkp-pacman >/dev/null 2>&1; then
+            dkp-pacman -S --needed --noconfirm switch-dev || \
+              echo "::warning::dkp-pacman could not run; using what the image provides"
+          else
+            echo "::warning::dkp-pacman not on PATH; using what the image provides"
+          fi
+
+      - name: Host tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Discovered instead of listed, so a new tests/<name>/ is covered by
+          # existing. tests/ipc and tests/stack need devkitPro, which is here.
+          for makefile in tests/*/Makefile; do
+            dir=$(dirname "$makefile")
+            echo "::group::$dir"
+            make -C "$dir"
+            echo "::endgroup::"
+          done
+
+      - name: Build the release layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          make
+
+      - name: Assemble the SD card layout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The Title ID directory name is derived from what `make -C sysmodule
+          # package` produced: sysmodule/DGLAB-NX-Core.json stays the only
+          # place it is written down (AGENTS.md §8.1).
+          tid_dir=""
+          for dir in release/*/; do
+            if [ -f "$dir/exefs.nsp" ]; then
+              tid_dir=$(basename "$dir")
+              break
+            fi
+          done
+          if [ -z "$tid_dir" ]; then
+            echo "::error::no sysmodule package (exefs.nsp) under release/"
+            ls -R release || true
+            exit 1
+          fi
+          echo "title id directory: $tid_dir"
+          echo "TID_DIR=$tid_dir" >> "$GITHUB_ENV"
+
+          # dist/ is the SD card root: release/<TITLE_ID>/ goes under
+          # atmosphere/contents/, the front end under switch/, exactly as
+          # README.md's install section describes.
+          rm -rf dist
+          mkdir -p "dist/atmosphere/contents/$tid_dir" dist/switch/DGLAB-NX
+          cp -R "release/$tid_dir/." "dist/atmosphere/contents/$tid_dir/"
+          cp -R release/DGLAB-NX/. dist/switch/DGLAB-NX/
+
+          # The overlay is not implemented yet (overlay/AGENTS.md), so this
+          # branch does nothing today and picks it up automatically once the
+          # component starts producing DGLAB-NX-Ovl.ovl.
+          if [ -f release/DGLAB-NX-Ovl.ovl ]; then
+            mkdir -p dist/switch/.overlays
+            cp release/DGLAB-NX-Ovl.ovl dist/switch/.overlays/
+          else
+            echo "note: overlay not implemented yet, no .ovl in the package"
+          fi
+          find dist -type f | sort
+
+      - name: Check the assembled layout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # An install that is missing any of these is not installable, and the
+          # zip is built from a tree nobody inspected afterwards.
+          missing=0
+          for path in \
+            "dist/atmosphere/contents/$TID_DIR/exefs.nsp" \
+            "dist/atmosphere/contents/$TID_DIR/toolbox.json" \
+            "dist/atmosphere/contents/$TID_DIR/flags/boot2.flag" \
+            dist/switch/DGLAB-NX/DGLAB-NX.nro; do
+            if [ ! -f "$path" ]; then
+              echo "::error::missing $path"
+              missing=1
+            fi
+          done
+          if ! ls dist/switch/DGLAB-NX/lang/*.json >/dev/null 2>&1; then
+            # The NRO exits at startup when it finds no language file, so a
+            # package without lang/ is broken for every user.
+            echo "::error::no language files in dist/switch/DGLAB-NX/lang/"
+            missing=1
+          fi
+          [ "$missing" -eq 0 ] || exit 1
+
+          # The version is compiled into the NRO (NACP and About page) from the
+          # root VERSION file, so finding the string proves the binaries in this
+          # package are the ones this VERSION describes.
+          version=$(cat VERSION)
+          grep -a -F -q "$version" dist/switch/DGLAB-NX/DGLAB-NX.nro || {
+            echo "::error::VERSION $version not found in DGLAB-NX.nro"
+            exit 1
+          }
+          echo "layout ok: $TID_DIR, DGLAB-NX $version"
+
+      - name: Upload the SD card layout
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-sd
+          path: dist/
+          if-no-files-found: error
+          # switch/.overlays is a hidden directory; without this it would be
+          # dropped from the artifact once the overlay exists.
+          include-hidden-files: true

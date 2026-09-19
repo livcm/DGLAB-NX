@@ -248,6 +248,9 @@ headers/examples → 明确修改范围 → 采用最小必要修改。
   退出（见 `nro/AGENTS.md`）；
 - `<TITLE_ID>` 目录名必须由 `sysmodule/DGLAB-NX-Core.json` 推导，禁止在 Makefile、
   脚本或文档里另写一份；
+- 发布由 GitHub Actions 的 tag 触发：tag 必须等于仓库根 `VERSION`（形如 `v<VERSION>`），
+  不一致时 CI 在编译前失败；CI 的组装脚本同样从 `release/` 推导 `<TITLE_ID>`，不得另写一份。
+  流程与产物见 `.github/workflows/release.yml` 与 `README.md` 的「发布」；
 - `release/` 属于构建产物，不提交到 Git。
 
 如果当前没有自动化测试，应至少进行：

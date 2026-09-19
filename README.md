@@ -69,6 +69,7 @@ DG-LAB App（手机，负责 BLE）  ──BLE──→  DG-LAB 设备
 | `tests/` | 主机侧测试（protocol / ipc / net / qr / canvas / lang / motion / stack） |
 | `docs/` | 技术文档，见[文档](#文档) |
 | `release/` | 构建产物（不提交） |
+| `.github/workflows/` | CI：PR / push 的构建检查与 tag 发版，见[发布](#发布) |
 
 ## 构建
 
@@ -94,6 +95,37 @@ sysmodule 的 Title ID 只在 `sysmodule/DGLAB-NX-Core.json` 里写一次，Make
 前端的发行版本同样只有一个来源：仓库根 `VERSION`（当前 `0.3.0`）。根 `make` 把它传给
 `nro/Makefile`，进 NACP 与 About 页；`make -C nro package` 读的是同一个文件。IPC 接口
 版本是另一回事（`common/include/dglab/ipc.h`，见 `docs/ipc.md` 的"版本"）。
+
+## 发布
+
+发布由 GitHub Actions 完成，规则只有一条：**tag 必须等于根目录 `VERSION`**
+（tag 形如 `v<VERSION>`，当前 `VERSION` 是 `0.3.0`，所以 tag 是 `v0.3.0`）。
+
+```
+# 1. 改 VERSION（唯一版本来源，进 NACP 与 About 页）并提交
+# 2. 打 annotated tag（About 页的 build stamp 才会显示 tag 而不是短 SHA）
+git tag -a v0.3.0 -m "DGLAB-NX 0.3.0"
+git push origin v0.3.0
+```
+
+推 tag 后 `.github/workflows/release.yml` 会：
+
+1. 调用 `.github/workflows/ci.yml`：在 `devkitpro/devkita64` 容器里跑 `tests/` 下的全部
+   主机侧测试，再用根 `make` 构建；tag 与 `VERSION` 不一致会在编译前失败并打印两个版本号；
+2. 把 `release/` 组装成 SD 卡布局并校验（`exefs.nsp` / `toolbox.json` / `flags/boot2.flag` /
+   NRO / `lang/`，以及 NRO 里确实带着这个 `VERSION`）；Title ID 目录名仍从构建产物推导，
+   workflow 里没有另写一份；
+3. 打包成 `DGLAB-NX-<VERSION>-sd.zip` 与 `SHA256SUMS`，创建 Release 并附自动生成的
+   release notes。
+
+zip 里就是 SD 卡的根布局，解压到 SD 卡根目录即可（覆盖安装同理）：
+
+    atmosphere/contents/<TITLE_ID>/  →  SD:/atmosphere/contents/<TITLE_ID>/
+    switch/DGLAB-NX/                 →  SD:/switch/DGLAB-NX/
+
+PR 和 `main` 上的 push 只跑 `ci.yml`（构建 + 全部主机侧测试），不发版。
+`workflow_dispatch` 手动跑 `release.yml` 是 dry run：构建、打包、上传 artifact，但不建 Release，
+用于验证 workflow 本身。
 
 ## 安装
 
