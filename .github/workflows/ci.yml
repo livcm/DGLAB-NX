@@ -62,11 +62,13 @@ jobs:
           echo "tag $GITHUB_REF_NAME matches VERSION $file_version"
 
       - name: Check the toolchain
-        # Best effort: the image is expected to ship devkitA64 + libnx already
-        # (that is the whole point of the image), and `--needed` makes this a
-        # no-op when it does. A stale package database must not fail a build
-        # that would otherwise succeed, so a failure here is only a warning -
-        # a genuinely missing toolchain still fails at the build step.
+        # The image is expected to ship devkitA64 + libnx already (that is the
+        # whole point of the image), but the snapshot in it can lag behind the
+        # libnx the component is developed against, so the toolchain is brought
+        # up to date first: a build against an older libnx is not the build the
+        # developer runs. A failure here is a warning rather than the end of the
+        # run - a genuinely unusable toolchain still fails at the build step,
+        # and that one prints the reason.
         shell: bash
         run: |
           set -uo pipefail
@@ -75,8 +77,9 @@ jobs:
           ls "$DEVKITPRO/libnx/include/switch" >/dev/null 2>&1 && \
             echo "libnx headers: present" || echo "::warning::libnx headers not found"
           if command -v dkp-pacman >/dev/null 2>&1; then
-            dkp-pacman -S --needed --noconfirm switch-dev || \
+            dkp-pacman -Syu --needed --noconfirm switch-dev || \
               echo "::warning::dkp-pacman could not run; using what the image provides"
+            echo "libnx: $(dkp-pacman -Q libnx 2>/dev/null || echo 'version unknown')"
           else
             echo "::warning::dkp-pacman not on PATH; using what the image provides"
           fi
@@ -118,8 +121,19 @@ jobs:
       - name: Build the release layout
         shell: bash
         run: |
-          set -euo pipefail
-          make
+          set -uo pipefail
+          log=$(mktemp)
+          if make 2>&1 | tee "$log"; then
+            exit 0
+          fi
+          # Same reason as the tests above: a failing step is a bare exit code
+          # in the log, while annotations can be read without logging in.
+          echo "::error::make failed"
+          while IFS= read -r line; do
+            line=$(printf '%s' "$line" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | cut -c1-900)
+            echo "::error::make: $line"
+          done < <(grep -i -E 'error|fail|undefined|no such file|not found|cannot' "$log" | head -n12)
+          exit 1
 
       - name: Assemble the SD card layout
         shell: bash
