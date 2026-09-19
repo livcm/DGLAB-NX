@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # The Makefiles stamp the binaries with `git describe --always
           # --dirty`, so the tags have to be in the checkout: a shallow clone
@@ -71,6 +71,9 @@ jobs:
         run: |
           set -uo pipefail
           echo "DEVKITPRO=${DEVKITPRO:-<unset>}"
+          echo "cc: $(cc --version 2>&1 | head -n1)"
+          ls "$DEVKITPRO/libnx/include/switch" >/dev/null 2>&1 && \
+            echo "libnx headers: present" || echo "::warning::libnx headers not found"
           if command -v dkp-pacman >/dev/null 2>&1; then
             dkp-pacman -S --needed --noconfirm switch-dev || \
               echo "::warning::dkp-pacman could not run; using what the image provides"
@@ -81,15 +84,36 @@ jobs:
       - name: Host tests
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           # Discovered instead of listed, so a new tests/<name>/ is covered by
           # existing. tests/ipc and tests/stack need devkitPro, which is here.
+          failed=0
           for makefile in tests/*/Makefile; do
             dir=$(dirname "$makefile")
+            log=$(mktemp)
             echo "::group::$dir"
-            make -C "$dir"
-            echo "::endgroup::"
+            if make -C "$dir" 2>&1 | tee "$log"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              failed=1
+              # The job log needs a logged in reader; check run annotations do
+              # not, and the first error lines are what a reader wants anyway.
+              echo "::error::$dir failed"
+              matched=0
+              while IFS= read -r line; do
+                matched=1
+                line=$(printf '%s' "$line" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | cut -c1-900)
+                echo "::error::$dir: $line"
+              done < <(grep -i -E 'error|fail|undefined|not found' "$log" | head -n5)
+              if [ "$matched" -eq 0 ]; then
+                line=$(tail -n1 "$log" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | cut -c1-900)
+                echo "::error::$dir: $line"
+              fi
+            fi
+            rm -f "$log"
           done
+          [ "$failed" -eq 0 ] || exit 1
 
       - name: Build the release layout
         shell: bash
@@ -176,7 +200,7 @@ jobs:
           echo "layout ok: $TID_DIR, DGLAB-NX $version"
 
       - name: Upload the SD card layout
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-sd
           path: dist/
