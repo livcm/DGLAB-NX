@@ -105,7 +105,7 @@ jobs:
                 matched=1
                 line=$(printf '%s' "$line" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | cut -c1-900)
                 echo "::error::$dir: $line"
-              done < <(grep -i -E 'error|fail|undefined|not found' "$log" | head -n5)
+              done < <(grep -i -E 'error|fail|undefined|not found' "$log" | head -n12)
               if [ "$matched" -eq 0 ]; then
                 line=$(tail -n1 "$log" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | cut -c1-900)
                 echo "::error::$dir: $line"

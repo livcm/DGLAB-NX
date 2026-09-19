@@ -9,6 +9,14 @@
 CC       ?= cc
 CFLAGS   ?= -std=c11 -O2 -g
 CFLAGS   += -Wall -Wextra -Werror
+# The NRO diagnostics these tests compile are cut on purpose: the log line
+# langfiles.c writes for a bad language file is one 40 character panel line,
+# and lang_fixture.h names a path that can be longer than the buffer it lands
+# in. GCC's -Wformat-truncation cannot tell those intended cuts from a bug and
+# -Werror turns it into a build failure, which is what the CI container's GCC
+# did while the clang this is developed with has no such warning at all (it
+# ignores the option), so the flag only ever does something on GCC.
+CFLAGS   += -Wno-format-truncation
 
 ROOT     := ../..
 NRO      := $(ROOT)/nro
