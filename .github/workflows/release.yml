@@ -83,7 +83,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" \
-            --title "DGLAB-NX $VERSION" \
-            --generate-notes \
-            "$ZIP_NAME" SHA256SUMS
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # A tag that was moved after a CI fix lands here: the assets are
+            # replaced so the release matches the tag it names, and the notes
+            # are left as they are.
+            gh release upload "$GITHUB_REF_NAME" "$ZIP_NAME" SHA256SUMS --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "DGLAB-NX $VERSION" \
+              --generate-notes \
+              "$ZIP_NAME" SHA256SUMS
+          fi
