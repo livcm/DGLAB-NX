@@ -132,7 +132,13 @@ jobs:
           while IFS= read -r line; do
             line=$(printf '%s' "$line" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | cut -c1-900)
             echo "::error::make: $line"
-          done < <(grep -i -E 'error|fail|undefined|no such file|not found|cannot' "$log" | head -n12)
+          done < <(grep -i -E 'error|fail|undefined|no such file|not found|cannot' "$log" | head -n8)
+          # The tail as well: a tool that dies without saying "error", or one
+          # that prints nothing useful, still ends with the line that failed.
+          while IFS= read -r line; do
+            line=$(printf '%s' "$line" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | cut -c1-900)
+            echo "::error::make (tail): $line"
+          done < <(tail -n6 "$log")
           exit 1
 
       - name: Assemble the SD card layout
