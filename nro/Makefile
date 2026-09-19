@@ -102,7 +102,11 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:= -lnx
+# -lm is not optional: third_party/stb/stb_truetype.h calls sqrt, and the
+# devkitA64 the CI container ships (15.2.0) does not pull libm in by itself -
+# the link failed there with "undefined reference to `sqrt'" from text_ttf.o.
+# The one on macOS (16.1.0) links without it, so this only ever showed up in CI.
+LIBS	:= -lnx -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
