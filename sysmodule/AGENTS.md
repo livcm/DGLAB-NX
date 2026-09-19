@@ -138,9 +138,21 @@ Switch 侧 BLE 实现方式、官方协议到本实现的映射、已验证 / �
 
 sysmodule 的线程栈都很小：主线程由 NPDM 的 `main_thread_stack_size` 决定
 （`sysmodule/DGLAB-NX-Core.json`，**32KB**，最初是 16KB），网络线程在
-`sysmodule/source/transport/net_socket.c` 里由 `NET_THREAD_STACK_SIZE` 指定。
-这条路径上叠着 libnx 的 IPC/服务调用、newlib 的 `printf` 和 fs 写入，
-**不要在这些函数里放大缓冲区**。
+`sysmodule/source/transport/net_socket.c` 里由 `NET_THREAD_STACK_TOTAL` 的**静态 `.bss`
+栈**提供（可用栈 `NET_THREAD_STACK_SIZE`，页对齐，`ble_poc.c` 的 worker 同样写法）。这条
+路径上叠着 libnx 的 IPC/服务调用、newlib 的 `printf` 和 fs 写入，**不要在这些函数里放大
+缓冲区**。线程栈也**不要交回给堆**：sysmodule 的堆是 `main.c` 里固定的 `INNER_HEAP_SIZE`
+（512KB），libnx 的 `threadCreate()` 拿到 NULL 栈时会用 `aligned_alloc()` 从这里要一块
+（本 build 每线程 18–22KB），accept/tick 这种每次启停都新建的线程会把堆当成它的栈池。
+
+线程的回收有个必须记住的坑（`docs/dglab-socket.md` 的"反复启停后服务端起不来"）：
+
+- `threadWaitForExit()`/`threadClose()` 必须传 **live** 的 `Thread`，**不能传 join 之前的
+  副本**——libnx 的 `threadClose()` 在 `tls_array != 0`（线程还挂在它的线程链表里）时直接
+  返回 `LibnxError_BadInput` = `0x00001759` 并且什么都不释放，而副本里留着的正是线程运行
+  时的值；这样每一轮启停都会漏掉那个线程的栈、栈镜像映射和句柄，症状是"反复启停后服务端
+  起不来、必须重启主机"（堆栈版本 `rc=0x00000559`，静态栈版本 `rc=0x0000D401`）；
+- 两个调用（等待、关闭）的 `Result` 都要检查并记日志：这正是上面那条 bug 藏了很久的原因。
 
 已经踩过两次的坑：一条 `char command[1950]`（`DGLAB_SOCKET_MAX_MESSAGE`）或
 `char frame[WS_MAX_MESSAGE]` 放在栈上时，加上已有的调用链会把主线程栈压爆。症状是
@@ -152,6 +164,20 @@ sysmodule 的线程栈都很小：主线程由 NPDM 的 `main_thread_stack_size`
 
 - `net_server.c` 这类被 IPC 线程、tick 线程、客户端线程共用的代码里，KB 级缓冲区放
   `.bss`（`static`），并在注释里写明"调用方持有 transport 锁"，因为一份缓冲区就够；
+- 每个线程的栈都放在 `.bss`（`NET_THREAD_STACK_TOTAL` 大小、页对齐），`threadCreate()`
+  一律传 `stack_mem` + `sizeof()`，不要让它去堆里分配；
+- socket 写：帧层用 `WsConn.lock/unlock` 把**帧头 + payload 两次写**放进同一把锁（传输侧接连接
+  槽的 `write_mutex`），`send()` **不要带 `MSG_DONTWAIT`**（实测带它交给 `bsd:u` 的请求可能
+  永远不回，调用者挂在核里），超时靠 `SO_SNDTIMEO`；部分写或错误即 `shutdown()` 该连接；
+  **IPC 线程不做可能阻塞的 socket 写**——波形上传只入队，发送由 tick 线程做
+  （见 `docs/dglab-socket.md` 的"socket 写路径"）；
+- **锁顺序只能有一个方向：transport（`g_net.mutex`）→ frame（连接槽 `write_mutex`）**。
+  IPC / tick 线程按这个方向拿；**连接线程只拿 frame，因此它在帧锁里绝不能调用 `netLog()` 之类
+  会去拿 transport 锁的东西**——那会与该方向反向，和 tick 线程互等，整个 sysmodule 就这么挂住
+  （现象：NRO 卡死、`dglab-sys.log` 被占用打不开、没有崩溃报告）。需要记日志时把数据放进连接槽，
+  由 tick 线程下一次持锁时打印；
+- 停止路径必须检查 `threadWaitForExit()`/`threadClose()` 的 `Result` 并记日志：线程没被
+  回收时，泄漏的是它那 18–22KB 的栈，而日志里只会显示"若干次之后才失败"；
 - 每个连接自己的缓冲区（`netClientThreadMain` 的接收缓冲、`wsConnRecv` 的重组缓冲）
   必须留在那个线程的栈上，不能共享——两个客户端同时在线时共享会互相踩；
 - 栈帧由 `make -C tests/stack` 自动检查：它用 devkitA64 的 gcc 以 `-fstack-usage` 编译
@@ -159,6 +185,9 @@ sysmodule 的线程栈都很小：主线程由 NPDM 的 `main_thread_stack_size`
   scan 结果结构外，**任何函数栈帧 ≥ 1KB 就失败**（名单与理由写在
   `tests/stack/Makefile` 的 `ALLOW` 里）。新增的大缓冲区要先想想是不是该放 `.bss`，
   确实要留的再加进名单并写明理由；
+- `tests/stack` 用 `-std=gnu11` 编译：sysmodule 自己的构建不传 `-std`，而 `-std=c11` 会定义
+  `__STRICT_ANSI__`，让 newlib 藏掉 libnx `<sys/socket.h>` 里的 BSD 声明（`MSG_DONTWAIT`
+  就是其中之一）——两边的语言模式必须一致，否则检查的是另一份代码；
 - 手工量单个文件时（需要看完整列表、或想比较不同编译选项）：
 
       aarch64-none-elf-gcc -std=gnu11 -O2 -fstack-usage -D__SWITCH__ \
@@ -266,6 +295,9 @@ Sysmodule 是 **boot2 常驻**进程：它不从 SD 卡上的 NRO 启动，而�
 - 标识来自 Makefile 注入的 `git describe --always --dirty`
   （`sysmodule/include/dglab/build.h`，拿不到 git 时是 `unknown`）；
 - `dglab-sys.log` 的第一行形如 `server start, dglab 645f698-dirty`；
+- 标识是通过 `-D` 注入的，make 看不到命令行变化，所以 `sysmodule/Makefile` 把标识写进
+  `build/build-stamp` 并让全部对象依赖它：换提交、变 dirty（NRO 侧还有 `VERSION`）时会自动
+  重编，不会出现 main.o 与 net_socket.o 各报一个标识的旧二进制（2026-09-18 踩过）；
 - **日志里没有这一行 = 装的是 2026-09-16 之前的版本**。
 
 实机验证之前先确认这一行与当前 checkout 对得上；对不上就先重装再验，否则验证的是旧代码。

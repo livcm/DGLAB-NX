@@ -252,9 +252,9 @@ sysmodule 内部直接扮演控制端：
 `nifmExit`，结果缓存 2 秒（NRO 每帧轮询状态）——长期持有 nifm 会话是"网络占用"的另一个
 候选原因，先把它排除掉。
 
-截至这次改动，NRO 侧抑制只过了主机侧的编译与排版检查（`make -C nro`、`tests/canvas`、
-`tests/lang`），**实机结论还没回填**：要验的是 applet 模式下（相册进入）与 title override 下
-`appletSetAutoSleepDisabled` 都真的生效，以及主机按最短的 1 分钟自动休眠时间放着不动确实不休眠。
+**实机结论（2026-09-18）**：applet 模式（相册进入）与 title override 两种启动方式下抑制都生效，
+服务端运行期间主机不再自动休眠——`appletSetAutoSleepDisabled()` 这条路是通的，不是"调用返回成功
+但没作用"。主机侧的验证是 `make -C nro`、`tests/canvas`（两套警告文案各渲染一遍）与 `tests/lang`。
 
 ### 开机路径必须最小（血泪教训）
 
@@ -274,9 +274,10 @@ socket、服务线程、PSC 注册全部放在 `dglabNetSocketStart()` 里，也
 
 ### 栈上不要放 KB 级缓冲区（血泪教训）
 
-sysmodule 的线程栈很小（主线程来自 NPDM 的 `main_thread_stack_size`，网络线程来自
-`NET_THREAD_STACK_SIZE`），这条路径上还叠着 libnx 的 IPC/服务调用、newlib 的 `printf`
-和 SD 卡写入。**症状**：按 `ZL`/`ZR` 会让整个 sysmodule 死掉——**进程直接消失、所有 IPC
+sysmodule 的线程栈很小（主线程来自 NPDM 的 `main_thread_stack_size`，网络线程是
+`net_socket.c` 里 `NET_THREAD_STACK_TOTAL` 的静态 `.bss` 栈，见下一节），这条路径上还叠着
+libnx 的 IPC/服务调用、newlib 的 `printf` 和 SD 卡写入。**症状**：按 `ZL`/`ZR` 会让整个
+sysmodule 死掉——**进程直接消失、所有 IPC
 无响应**，客户端拿不到任何 `Result`（所以一开始被当成发送路径的问题查）。原因是
 `NET_WAVEFORM` 处理链上 `clear` 与 `pulse` 各有一个 1950 字节的栈上缓冲区
 （`char command[DGLAB_SOCKET_MAX_MESSAGE]`）；挪到 `.bss` 后不再复现。同类缓冲区
@@ -297,9 +298,148 @@ sysmodule 的线程栈很小（主线程来自 NPDM 的 `main_thread_stack_size`
 - 排查顺序：① 比对日志里的构建标识 → ② `dglab-sys.log` 最后停在哪儿 →
   ③ `sdmc:/atmosphere/crash_reports/…_00ff072107210721.log`。**"SD 卡上装的是旧二进制"
   与"代码真有 bug"表现完全一样**，先排除版本再怀疑代码；
-- 若再复现且没有崩溃报告、`dglab-sys.log` 停在某条 `tx …` 之前、NRO 几秒后自己恢复：
-  说明 IPC 线程持锁时被 socket 写入挡住（`SO_SNDTIMEO` 5 秒），把波形上传统统改成只入队
-  （由 tick 线程发）、客户端写改 `MSG_DONTWAIT` + 部分写失败即断开。
+- socket 写现在是**整帧一次写 + 非阻塞 + 失败即断开**（见"socket 写路径"一节）：日志里
+  - `write failed: … errno 32`（EPIPE）＝ 对端已经断开，属于正常收尾；
+  - `write failed: … errno 11/35`（EAGAIN/WOULDBLOCK）＝ 对端来不及收，这条连接会被主动
+    断开，不会再有线程卡在 `send()` 里；
+  - 波形上传只入队、发送全在 tick 线程：`dglab-sys.log` 停在某条 `tx waveform …` 之后，要看
+    的是 tick 线程那条链，而不再是 IPC 线程；
+- 服务端"按了几次 `A` 之后就起不来、重启主机才恢复" → 看下面的
+  "反复启停后服务端起不来（0x1759 / 0x559 / 0xD401）"。
+
+### socket 写路径：整帧、非阻塞、失败即断开（2026-09-19）
+
+一轮实机暴露的另一种死法：App 已绑定，按下 `ZL`/`ZR` 之后 sysmodule **不再应答**，
+`crash_reports/` 与 `atmosphere/fatal_errors/` 都空，`dglab-sys.log` 停在 `waveform tx: …`
+（或 tick 线程的 `tx clear-1`）与写返回之间。
+
+**"进程到底死没死"这样判断**：卡住之后用文件管理器打开 `dglab-sys.log`——
+
+- 打不开、提示"资源被占用中" ⇒ **sysmodule 还活着**（那条日志文件还开着），是**挂住**；
+- 能打开并读到内容 ⇒ 进程已经没了。
+
+2026-09-19 那次就是前者，于是按"挂住"查，先修掉一个**锁反转**（见下面的规则），又发现真正的
+卡点是 `bsd:u` 的 socket 写本身（第 16 条），于是加了一道**卡死自救**：见下面的"阶段标记 +
+看门狗"。
+
+规则：
+
+- **波形上传只入队**：`dglabNetServerUploadWaveform()` 只清队列、置 `clear_pending`、入队；
+  发送全部由 tick 线程的 `waveformPump()` 做——先发 pending 的 `clear-<ch>`、再发 batch。
+  IPC 线程永远不会停在 socket 写里；`Replace` 的"立刻重来"语义只多 ≤100ms 延迟
+  （tick 周期 100ms）。
+- **一帧两次写（帧头 → payload），互斥靠帧锁**：`wsConnSend()` 在 `WsConn.lock/unlock`
+  （传输侧接连接槽的 `write_mutex`）里先写帧头、再写 payload；握手回复也在锁内一次写完。
+  互斥来自这把帧锁，不来自"把一帧合并成一次系统调用"——2026-09-19 把帧头和 payload 合并成
+  一次 `send()` 之后就卡住了（见下一条），那次改动已经撤回。
+- **不用 `MSG_DONTWAIT`，用阻塞 `send()` + `SO_SNDTIMEO`**：2026-09-19 的探针日志
+  （`dglab-probe.log`：6 条 `send begin` 只有 5 条 `send end`，缺的那条是 tick 线程
+  `send begin: tick fd 6, 308 left`；此后 `alive:` 每秒继续涨到 66、两个日志文件一直被占用）
+  说明：带这个 flag 交给 `bsd:u` 的请求可能**永远不回**，调用者在核里挂着，flag 管不到。
+  `send()` 现在只带 `MSG_NOSIGNAL`（HOS 上无信号，等于无语义），超时由连接建立时设的
+  `SO_SNDTIMEO`(5s) 兜底；波形 batch 由 tick 线程发、IPC 线程只发小指令，所以慢对端最多拖住
+  tick 一轮，不会把 IPC 线程停住。
+- **部分写或错误即断开**：`netSocketWrite()` 遇到部分写/错误就 `shutdown()` 该连接，让连接线程
+  自己走 detach 流程——不重试。失败信息由 tick 线程打印（下一条）。
+- **锁顺序唯一：`transport` → `frame`（`slot->write_mutex`）**。IPC 与 tick 线程按这个
+  顺序拿锁；**连接线程只拿 `frame`**，因此它在写失败时**绝不能顺手记日志**——`netLog()` 要去拿
+  transport 锁，那就成了 `frame` → `transport`，与上面反向，两条线程各持一把等对方，整个
+  sysmodule 就停在那里（NRO 跟着卡死、文件被占用、没有崩溃报告）。失败信息现在由
+  `netSocketWrite()` 记进连接槽，tick 线程下一次持锁循环时打印
+  （`write failed: … bytes left, errno … fd …`）。
+
+### 诊断 socket 写卡死：探针只能走内存环（2026-09-19 用过一次的方法）
+
+"进程还活着但不再应答"这类问题，最后一次是这样定位的（原始记录见 `docs/history.md` 第 13、
+14 条；探针代码在定位结束后已经删除，`dglab-probe.log` 是留在 SD 卡上的文件，可删）：
+
+1. **先判断进程死没死**：卡住后用文件管理器打开 `dglab-sys.log`——"资源被占用"= 进程还活着
+   （挂住），能打开 = 进程没了。
+2. **探针绝对不要走 SD 日志**：把 `write begin`/`write end` 写成 `dglabNetServerLog()` 之后，
+   同样的操作就不再复现（两轮构建只差那几行日志）——SD 写入改变了 `send()` 前后的时序，把
+   bug 藏起来。正确的做法是**探针只写内存环（memcpy），由一个独立线程落盘**：那次实现是
+   `dglabNetServerProbe()` + 一个不碰 transport 锁、每 25ms 追加
+   `sdmc:/switch/DGLAB-NX/logs/dglab-probe.log`、每秒写一条 `alive:` 的线程。这样即使某个线程
+   卡在 socket 写里，最后几条探针照样落盘。
+3. **怎么读**：成对的 `send begin`/`send end` 是正常的；**只有 begin 没有 end 的那一行**就是
+   卡住（或消失）的那次系统调用（写出线程名与字节数）；`alive:` 还在继续 = 进程没死，是挂住。
+   最后一次就是这样抓到 `send begin: tick fd 6, 308 left` 没有回音（第 14 条）。
+
+**第二轮：连内存环探针也不能留在构建里**。探针拆掉之后同一个操作又复现，说明热路径里
+"每帧一次 memcpy + 一把锁"这种量级的额外工作也足以改变时序。于是换成更轻的一招（同样只写两次
+日志文件，别在热路径里做 I/O）：
+
+- **只记阶段**：`netStage()` 往几个 `volatile` 字段里写"最后到达的阶段"（`send begin/end`、
+  `log write begin/end`、tick 循环）以及线程号 / fd / 字节数 / errno——纯 store，不加锁、
+  不写盘；
+- **看门狗**：一个独立线程每 500ms 看一次这个计数器，**超过 3 秒没动**才往
+  `sdmc:/switch/DGLAB-NX/logs/dglab-stall.log` 追加一行
+  `stall: <阶段> for <n> ms, thread=…, fd=…, bytes=…, errno=…, clients=…, state=…`；
+- **读法**：`stall` 行里的阶段就是卡住的那一步——`send begin` = 卡在 socket 写里，
+  `log write begin` = 卡在 SD 日志写入里；如果 `dglab-stall.log` 没有出现或内容为空，说明卡住的
+  那条链连文件系统都进不去（看门狗自己也被挡住），这本身也是结论。
+
+**这套现在是常驻的**（2026-09-19 实机确认）：第一次实机复现抓到
+`stall: send begin for 3282 ms, thread=tick, fd=5, bytes=304`（socket 写被 `bsd:u` 挂住，阻塞
+socket + `SO_SNDTIMEO` 都没用），加上"看门狗 `shutdown()` 这个 fd"之后，第二次实机变成**会卡
+几秒但会自己恢复**（那次的记录是 `stall: log write end for 3453 ms`，SD 写的一次抖动），App
+断开后服务端正常 `stopped`、`heap stop` 与 `heap start` 相等。开销只有：热路径里几个
+`volatile` store，加一个每 500ms 醒一次的线程；它只在卡住才写文件，所以不会再掩盖问题。
+下一步若要连"卡几秒"也去掉，需要把 socket 写移出 transport 锁（挂住的线程不再挡住 IPC）。
+
+**写已经移出 transport 锁（2026-09-19）**：核心在锁内只把整帧 `memcpy` 进该连接自己的
+`slot->tx`（4KB），锁一放开就 flush——`NET_SEND` / `NET_WAVEFORM` 返回前、每次 tick poll 之后、
+以及停服时发完 `close` 帧之后。`stop` 会先丢掉里面还积压的波形数据，只把 `close` 帧（几字节）
+发出去，所以"停止服务时 App 会跟着断开"这条行为保持不变；网络栈再卡住时，被挂住的只是正在
+flush 的那个线程，IPC（NRO）继续工作。
+
+### 反复启停后服务端起不来（0x1759 / 0x559 / 0xD401，血泪教训）
+
+**症状**：在 socket 页连按 `A`，服务端启停若干次之后就再也起不来——NRO 与主机都不卡死，
+只是每一次启动都失败，必须重启主机才恢复。日志是这样两行：
+
+    listening on port 9999
+    accept thread failed rc=0x00000559
+
+同一个 bug 有两个签名：堆栈版本在**十次左右**之后报 `0x00000559`，把线程栈改成静态
+`.bss` 之后**第二次**就报 `0x0000D401`。`listen` 永远成功、只有建线程失败，说明端口与
+协议栈都没问题。
+
+**错误码**：
+
+| 码 | 含义 | 出现位置 |
+| --- | --- | --- |
+| `0x00001759` | `MAKERESULT(Module_Libnx, LibnxError_BadInput)`：`threadClose()` 拒绝回收一个仍挂在它线程链表里的 `Thread`，什么都不释放 | `thread close (<名字>) rc=0x00001759` |
+| `0x00000559` | `LibnxError_OutOfMemory`：`threadCreate()` 里 `aligned_alloc(0x1000, 栈 + TLS + reent)` 失败 | 线程栈交给那个 512KB 堆分配时 |
+| `0x0000D401` | `KERNELRESULT(InvalidMemoryState)`：`threadCreate()` 映射栈镜像失败（上一轮的镜像还在） | 线程栈是静态 `.bss` 时 |
+
+**根因**：停止路径**先复制 `Thread` 结构、再等它退出、再对副本 `threadClose()`**。libnx 的
+`threadClose()` 在 `Thread.tls_array != 0` 时直接返回 `0x1759` 并且什么都不释放——那个字段由
+`_EntryWrap` 在线程启动时写入、由 `threadExit` 在退出时清除，而清理只发生在 **live**
+结构上；副本里带的是复制那一刻（线程还在跑）的值。于是每一轮启停都留下该线程的栈、栈镜像
+映射与句柄：栈从堆里要的版本十轮左右吃光 `INNER_HEAP_SIZE`（512KB，见
+`sysmodule/source/main.c`）→ `0x559`；栈改成静态 `.bss` 之后，同一块页的镜像没被解除，下一
+次 `threadCreate()` 直接 `0xD401`。同一类"复制再关闭"的写法还在 `netStartClient()` 复用连接
+槽和 `ble_poc.c` 的 worker 上（它们通常在 join 之前线程已经自己退出，所以没暴露出来）。
+
+**修法**：`threadWaitForExit()`/`threadClose()` 一律作用于 **live** `Thread`
+（`net_socket.c` 的 `netJoinThread()` 及其三处调用点、`ble_poc.c` 一处），并且检查、记录
+`Result`：失败会写 `thread close (<名字>) rc=0x… (the thread's stack was not released)`。
+这条规则写在 `sysmodule/AGENTS.md` 的"线程与栈"一节。
+
+**加固（不是根因修复）**：线程栈仍然用静态 `.bss`（`NET_THREAD_STACK_TOTAL = 0x5000`，
+页对齐），建线程不再经过那个 512KB 堆——`ble_poc.c` 的 worker 本来就是这个写法。
+
+**怎么读探针**：每次启停各有一行（下例是实机第一次的数字）：
+
+    heap start: used=42k free=5k arena=47k (delta +0k)
+    heap stop: used=42k free=5k arena=47k (delta +0k)
+
+`delta` 是相对上一次*同一相位*的差值，`arena` 是已经向进程要下来的堆总量。反复启停时
+`used` 应当基本不动（`heap start` 的 delta 一直是 0）。若同时出现
+`thread close (…) rc=0x1759`，说明线程没被回收、下一次启动很可能就失败——这两行要一起读。
+另外 `threadCreate()` 失败发生在探针之前，所以"`listening` 之后直接失败、没有 `heap start`
+行"本身也是一种签名。
 
 ### 日志文件（SD 卡）
 
