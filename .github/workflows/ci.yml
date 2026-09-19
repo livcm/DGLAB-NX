@@ -42,6 +42,23 @@ jobs:
           # --dirty`, so the tags have to be in the checkout: a shallow clone
           # would stamp a bare commit hash where a tag was available.
           fetch-depth: 0
+          fetch-tags: true
+
+      - name: Report what git sees
+        # Both Makefiles stamp every binary with `git describe --always --dirty`
+        # and fall back to "unknown" when that fails - which is what the v0.3.0
+        # release shipped, so its About page and its dglab-sys.log say nothing
+        # about the build they came from. This prints what git says instead of
+        # leaving it to be found in the binary afterwards.
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "user: $(id -u):$(id -g), workspace: $GITHUB_WORKSPACE"
+          ls -ld .git 2>&1 | head -n1
+          described=$(git describe --always --dirty 2>&1)
+          describe_rc=$?
+          echo "::warning::git describe (rc=$describe_rc): $described"
+          echo "::warning::git head: $(git rev-parse --short HEAD 2>&1 | head -n1), tags here: $(git tag --points-at HEAD 2>&1 | tr '\n' ' ')"
 
       - name: Check tag against VERSION
         # Only tag builds: the tag is what names the release, and a release
