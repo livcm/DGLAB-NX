@@ -72,15 +72,22 @@ static void drawMarker(DglabCanvas* canvas, unsigned x, unsigned y)
 // The grid: the quarter lines of both axes. The ends of the value axis are the
 // page's own white rules, and the ends of a half's density axis are the rules'
 // ends and the centre line, so only the three lines between them are drawn -
-// enough to read a position off the panel by eye without turning the field into
-// graph paper. The ticks come from the axis the mapping uses, not from the width
-// of the panel: that is what keeps them evenly spaced now that the axis no longer
-// starts at the edge of the screen.
+// and the horizontal ones stop at the two lines that close that axis, so the
+// strip whose readings are clamped stays empty. Enough to read a position off the
+// panel by eye without turning the field into graph paper. The ticks come from
+// the axis the mapping uses, not from the width of the panel: that is what keeps
+// them evenly spaced now that the axis no longer starts at the edge of the screen.
 static void drawGrid(DglabCanvas* canvas)
 {
     const DglabTheme* theme = dglabThemeGet();
     int field_height = TOUCH_FIELD_BOTTOM - TOUCH_FIELD_TOP;
     int value_span = DGLAB_TOUCH_VALUE_BOTTOM - DGLAB_TOUCH_VALUE_TOP;
+    // The horizontal lines run exactly as far as the two white rules do: the page
+    // margin at both ends. They used to be drawn across the whole panel, which put
+    // ink in the strip beyond the density axis - the strip whose readings are
+    // clamped to the ends, so a line there described a range that cannot be
+    // dialled in (hardware request, 2026-09-19).
+    int axis_width = DGLAB_TOUCH_DENSITY_RIGHT - DGLAB_TOUCH_DENSITY_LEFT + 1;
     // One column of each half, so the axis helpers can answer where that half's
     // density axis begins and ends.
     const uint32_t probes[2] = { 0u, (uint32_t)DGLAB_TOUCH_SPLIT };
@@ -88,7 +95,7 @@ static void drawGrid(DglabCanvas* canvas)
     for (int step = 1; step < 4; step++) {
         int y = DGLAB_TOUCH_VALUE_TOP + value_span * step / 4;
 
-        dglabCanvasFill(canvas, 0, y, DGLAB_TOUCH_PANEL_WIDTH, 1, theme->muted);
+        dglabCanvasFill(canvas, DGLAB_TOUCH_DENSITY_LEFT, y, axis_width, 1, theme->muted);
     }
 
     for (int half = 0; half < 2; half++) {

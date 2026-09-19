@@ -1187,6 +1187,37 @@ static void checkFieldClearsTheBar(const char* name)
     CHECK(found == 0);
 }
 
+// The field's grid is bounded by the density axis: the horizontal quarter lines
+// start and stop at the two vertical lines the page draws, and not at the edges of
+// the screen. The strip outside the axis is exactly where a reading is clamped to
+// the end of the range, so a tick drawn out there would describe a position nobody
+// can dial in (and the pixels just past the lines are the page's own background).
+static void checkGridStaysInsideTheAxis(const char* name)
+{
+    const DglabCanvas* canvas = &g_page_canvas;
+    uint32_t background = dglabThemeGet()->background;
+    int value_span = DGLAB_TOUCH_VALUE_BOTTOM - DGLAB_TOUCH_VALUE_TOP;
+    int outside_left = dglabCanvasScale(canvas, DGLAB_TOUCH_DENSITY_LEFT - 1);
+    int outside_right = dglabCanvasScale(canvas, DGLAB_TOUCH_DENSITY_RIGHT + 1);
+    int inside = dglabCanvasScale(canvas,
+        (DGLAB_TOUCH_DENSITY_LEFT + DGLAB_TOUCH_DENSITY_RIGHT) / 2);
+
+    for (int step = 1; step < 4; step++) {
+        int y = dglabCanvasScale(canvas, DGLAB_TOUCH_VALUE_TOP + value_span * step / 4);
+
+        if (screenPixel(outside_left, y) != background ||
+            screenPixel(outside_right, y) != background) {
+            printf("    %s: the horizontal grid at y=%d runs past the density axis\n", name,
+                DGLAB_TOUCH_VALUE_TOP + value_span * step / 4);
+        }
+
+        CHECK(screenPixel(outside_left, y) == background);
+        CHECK(screenPixel(outside_right, y) == background);
+        // And the line itself is still there, between the two ends.
+        CHECK(screenPixel(inside, y) != background);
+    }
+}
+
 // A docked console gets no field at all: no grid, no centre line, no axis ends,
 // no markers - the panel is inside the dock, there is nothing to point at, and
 // lines nobody can use would only look like they could be used. What is left in
@@ -1535,8 +1566,11 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             // instead, and anything else down there is a row that did not fit.
             checkFieldClearsTheBar(name);
 
-            if (variant == 3)
+            if (variant == 3) {
                 checkDockedField(name);
+            } else {
+                checkGridStaysInsideTheAxis(name);
+            }
         }
 
         // The advanced page, on the first and the last setting: the description is
