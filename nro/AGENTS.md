@@ -45,8 +45,9 @@ HOS HID 协议。libnx 和官方 `switch-examples` 都可以作为 API 和用法
   启动时调一次（见 `docs/touch-input.md`）；
 - 唯一碰 libnx 触屏 API 的文件是 `nro/source/platform/touchscreen.c`；映射（分区、两轴、
   指归属）在平台无关的 `nro/source/touch/touch_feed.c` 里，由 `tests/touch` 守住；
-- 触屏玩法不新增参数：它读体感那份 `config/motion.cfg`（见 `docs/touch-input.md` 的
-  「参数复用」）。
+- 触屏玩法没有自己的参数：它读体感那份 `config/motion.cfg`，两种玩法共用的新参数
+  （如密度开关）也加在这一份里，由 `motion_settings.c` 统一读写（见 `docs/touch-input.md`
+  的「参数复用」）。
 
 ## UI 原则
 

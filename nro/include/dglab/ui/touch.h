@@ -33,8 +33,12 @@ typedef struct {
     unsigned y_b;
     unsigned level_a;     ///< 0..100 waveform value
     unsigned level_b;
-    unsigned frequency_a; ///< ms between pulses, from the horizontal axis
+    unsigned frequency_a; ///< ms between pulses, from the horizontal axis (or the fixed value)
     unsigned frequency_b;
+
+    /// The density switch is on: the interval is one fixed number, so the
+    /// horizontal axis is not drawn at all - there is nothing to point it at.
+    bool density_fixed;
 
     // The channel strengths the socket screen set. They are the volume this
     // mode's waveform is multiplied with, so they belong on screen - the same

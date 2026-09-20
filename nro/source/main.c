@@ -1384,6 +1384,9 @@ static void runTouchView(Service* dglab, PadState* pad)
     memset(&state, 0, sizeof(state));
     state.link = dglabString(DglabString_StateNotStarted);
     state.last_upload = "";
+    // The density switch is a parameter rather than a per-frame value: the page
+    // only needs it to know whether there is a horizontal axis worth drawing.
+    state.density_fixed = config.density_fixed;
 
     // Whatever the test buttons left queued should not play underneath the mode.
     noteCommand(dglabString(DglabString_CmdClear), sendTestCommand(dglab, DglabNetCommand_Clear, 0, 0), NULL);

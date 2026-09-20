@@ -115,6 +115,8 @@ typedef enum {
     DglabString_SetIdleStop,
     DglabString_SetFrequencyFast,
     DglabString_SetFrequencyStill,
+    DglabString_SetDensityFixed,
+    DglabString_SetFrequencyFixed,
     DglabString_SetStrengthMax,
     DglabString_DescDeadzoneEnter,
     DglabString_DescDeadzoneExit,
@@ -127,7 +129,13 @@ typedef enum {
     DglabString_DescIdleStop,
     DglabString_DescFrequencyFast,
     DglabString_DescFrequencyStill,
+    DglabString_DescDensityFixed,
+    DglabString_DescFrequencyFixed,
     DglabString_DescStrengthMax,
+    // The two words the density switch's value is drawn with. It is the one row
+    // that is not a number (motion_settings.c stores it as 0/1).
+    DglabString_DensityFixedValue,
+    DglabString_DensityVariableValue,
 
     // socket test screen
     DglabString_SocketTitle,

@@ -32,6 +32,11 @@ void dglabMotionFeedDefaultConfig(DglabMotionFeedConfig* config)
     config->frequency_still_ms = 100u;
     config->frequency_fast_ms = 30u;
 
+    // The density starts out variable, and the fixed interval is the midpoint of
+    // the two ends above - a first guess that is meant to be tuned on hardware.
+    config->density_fixed = false;
+    config->frequency_fixed_ms = 65u;
+
     config->strength_max = 100u;
 
     // The motion mode's own shape: it only ever writes a level, and the pulse
@@ -143,14 +148,21 @@ void dglabMotionFeedSetTarget(DglabMotionFeed* feed, float level, float density)
     feed->moving = level > 0.0f;
 }
 
-// The pulse interval for the window that is going out. The motion mode's density
-// is its own level (a harder swing is also a denser one); a mode that names
-// targets gets the interval it asked for.
+// The pulse interval for the window that is going out. With the shared density
+// switch on it is one number whatever the input is doing; otherwise the motion
+// mode's density is its own level (a harder swing is also a denser one), and a
+// mode that names targets gets the interval it asked for.
 static uint16_t frequencyMs(const DglabMotionFeed* feed, float level)
 {
-    float norm = feed->config.frequency_follows_level ? clamp01(level)
-                                                      : clamp01(feed->window_density);
-    float frequency = (float)feed->config.frequency_still_ms +
+    float norm;
+    float frequency;
+
+    if (feed->config.density_fixed)
+        return feed->config.frequency_fixed_ms;
+
+    norm = feed->config.frequency_follows_level ? clamp01(level)
+                                                : clamp01(feed->window_density);
+    frequency = (float)feed->config.frequency_still_ms +
         ((float)feed->config.frequency_fast_ms - (float)feed->config.frequency_still_ms) * norm;
 
     return (uint16_t)(frequency + 0.5f);

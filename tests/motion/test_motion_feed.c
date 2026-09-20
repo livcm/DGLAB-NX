@@ -281,6 +281,45 @@ static void testFrequencyGetterMatchesTheSlots(void)
     CHECK(dglabMotionFeedFrequencyMs(&g_feed) == slot.frequency_ms);
 }
 
+// The density switch, which every mode shares: with it on the interval is one
+// number whatever the swing does, and it stays there through the release. Only
+// the waveform value keeps following the movement.
+static void testFixedDensityHoldsTheInterval(void)
+{
+    DglabMotionFeedConfig config;
+    DglabNetWaveformSlot slot;
+
+    dglabMotionFeedDefaultConfig(&config);
+    config.density_fixed = true;
+    config.frequency_fixed_ms = 65;
+    dglabMotionFeedInit(&g_feed, &config);
+
+    // A hand that holds the controller still: normally the slowest end of the
+    // range, now the fixed value.
+    for (int i = 0; i < 4; i++) {
+        CHECK(stepOne(stillSample(), &slot) == 1);
+        CHECK(slot.strength == 0);
+        CHECK(slot.frequency_ms == 65);
+    }
+
+    // A full swing: normally the densest end, still the fixed value.
+    for (int i = 0; i < 8; i++) {
+        CHECK(stepOne(swingSample(), &slot) == 1);
+        CHECK(slot.frequency_ms == 65);
+    }
+
+    CHECK(slot.strength > 90); // the value is unaffected by the switch
+    CHECK(dglabMotionFeedFrequencyMs(&g_feed) == 65);
+
+    // The release: the value decays to nothing, the interval does not move.
+    for (int i = 0; i < 200 && dglabMotionFeedIsStreaming(&g_feed); i++) {
+        (void)stepOne(stillSample(), &slot);
+        CHECK(slot.frequency_ms == 65);
+    }
+
+    CHECK(!dglabMotionFeedIsStreaming(&g_feed));
+}
+
 // The rule behind the motion page's two Joy-Con rows (docs/joycon-input.md).
 // Readings only reach the feed when they reported being connected, so a sample
 // is proof that the side is alive; and since a live sensor fills the LIFO every
@@ -365,6 +404,7 @@ int main(void)
     testPacingFollowsTimeNotFrames();
     testStrengthMaxScales();
     testFrequencyGetterMatchesTheSlots();
+    testFixedDensityHoldsTheInterval();
     testSensorSideConnection();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

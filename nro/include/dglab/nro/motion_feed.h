@@ -60,14 +60,22 @@ typedef struct {
     uint16_t frequency_still_ms;
     uint16_t frequency_fast_ms;
 
+    // The density switch every mode shares (motion_settings.c owns it): while it
+    // is on the pulse interval is `frequency_fixed_ms` and nothing else - the
+    // motion mode's level and the touch mode's horizontal axis are both ignored,
+    // so the density stops being a second thing to steer. While it is off each
+    // mode keeps its own driver (see frequency_follows_level below).
+    bool density_fixed;
+    uint16_t frequency_fixed_ms; ///< the interval used while density_fixed
+
     uint8_t strength_max; ///< 0..100 waveform strength at full scale
 
     // Whether the pulse interval follows the level, which is what the motion mode
     // wants: a harder swing is also a denser one. A mode that names its own
     // targets (dglabMotionFeedSetTarget below - the touch mode, whose density is
     // the other axis of the panel) turns this off and gets exactly the interval it
-    // asks for. It is not a stored setting: motion_settings.c neither reads nor
-    // writes it, the mode decides.
+    // asks for. The mode still decides this one - motion_settings.c neither reads
+    // nor writes it - but it only has a say while density_fixed is off.
     bool frequency_follows_level;
 } DglabMotionFeedConfig;
 

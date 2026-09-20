@@ -26,6 +26,8 @@ static const DglabString kNameKeys[DglabMotionSetting_Count] = {
     [DglabMotionSetting_IdleStop] = DglabString_SetIdleStop,
     [DglabMotionSetting_FrequencyFast] = DglabString_SetFrequencyFast,
     [DglabMotionSetting_FrequencyStill] = DglabString_SetFrequencyStill,
+    [DglabMotionSetting_DensityFixed] = DglabString_SetDensityFixed,
+    [DglabMotionSetting_FrequencyFixed] = DglabString_SetFrequencyFixed,
     [DglabMotionSetting_StrengthMax] = DglabString_SetStrengthMax,
 };
 
@@ -41,8 +43,18 @@ static const DglabString kDescKeys[DglabMotionSetting_Count] = {
     [DglabMotionSetting_IdleStop] = DglabString_DescIdleStop,
     [DglabMotionSetting_FrequencyFast] = DglabString_DescFrequencyFast,
     [DglabMotionSetting_FrequencyStill] = DglabString_DescFrequencyStill,
+    [DglabMotionSetting_DensityFixed] = DglabString_DescDensityFixed,
+    [DglabMotionSetting_FrequencyFixed] = DglabString_DescFrequencyFixed,
     [DglabMotionSetting_StrengthMax] = DglabString_DescStrengthMax,
 };
+
+// The switch row's value: the screen shows a word where every other row shows a
+// number, so it is formatted here rather than through motion_settings.c.
+static void densityValue(const DglabMotionFeedConfig* config, char* out, size_t out_size)
+{
+    snprintf(out, out_size, "%s", dglabString(config->density_fixed
+            ? DglabString_DensityFixedValue : DglabString_DensityVariableValue));
+}
 
 void dglabAdvancedDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     const DglabAdvancedState* state)
@@ -72,8 +84,11 @@ void dglabAdvancedDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     memset(rows, 0, sizeof(rows));
 
     for (unsigned setting = 0; setting < (unsigned)DglabMotionSetting_Count; setting++) {
-        dglabMotionSettingsFormat(state->config, setting, values[setting],
-            sizeof(values[setting]));
+        if (dglabMotionSettingsIsSwitch(setting))
+            densityValue(state->config, values[setting], sizeof(values[setting]));
+        else
+            dglabMotionSettingsFormat(state->config, setting, values[setting],
+                sizeof(values[setting]));
 
         if (setting == selected)
             focus = count;

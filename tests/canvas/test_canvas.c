@@ -489,10 +489,28 @@ static void testAdvancedScreen(void)
     int changed;
 
     for (unsigned setting = 0; setting < (unsigned)DglabMotionSetting_Count; setting++) {
+        // The widest value the row can carry: the longest duration, or - for the
+        // one switch row - the longer of its two words.
+        int value_width = dglabCanvasTextWidth(&kFont, 1, "1000ms");
+
         CHECK(dglabMotionSettingName(setting)[0] != '\0');
         CHECK(dglabMotionSettingDescription(setting)[0] != '\0');
+
+        if (dglabMotionSettingsIsSwitch(setting)) {
+            int fixed_width =
+                dglabCanvasTextWidth(&kFont, 1, dglabString(DglabString_DensityFixedValue));
+            int variable_width =
+                dglabCanvasTextWidth(&kFont, 1, dglabString(DglabString_DensityVariableValue));
+
+            if (fixed_width > value_width)
+                value_width = fixed_width;
+
+            if (variable_width > value_width)
+                value_width = variable_width;
+        }
+
         CHECK(dglabCanvasTextWidth(&kFont, 1, dglabString(kSettingNameKeys[setting])) + 24 +
-                  dglabCanvasTextWidth(&kFont, 1, "1000ms") <=
+                  value_width <=
               DGLAB_PAGE_CONTENT_WIDTH);
     }
 
@@ -514,6 +532,38 @@ static void testAdvancedScreen(void)
 
     changed = countChangedPixels(screen_pixels, sizeof(screen_pixels), blue);
     CHECK(changed > 1280 * 720 / 2);
+
+    // The density row is the one value on the page that is a word, and the two
+    // words are different frames: a row that always drew the same one would pass
+    // every check above.
+    {
+        static uint8_t variable_pixels[1280 * 720 * 4];
+        static uint8_t fixed_pixels[1280 * 720 * 4];
+        DglabFontSet fonts = blockFonts();
+        int different = 0;
+
+        // The same row, selected, in both states - so what changes between the
+        // two frames is the switch's own word.
+        config.density_fixed = false;
+        state.selected = DglabMotionSetting_DensityFixed;
+
+        dglabCanvasInit(&canvas, variable_pixels, 1280, 720, 1280 * 4);
+        dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
+        dglabAdvancedDraw(&canvas, &fonts, &state);
+
+        config.density_fixed = true;
+
+        dglabCanvasInit(&canvas, fixed_pixels, 1280, 720, 1280 * 4);
+        dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
+        dglabAdvancedDraw(&canvas, &fonts, &state);
+
+        for (size_t i = 0; i < sizeof(fixed_pixels); i++) {
+            if (fixed_pixels[i] != variable_pixels[i])
+                different++;
+        }
+
+        CHECK(different > 0);
+    }
 }
 
 // The blend the antialiased text needs: coverage must mix, not overwrite.
@@ -1239,6 +1289,71 @@ static void checkFieldStaysInsideTheAxis(const char* name)
     }
 }
 
+// With the density fixed there is no horizontal axis to point at, so the page
+// must not draw one: the columns the two lines and the six tick marks used to
+// occupy are empty. The value axis is still drawn (its three lines cross those
+// columns, which is why the rows it sits on are skipped here), and so is the
+// centre line that splits the two halves.
+static void checkDensityAxisIsGone(const char* name)
+{
+    const DglabCanvas* canvas = &g_page_canvas;
+    uint32_t background = dglabThemeGet()->background;
+    const uint32_t probes[2] = { 0u, (uint32_t)DGLAB_TOUCH_SPLIT };
+    int value_span = DGLAB_TOUCH_VALUE_BOTTOM - DGLAB_TOUCH_VALUE_TOP;
+    int columns[2 + 2 * 3];
+    int column_count = 0;
+    int found = 0;
+
+    columns[column_count++] = DGLAB_TOUCH_DENSITY_LEFT;
+    columns[column_count++] = DGLAB_TOUCH_DENSITY_RIGHT;
+
+    for (int half = 0; half < 2; half++) {
+        uint32_t start = dglabTouchDensityStart(probes[half]);
+        int density_span = (int)(dglabTouchDensityEnd(probes[half]) - start);
+
+        for (int step = 1; step < 4; step++)
+            columns[column_count++] = (int)start + density_span * step / 4;
+    }
+
+    // Only the part of the field the page's own rows do not cover: they are drawn
+    // over it, and their text crosses every column, so the check reads the band
+    // under them - which is the band a re-enabled density axis would be drawn
+    // across as well (from the same origin the screens use: dglabListMeasure plus
+    // the list style's own offset).
+    int rows_bottom = DGLAB_PAGE_CONTENT_TOP + DGLAB_NOTE_LINE + 8 + DGLAB_ROW_HEIGHT * 5 + 8;
+
+    for (int y = rows_bottom; y < DGLAB_TOUCH_VALUE_BOTTOM; y++) {
+        bool on_value_tick = false;
+
+        for (int step = 1; step < 4; step++) {
+            if (y == DGLAB_TOUCH_VALUE_TOP + value_span * step / 4)
+                on_value_tick = true;
+        }
+
+        if (on_value_tick)
+            continue;
+
+        for (int i = 0; i < column_count; i++) {
+            int x = dglabCanvasScale(canvas, columns[i]);
+            int scaled_y = dglabCanvasScale(canvas, y);
+
+            if (screenPixel(x, scaled_y) == background)
+                continue;
+
+            if (found < 4)
+                printf("    %s: %d,%d is ink where the density axis used to be\n", name, x,
+                    scaled_y);
+
+            found++;
+        }
+    }
+
+    if (found)
+        printf("  %s: %d pixels of density axis while the density is fixed\n", name, found);
+
+    CHECK(found == 0);
+}
+
 // A docked console gets no field at all: no grid, no centre line, no axis ends,
 // no markers - the panel is inside the dock, there is nothing to point at, and
 // lines nobody can use would only look like they could be used. What is left in
@@ -1528,8 +1643,9 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
         // The touch page, in the states that change what it draws: one half held,
         // both halves held, nothing held, the docked console (which draws no field
         // at all), and a finger in each clamp band beside the density axis - the
-        // cases the axis ends exist for.
-        for (unsigned variant = 0; variant < 5; variant++) {
+        // cases the axis ends exist for. The last one is the density switch on,
+        // where the horizontal axis stops being drawn at all.
+        for (unsigned variant = 0; variant < 6; variant++) {
             DglabTouchScreenState touch;
             char name[96];
 
@@ -1574,7 +1690,17 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
                 touch.frequency_b = 30;
             }
 
+            if (variant == 5) {
+                // The density is fixed, so only the value axis is being read.
+                touch.held_a = true;
+                touch.x_a = 300;
+                touch.y_a = 200;
+                touch.level_a = 80;
+                touch.frequency_a = 65;
+            }
+
             touch.docked = variant == 3;
+            touch.density_fixed = variant == 5;
 
             snprintf(name, sizeof(name), "%s touch %u", frames, variant);
             beginPage(&canvas, blue);
@@ -1591,6 +1717,9 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
                 checkDockedField(name);
             } else {
                 checkFieldStaysInsideTheAxis(name);
+
+                if (variant == 5)
+                    checkDensityAxisIsGone(name);
             }
         }
 

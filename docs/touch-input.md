@@ -98,22 +98,32 @@
 
 ## 参数复用
 
-触屏玩法**不新增参数**：它读的是体感玩法那份
+触屏玩法**没有自己的参数**：它读的是体感玩法那份
 `sdmc:/switch/DGLAB-NX/config/motion.cfg`（唯一所有者仍是
-`nro/source/motion/motion_settings.c`），在 Advanced 页面改。
+`nro/source/motion/motion_settings.c`），在 Advanced 页面改。两种玩法共用这一份文件，
+所以新增的共用参数（`density` / `fixed density`）对两边同时生效。
 
 | 参数 | 体感玩法里的意思 | 触屏玩法里的意思 |
 | --- | --- | --- |
 | `attack` / `release` | 动作跟上 / 松开回落的时间常数 | 手指移动后输出跟上、抬手后回落的时间常数 |
 | `idle stop` | 静止多久后完全停上传 | 抬手后多久完全停上传（回落先走完） |
-| `freq fast` | 最剧烈时的脉冲间隔 | **半区右边缘**的脉冲间隔 |
-| `freq still` | 静止时的脉冲间隔 | **半区左边缘**的脉冲间隔 |
+| `freq fast` | 最剧烈时的脉冲间隔 | 密度可变时：**半区右边缘**的脉冲间隔 |
+| `freq still` | 静止时的脉冲间隔 | 密度可变时：**半区左边缘**的脉冲间隔 |
+| `density` | 波形密度（可变 / 固定） | 同左：固定时横轴不再决定脉冲间隔 |
+| `fixed density` | 密度固定时用的脉冲间隔 | 同左 |
 | `strength max` | 满强度时的波形值 | 纵轴顶端（波形值 100）对应的波形值 |
 | `deadzone enter/exit`、`gyro range`、`accel range`、`gyro/accel weight` | 动作判定与灵敏度 | **不参与**（文案里注明"仅体感模式使用"） |
 
-没写进文件的另一项由模式自己决定：`DglabMotionFeedConfig::frequency_follows_level`。
-体感玩法保持 `true`（越猛越密），触屏玩法置 `false`（密度由横轴单独给出）。它是运行时的
-开关，不是设置项。
+密度有两种状态，由共用的设置项 `density` 决定：
+
+- **可变**（默认）：每个玩法用自己的驱动。体感是"越猛越密"（`frequency_follows_level =
+  true`，间隔在 `freq still` 与 `freq fast` 之间按波形值插值），触屏是横轴
+  （`false`，间隔按手指在该半区里的位置插值）；
+- **固定**：间隔恒为 `fixed density`，波形值与横轴都不再影响它；波形值、包络、抬手淡出与
+  停流规则照旧。
+
+`DglabMotionFeedConfig::frequency_follows_level` 仍然是模式自己决定的运行时字段（不由
+`motion_settings.c` 读写），但只在 `density` 为可变时起作用。
 
 ## 模块划分
 
@@ -131,8 +141,8 @@
 | --- | --- | --- |
 | `nro/include/dglab/nro/touch_panel.h` | 面板几何（分界、两轴端点、最大手指数）与原始读数类型 | 是（纯类型） |
 | `nro/include/dglab/platform/touchscreen.h` + `nro/source/platform/touchscreen.c` | libnx 侧：初始化、drain、诊断行、掌机判定 | 否（要实机） |
-| `nro/include/dglab/nro/touch_feed.h` + `nro/source/touch/touch_feed.c` | 分区、指归属、两轴公式 | **是**（`tests/touch`，83 项） |
-| `nro/include/dglab/ui/touch.h` + `nro/source/ui/touch.c` | 玩法页（中线、网格、触点、数值行、底座提示） | **是**（`tests/canvas`） |
+| `nro/include/dglab/nro/touch_feed.h` + `nro/source/touch/touch_feed.c` | 分区、指归属、两轴公式 | **是**（`tests/touch`，103 项） |
+| `nro/include/dglab/ui/touch.h` + `nro/source/ui/touch.c` | 玩法页（中线、网格、触点、数值行、底座提示、密度固定时收起横轴） | **是**（`tests/canvas`） |
 | `nro/source/main.c` 的 `runTouchView` | 每帧驱动、上传、按键、日志 | 否 |
 
 文件名有意错开：NRO 的 Makefile 把所有源文件按 **basename** 展平到同一个 build 目录，
@@ -149,6 +159,9 @@
   框内那一侧，而不是越出边界线）；**横向刻度线的跨度与两条白线完全相同（x=24..1255）**，
   也就是只画在
   两条端点竖线之间——端点之外是夹紧带，那里不画任何刻度（画了就等于描述一个拨不到的位置）；
+- **密度固定时不画横轴**：`density = 固定` 时横轴不再决定脉冲间隔，所以竖向刻度与两条端点
+  竖线都不画（中线保留——它分的是两个半区，不是量程）；纵向的波形值刻度照画，玩法区仍然
+  整幅可触，密度行里的值恒为 `fixed density`；
 - 内容列里的行（沿用体感页的结构）：`连接` / `左半区（A 通道）` / `右半区（B 通道）` /
   `通道强度 A` / `通道强度 B`，两行的值就是当前上传的波形值与脉冲间隔（如
   `波形值 62  密度 45ms`），没按到显示"未触摸"；
@@ -183,8 +196,11 @@
 3. **多指**：左右各一指同时按，两路都在输出；同一半区再按一指，输出跟着新按下的那一指；
 4. **边界**：摸页头带＝满值、摸底栏＝不出声；把手指从中间拖到另一半，前一路停了、后一路
    开始；
-5. **两端极值**：左半区把手指推到最左应看到 100ms、推到中线附近应看到 30ms，右半区同理
-   （这是这次改密度轴端点的目的）；
+5. **两端极值**（密度＝可变）：左半区把手指推到最左应看到 100ms、推到中线附近应看到
+   30ms，右半区同理（这是这次改密度轴端点的目的）；
+5b. **密度固定**：高级参数页把 `density` 切成「固定」再进玩法，玩法区应只剩中线与波形值
+   刻度（没有竖向密度刻度、没有两条端点竖线），行里的密度恒为 `fixed density`，手指左右
+   移动不再改变它、上下移动仍然改变波形值；体感玩法那边同样应看到脉冲间隔不再随挥动变化；
 6. **底座**：插上底座后玩法区应为空、行下方出现居中的"无法触摸"提示，`B` 与 `D-pad`
    仍能用；**如果提示没出现**，说明 `appletGetOperationMode()` 在 applet 模式下不可靠，
    下一步改用页框架重建 1080p 时那条已经实机验证过的底座信号（`dglabFramebufferScale()`）；

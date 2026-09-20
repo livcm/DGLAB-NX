@@ -25,7 +25,9 @@
 //   /tmp/preview /tmp/font.bin /tmp/touch.bmp touch     (the touch mode)
 //   /tmp/preview /tmp/font.bin /tmp/touchdock.bmp touchdock  (a docked console)
 //   /tmp/preview /tmp/font.bin /tmp/touchclamp.bmp touchclamp  (past both axis ends)
+//   /tmp/preview /tmp/font.bin /tmp/touchfixed.bmp touchfixed  (density fixed)
 //   /tmp/preview /tmp/font.bin /tmp/advanced.bmp advanced  (the motion parameters)
+//   /tmp/preview /tmp/font.bin /tmp/advdensity.bmp advanceddensity  (the density rows)
 //   /tmp/preview /tmp/font.bin /tmp/log.bmp log        (the sysmodule log page)
 //   /tmp/preview /tmp/font.bin /tmp/aboutlow.bmp aboutlow  (the About page, end)
 //   /tmp/preview /tmp/font.bin /tmp/dock.bmp menu dock (the docked 1080p frame)
@@ -140,8 +142,8 @@ int main(int argc, char** argv)
 
     if (argc < 3) {
         fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> [normal|nowifi|stopped|"
-                        "log|menu|motion|touch|touchdock|touchclamp|advanced|about|aboutlow]"
-                        " [dock]\n");
+                        "log|menu|motion|touch|touchdock|touchclamp|touchfixed|advanced|"
+                        "advanceddensity|about|aboutlow] [dock]\n");
         return 2;
     }
 
@@ -363,23 +365,28 @@ int main(int argc, char** argv)
         dglabMotionScreenDraw(&canvas, &g_fonts, &motion);
     } else if (argc >= 4 && (strcmp(argv[3], "touch") == 0 ||
                                 strcmp(argv[3], "touchdock") == 0 ||
-                                strcmp(argv[3], "touchclamp") == 0)) {
+                                strcmp(argv[3], "touchclamp") == 0 ||
+                                strcmp(argv[3], "touchfixed") == 0)) {
         DglabTouchScreenState touch;
         bool docked = strcmp(argv[3], "touchdock") == 0;
         bool clamp = strcmp(argv[3], "touchclamp") == 0;
+        bool fixed = strcmp(argv[3], "touchfixed") == 0;
 
         memset(&touch, 0, sizeof(touch));
         touch.held_a = !docked;
         touch.x_a = clamp ? 0 : 300;
         touch.y_a = 260;
         touch.level_a = clamp ? 100 : 69;
-        touch.frequency_a = clamp ? 100 : 52;
+        touch.frequency_a = fixed ? 65 : (clamp ? 100 : 52);
         touch.held_b = !docked;
         touch.x_b = clamp ? DGLAB_TOUCH_PANEL_WIDTH - 1 : 900;
         touch.y_b = 420;
         touch.level_b = clamp ? 0 : 41;
-        touch.frequency_b = clamp ? 30 : 60;
+        touch.frequency_b = fixed ? 65 : (clamp ? 30 : 60);
         touch.docked = docked;
+        // With the density fixed the horizontal axis is not the input any more,
+        // so the field is drawn without it.
+        touch.density_fixed = fixed;
         touch.channel_strength_a = 20;
         touch.channel_strength_b = 0;
         touch.link = dglabString(DglabString_StateConnected);
@@ -390,7 +397,8 @@ int main(int argc, char** argv)
         touch.sysmodule_ok = true;
 
         dglabTouchScreenDraw(&canvas, &g_fonts, &touch);
-    } else if (argc >= 4 && strcmp(argv[3], "advanced") == 0) {
+    } else if (argc >= 4 && (strcmp(argv[3], "advanced") == 0 ||
+                                strcmp(argv[3], "advanceddensity") == 0)) {
         DglabMotionFeedConfig motion_config;
         DglabAdvancedState advanced;
 
@@ -404,6 +412,14 @@ int main(int argc, char** argv)
         advanced.config = &motion_config;
         advanced.selected = DglabMotionSetting_FrequencyFast;
         advanced.saved = true;
+
+        // The second name turns the density switch on and puts the cursor on the
+        // row below it, so both new rows - the one that shows a word and the one
+        // it makes meaningful - are on screen together.
+        if (strcmp(argv[3], "advanceddensity") == 0) {
+            motion_config.density_fixed = true;
+            advanced.selected = DglabMotionSetting_FrequencyFixed;
+        }
 
         dglabAdvancedDraw(&canvas, &g_fonts, &advanced);
     } else if (argc >= 4 && strcmp(argv[3], "log") == 0) {

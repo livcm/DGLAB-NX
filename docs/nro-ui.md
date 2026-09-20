@@ -121,8 +121,11 @@
   init/deinit/drawChar/scrollWindow/flushAndSwap 回调），官方示例里已经有现成的 deko3d 版
   （`examples/switch/graphics/deko3d/deko_console/source/gpu_console.c`，486 行）和
   OpenGL 版（`opengl/gpu_console`，467 行），纯文字界面迁移成本很低；
-- 待实测：swapchain 的图像是否接受 PitchLinear；若不行，就退化成"CPU 写纹理 + blit
-  到 swapchain"，仍属于路线 A；
+- ~~待实测：swapchain 的图像是否接受 PitchLinear~~ **2026-09-19 已查清：不接受**。deko3d
+  是按 `DkImageFormat` 查一张固定的格式表，把表里的 libnx tiled 格式交给
+  `nwindowConfigureBuffer`，**不看图像自己的 layout 标志**；所以只能走"CPU 写线性缓冲 +
+  GPU 拷贝进交换链图像"这条退化分支（仍不需要着色器）。依据与做法见下面的
+  「deko3d 后端迁移方案（2026-09-19）」；
 - `uam -s vert|frag …`（`tools/bin`）能把示例的 `.glsl` 编成 `.dksh`；
   `examples/switch/graphics/deko3d/deko_basic` 在本机完整构建通过；
   `dkCmdBufCopyBufferToImage` 与 `dkCmdBufBlitImage`（带线性过滤标志）都在 `deko3d.h`
@@ -151,6 +154,156 @@ Overlay 是另一个进程里的另一套渲染，与本条互不影响。
 - 会冲突的是"让 GPU 直接画每个字形"（glyph atlas + 着色器直接往 swapchain 画）：文本渲染
   会和后端绑在一起，主机上的排版预览也会失效；
 - 本地化已经做完（`lang/` + `pl` 系统字体），字体光栅化仍然是 CPU 的活。
+
+## deko3d 后端迁移方案（2026-09-19）
+
+路线 A 的落地方案（决定见上一节的 2026-09-17）。**绘制层 `nro/source/ui/canvas.c` 与五个
+屏幕一行不改**：CPU 照旧把界面画进一块线性缓冲区，换掉的只有 `nro/source/platform/` 里
+那一个"像素怎么送上屏"的后端文件。
+
+### 目标与非目标
+
+- 目标：呈现层从 libnx framebuffer 换成 deko3d（device / queue / 交换链 / 命令列表），
+  每帧把 CPU 画好的线性缓冲区用 2D 引擎拷进交换链图像再 present；
+- 这是**为后续 GPU 绘制与动画铺路**：交换链与呈现路径先立起来，路线 B（矩形、二维码、
+  字形交给 GPU）才有地方接；
+- 非目标：不写着色器、不引入 portlibs 与 C++17（`deko3d.h` 的 C API 就够）、不改字体与
+  布局、不碰 IPC / 输入 / 按需重绘。**它不是用来解决清晰度或性能的**——现有 720p/1080p
+  缩放与按需重绘都够用。
+
+### 先查清的问题：交换链不收 PitchLinear 图像
+
+`AGENTS.md` §15 未完成第 2 条写的"开工前先确认 swapchain 是否接受 PitchLinear"已结案，
+办法是反汇编 `libdeko3d.a`（0.5.0）的 `dk_swapchain.o` 与 `libnx.a` 的 `framebuffer.o`：
+
+| 事实 | 依据 |
+| --- | --- |
+| 交换链图像由**应用创建**（`DkSwapchainMaker.pImages`），`dkSwapchainCreate` 只把它们注册给 `nwindowGetDefault()` | `deko3d.h` + `examples/switch/graphics/deko3d/deko_basic` |
+| `dk::detail::Swapchain::initialize` 只按图像的 `DkImageFormat` 查一张固定的格式表，把表里的 libnx `NvGfxFormat`（8 字节）交给 `nwindowConfigureBuffer`，pitch 由它自己按 `align64(width × bpp)` 算，**完全不看图像的 `DkImageFlags_PitchLinear`** | `dk_swapchain.o` 反汇编 + `.rodata` 里的 9 项 formatTable |
+| 该表给 `DkImageFormat_RGBA8_Unorm` 的值是 `0x0000000100532120`，与 libnx `g_nvColorFmtTable[PIXEL_FORMAT_RGBA_8888-1]` **逐位相同** | 同上 + `framebuffer.o` 的 `.rodata.g_nvColorFmtTable` |
+| 这个格式对应的就是硬件 tiled 面：libnx `framebufferEnd` 里那段按 `&1`/`&0xc` 取 tile 再 16 字节搬运的循环，正是把 `framebufferMakeLinear` 的 shadow 线性缓冲 swizzle 进它（`framebufferEnd` 的官方注释也写着"converting it to the layout expected by the compositor"） | `framebuffer.o` 反汇编 + `display/framebuffer.h` 注释 |
+
+所以**把 PitchLinear 图像直接交给交换链，显示端仍会按 tiled 读，结果是花屏**。路线 A 因此
+定为原来的退化分支：CPU 写线性缓冲 → GPU 拷贝进交换链图像。顺带查清的两条同样影响写法：
+
+- `dkSwapchainDestroy` 内部会 `nwindowReleaseBuffers`（`dk_swapchain.o` 的析构就是一条
+  `b nwindowReleaseBuffers`），与 `framebufferClose` 对称——console 视图切换那套纪律
+  （先销毁后端再 `consoleInit`，退出后重建）照搬即可；
+- `dkDeviceCreate` / `dkDeviceDestroy` 走的是 `nvInitialize`/`nvMapInit`/`nvFenceInit`/
+  `nvGpuInit` 与对应的 Exit，和 libnx framebuffer 同一套，所以底座切换、进出 BLE PoC
+  反复建销是允许的模式。
+
+上面这些结论用 `/opt/devkitpro/devkitA64/bin/` 里的 binutils 就能复核（不需要真机）：
+
+```
+ar x /opt/devkitpro/libnx/lib/libdeko3d.a dk_swapchain.o    # 同理取 libnx.a 里的 framebuffer.o
+objdump -d --no-show-raw-insn dk_swapchain.o                # Swapchain::initialize 与析构
+readelf -S --wide dk_swapchain.o                            # 找 formatTable 所在的 .rodata 节号
+readelf -x <节号> dk_swapchain.o                            # 9 项 × 16 字节的格式表
+```
+
+### 每帧在做什么
+
+    按键/轮询 → 需要重绘？
+      → dkQueueAcquireImage(queue, swapchain)      阻塞到有槽（相当于 framebufferBegin）
+      → dglabCanvasInit(画布[slot], stride = 宽 × 4)
+      → 屏幕照旧画进 canvas（一行不改）
+      → 记录一条命令：dkCmdBufCopyBufferToImage(画布[slot] → 交换链图[slot])
+      → dkQueueSubmitCommands + dkQueuePresentImage
+
+不重绘的帧依旧一次都不调用 Begin/End：交换链停在上一张，画面保持不动——与现在
+`framebufferBegin/End` 的按需重绘语义相同。
+
+### 要建的资源
+
+| 资源 | 参数 | 说明 |
+| --- | --- | --- |
+| device / queue | `dkDeviceCreate`；`dkQueueCreate`（`DkQueueFlags_Graphics`） | 同 `deko_basic`；不使用着色器 |
+| 交换链图像 ×2 | `RGBA8_Unorm`、`UsageRender \| UsagePresent`，宽高 = 1280×720 或 1920×1080，来自 `GpuCached \| Image` 的 memblock | 与 `deko_basic` 一致（present 路径的已知可用配方），但**不带**它那个 `HwCompression`：我们不写 3D，压缩没有收益，还给 present 多一步解压。要是 2D 拷贝在这种组合下花屏或报错，先加 `Usage2DEngine`、再按 `deko_basic` 原样加回 `HwCompression`——一次 spike 能收敛 |
+| swapchain | `dkSwapchainMakerDefaults(device, nwindowGetDefault(), images, 2)` | `initialize` 内部自己 `nwindowSetDimensions(宽, 高)`，**所以后端不用再设窗口尺寸** |
+| 画布 ×2 | `CpuUncached \| GpuCached` 的普通 memblock，`宽 ×4 ×高` 字节 | 每槽一块，CPU 只写不读；stride 恰好是 `宽 ×4`（1280/1920 都是 64 的倍数），所以 `DkCopyBuf` 的 `rowLength`/`imageHeight` 传 0 取默认即与传 stride 等价（`gpu_console.c` 就是这么用的；反汇编确认 0 = `宽 × bpp`） |
+| 命令缓冲 | `CpuUncached \| GpuCached`，16~64 KB | 每帧记录一条拷贝，`FinishList` + `dkCmdBufClear` 复用 |
+| 字体 | `default_font_bin` / `pl` 共享字体 | 与后端无关，仍是今天这两个来源 |
+
+两块画布（而不是一块）是必须的：acquire 到的槽保证的是**那张交换链图**的上一次呈现已完成，
+它不保证上一帧从另一块画布发起的拷贝已经读完。一块画布 + 每帧 `dkQueueWaitIdle` 也能成立，
+代价是 CPU 与 GPU 串行、省 8.29 MB（底座）。
+
+### 接口与文件改动
+
+接口形状一条都不变，只把"framebuffer"这个后端专属的词从名字里去掉：
+
+    dglabFramebufferOpen/Close/Begin/End/Font/Scale   →   dglabDisplayOpen/Close/Begin/End/Font/Scale
+
+| 文件 | 改动 |
+| --- | --- |
+| `nro/include/dglab/platform/display.h` | 由 `framebuffer.h` 改名，声明上面六个函数（注释写明"两个后端都实现它"） |
+| `nro/source/platform/deko3d.c` | **新增**，约 300 行：设备/队列/交换链/画布/拷贝/呈现 + 资源释放 |
+| `nro/source/platform/framebuffer.c` | 只改函数名与 include；作为回退后端留在树里 |
+| `nro/source/main.c`（15 处）、`nro/source/platform/font.c`（1 处） | 机械改名 |
+| `nro/Makefile` | `LIBS := -ldeko3d -lnx -lm`（deko3d 排在 libnx 前，同官方示例）；加一个 `DISPLAY=deko3d\|framebuffer` 开关（默认值按实施步骤推进），用它过滤掉另一份后端源文件（两份不能同时编译） |
+| `tests/canvas`、`nro/source/ui/**`、`common/`、`sysmodule/` | **不动**（`tests/canvas` 只编译 `nro/source/ui/*.c`，根本看不到后端） |
+
+1080p 与失败回退这两件事要说清楚：现在 `openAt()` 是"先试 1920×1080，失败再退回
+1280×720"，但 deko3d 内部出错走的是 `RaiseError` → `diagAbortWithResult`（libnx 致命错误
+页），**不会**把失败当 Result 还给我们。所以：
+
+- 尺寸选择改成先自己做一次 `nwindowSetDimensions(win, 宽, 高)` 探测（它返回 `Result`，
+  正是 deko3d 内部要调的那一步），成功才按这个尺寸建交换链，失败就退回 720p——探测与
+  deko3d 内部那次调用等价，重复调用是幂等的；
+- 后端仍然对 `dkDeviceCreate` / `dkQueueCreate` / `dkSwapchainCreate` 的 NULL 句柄做判断，
+  但要知道：deko3d 内部失败会先弹致命错误页，**"建不起来就回退 console 错误页"这条在
+  deko3d 下只能覆盖一部分情况**，这是与 framebuffer 后端的真实差别。
+
+### 实施步骤
+
+每一步都能单独编译、单独回退，真机验收不过就停在那一步：
+
+1. **改名与接口抽象**（行为零变化）：`display.h` + `dglabDisplay*`，后端仍只有 framebuffer；
+2. **加 deko3d 后端**，`DISPLAY=framebuffer` 仍是默认；主机上跑 `tests/canvas`，真机用
+   `make -C nro DISPLAY=deko3d` 只验菜单一屏；
+3. **默认切到 deko3d**，真机验收下面整张清单（这一条通过才算迁移完成）；
+4. 清理：删掉 framebuffer 后端与 `DISPLAY` 开关，更新 `nro/AGENTS.md` 的 UI 原则与
+   `AGENTS.md` §15 第 2 条，本节补上实机实测结果。
+
+### 验收
+
+电脑侧（现在就能做，且必须与改造前一致）：
+
+```
+make -C nro                       # 编译 + 链接 -ldeko3d
+make -C tests/canvas              # 绘制层未动，必须一条用例都不变
+```
+
+真机侧（迁移完成的判据）：
+
+1. 五个屏幕（菜单 / socket / motion / advanced / about）× 掌机 720p 与底座 1080p 的画面
+   与改造前一致；二维码仍能扫；
+2. 底座插拔（重建交换链）连续十几次不黑屏、不卡死；
+3. 进出 BLE PoC 控制台（`consoleInit` 与 deko3d 抢同一个 `nwindowGetDefault()`）；
+4. 按需重绘：不重绘的帧画面不动、不闪；
+5. 帧时间：底座整帧 8.29 MB 的拷贝应当比现在 `framebufferEnd` 的整帧 CPU swizzle 更快，
+   若反而更慢，说明这条路线选错了，回退到第 2 步的后端开关再评估。
+
+### 风险与已知边界
+
+| 风险 | 影响 | 处理 |
+| --- | --- | --- |
+| 交换链图像的 flag 组合（`HwCompression` / `Usage2DEngine`）与 2D 拷贝不合 | 花屏或断言 | 一次 spike 能收敛；最坏回到"画布建成 PitchLinear 的 `DkImage` + `dkCmdBufBlitImage`" |
+| deko3d 内部失败是致命错误页，不是返回值 | 这条路径下的回退比现在弱 | 保留 framebuffer 后端一个版本作为开关；尺寸探测按上面那样自己做 |
+| 反复建销 device / queue | 底座切换、BLE PoC 进出 | 与 libnx 同一套 nv* 生命周期，验收项 2、3 专门盯它 |
+| 内存 | 底座多一块画布 8.29 MB（交换链 2 张 + 画布 2 块 ≈ 33 MB，现在是 2 张 tiled + 1 块 shadow ≈ 25 MB） | 接受；要省就退回"一块画布 + 每帧 `dkQueueWaitIdle`" |
+| NRO 体积 | libdeko3d 全部对象的 `.text` 合计 56,690 B，实际链接更少；当前 `.nro` 385 KB | 可接受 |
+| applet 模式下的可用性 | NRO 通常跑在 applet 模式 | deko3d 是 hbmenu 等现成 homebrew 在用的路径，风险低，但真机验收第 1 条覆盖它 |
+
+### 决策点
+
+1. **两块画布**（多 8.29 MB、CPU/GPU 不串行）还是**一块画布 + 每帧 `dkQueueWaitIdle`**
+   （省 8.29 MB、每帧停一次）——建议前者，与今天"双缓冲 + 按需重绘"的结构一致；
+2. **是否保留 framebuffer 后端一个版本**作为 `DISPLAY=` 开关——建议保留，等真机验收全部
+   通过再删；
+3. **接口是否改名**（`dglabFramebuffer*` → `dglabDisplay*`）——建议改，否则后端换了名字还在
+   撒谎；改动只有 16 处调用，且一次纯机械提交。
 
 ## 本地化（简中 / 英文）
 
@@ -318,7 +471,9 @@ QR 编码器是自己写的（devkitPro 里没有可用 QR 库），所以它必
   `D-pad` 上下选参数、左右改值（**按一下只走一格**，按住 0.5 秒后才开始连发、每 0.2 秒
   一格）、`Y` 恢复默认、`B` 保存返回。每次改动都写进
   `sdmc:/switch/DGLAB-NX/config/motion.cfg`，体感玩法进入时读取；参数清单见
-  `docs/joycon-input.md`；
+  `docs/joycon-input.md`。其中 `density`（波形密度：可变 / 固定）是唯一值显示成词而不是
+  数字的一行——它由 `dglabMotionSettingsIsSwitch()` 标出来，值取 `density_fixed_value` /
+  `density_variable_value` 两条文案，两种玩法共用（见 `docs/touch-input.md`）；
 - `motion (Joy-Con)` 玩法（`nro/source/ui/motion.c`）见 `docs/joycon-input.md`；
 - `about` 页显示发行版本、IPC 版本、构建标识、源码地址与两行偏好设置（语言：左右键
   循环切换；颜色主题：`Y` 循环切换；上下键滚动）；发行版本是列表的第一行值，页头右侧

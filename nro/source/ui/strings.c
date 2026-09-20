@@ -99,6 +99,8 @@ static const char* const kKeys[DglabString_Count] = {
     [DglabString_SetIdleStop] = "set_idle_stop",
     [DglabString_SetFrequencyFast] = "set_frequency_fast",
     [DglabString_SetFrequencyStill] = "set_frequency_still",
+    [DglabString_SetDensityFixed] = "set_density_fixed",
+    [DglabString_SetFrequencyFixed] = "set_frequency_fixed",
     [DglabString_SetStrengthMax] = "set_strength_max",
     [DglabString_DescDeadzoneEnter] = "desc_deadzone_enter",
     [DglabString_DescDeadzoneExit] = "desc_deadzone_exit",
@@ -110,7 +112,11 @@ static const char* const kKeys[DglabString_Count] = {
     [DglabString_DescIdleStop] = "desc_idle_stop",
     [DglabString_DescFrequencyFast] = "desc_frequency_fast",
     [DglabString_DescFrequencyStill] = "desc_frequency_still",
+    [DglabString_DescDensityFixed] = "desc_density_fixed",
+    [DglabString_DescFrequencyFixed] = "desc_frequency_fixed",
     [DglabString_DescStrengthMax] = "desc_strength_max",
+    [DglabString_DensityFixedValue] = "density_fixed_value",
+    [DglabString_DensityVariableValue] = "density_variable_value",
 
     // socket test screen
     [DglabString_SocketTitle] = "socket_title",

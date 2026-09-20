@@ -27,6 +27,10 @@ static const SettingRange kRanges[DglabMotionSetting_Count] = {
     { "idle_stop_ms", "idle stop", 100.0f, 2000.0f, 50.0f, 0 },
     { "frequency_fast_ms", "freq fast", 10.0f, 500.0f, 5.0f, 0 },
     { "frequency_still_ms", "freq still", 10.0f, 1000.0f, 10.0f, 0 },
+    // The density switch is stored as 0/1 like every other line, but the screen
+    // shows the two words below instead of the number.
+    { "density_fixed", "density", 0.0f, 1.0f, 1.0f, 0 },
+    { "frequency_fixed_ms", "fixed density", 10.0f, 500.0f, 5.0f, 0 },
     { "strength_max", "strength max", 1.0f, 100.0f, 1.0f, 0 },
 };
 
@@ -37,7 +41,22 @@ static bool settingIsMilliseconds(unsigned setting)
 {
     return setting == DglabMotionSetting_Attack || setting == DglabMotionSetting_Release ||
            setting == DglabMotionSetting_IdleStop || setting == DglabMotionSetting_FrequencyFast ||
-           setting == DglabMotionSetting_FrequencyStill;
+           setting == DglabMotionSetting_FrequencyStill ||
+           setting == DglabMotionSetting_FrequencyFixed;
+}
+
+// The one setting that is a switch: its value is a word on screen, not a number.
+bool dglabMotionSettingsIsSwitch(unsigned setting)
+{
+    return setting == DglabMotionSetting_DensityFixed;
+}
+
+static bool* boolField(DglabMotionFeedConfig* config, unsigned setting)
+{
+    switch (setting) {
+        case DglabMotionSetting_DensityFixed: return &config->density_fixed;
+        default: return NULL;
+    }
 }
 
 static float* floatField(DglabMotionFeedConfig* config, unsigned setting)
@@ -68,8 +87,12 @@ static uint32_t* msField(DglabMotionFeedConfig* config, unsigned setting)
 static float settingValue(const DglabMotionFeedConfig* config, unsigned setting)
 {
     DglabMotionFeedConfig* mutable_config = (DglabMotionFeedConfig*)config;
+    bool* b = boolField(mutable_config, setting);
     float* f = floatField(mutable_config, setting);
     uint32_t* ms = msField(mutable_config, setting);
+
+    if (b)
+        return *b ? 1.0f : 0.0f;
 
     if (f)
         return *f;
@@ -80,6 +103,7 @@ static float settingValue(const DglabMotionFeedConfig* config, unsigned setting)
     switch (setting) {
         case DglabMotionSetting_FrequencyFast: return (float)config->frequency_fast_ms;
         case DglabMotionSetting_FrequencyStill: return (float)config->frequency_still_ms;
+        case DglabMotionSetting_FrequencyFixed: return (float)config->frequency_fixed_ms;
         case DglabMotionSetting_StrengthMax: return (float)config->strength_max;
         default: return 0.0f;
     }
@@ -110,12 +134,15 @@ static void fixRelations(DglabMotionFeedConfig* config)
 static void setSetting(DglabMotionFeedConfig* config, unsigned setting, float value)
 {
     const SettingRange* range = &kRanges[setting];
+    bool* b = boolField(config, setting);
     float* f = floatField(config, setting);
     uint32_t* ms = msField(config, setting);
 
     value = clampf(value, range->min, range->max);
 
-    if (f) {
+    if (b) {
+        *b = value >= 0.5f;
+    } else if (f) {
         *f = value;
     } else if (ms) {
         *ms = (uint32_t)(value + 0.5f);
@@ -126,6 +153,9 @@ static void setSetting(DglabMotionFeedConfig* config, unsigned setting, float va
                 break;
             case DglabMotionSetting_FrequencyStill:
                 config->frequency_still_ms = (uint16_t)(value + 0.5f);
+                break;
+            case DglabMotionSetting_FrequencyFixed:
+                config->frequency_fixed_ms = (uint16_t)(value + 0.5f);
                 break;
             case DglabMotionSetting_StrengthMax:
                 config->strength_max = (uint8_t)(value + 0.5f);
@@ -168,6 +198,14 @@ void dglabMotionSettingsFormat(const DglabMotionFeedConfig* config, unsigned set
         return;
 
     range = &kRanges[setting];
+
+    // The switch has no unit and no number: the screen replaces this with the
+    // localized word, and this is what a console-free caller prints.
+    if (dglabMotionSettingsIsSwitch(setting)) {
+        snprintf(out, out_size, "%s",
+            settingValue(config, setting) >= 0.5f ? "fixed" : "variable");
+        return;
+    }
 
     if (range->decimals == 0)
         snprintf(number, sizeof(number), "%.0f", (double)settingValue(config, setting));
@@ -222,6 +260,14 @@ const char* dglabMotionSettingDescription(unsigned setting)
         case DglabMotionSetting_FrequencyStill:
             return "The pulse interval while still. This is what the output starts from as a "
                    "movement fades out.";
+        case DglabMotionSetting_DensityFixed:
+            return "Variable lets the pulse interval follow the mode - the motion mode follows "
+                   "the swing, the touch mode follows how far right the finger is. Fixed holds "
+                   "the interval at the value below, so only the waveform value moves.";
+        case DglabMotionSetting_FrequencyFixed:
+            return "The pulse interval used while the density is fixed. Smaller is denser: more "
+                   "pulses per second at the same amplitude is also more current. The device "
+                   "floor is 10ms.";
         case DglabMotionSetting_StrengthMax:
             return "The waveform strength at full intensity, on top of the channel strength set "
                    "in Socket test. The device multiplies the two.";

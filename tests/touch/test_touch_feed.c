@@ -411,6 +411,51 @@ static void testSharedParameters(void)
     CHECK(g_slots[0].strength == 80);
 }
 
+// The shared density switch on: the horizontal axis stops mattering, so both
+// ends of a half upload the same interval - and it is the fixed value, not
+// either end of the still/fast range. The value axis keeps working.
+static void testFixedDensityIgnoresTheAxis(void)
+{
+    DglabMotionFeedConfig config;
+
+    dglabMotionSettingsDefault(&config);
+    config.frequency_follows_level = false;
+    config.density_fixed = true;
+    config.frequency_fixed_ms = 40;
+    resetStreams(&config);
+
+    // The far left of the left half, which is normally the slowest end.
+    resetFeed();
+    holdAt(0, DGLAB_TOUCH_VALUE_TOP, 1);
+
+    for (int i = 0; i < 40; i++)
+        stepSlot(&g_stream_a, HALF_A);
+
+    CHECK(g_slots[0].strength == config.strength_max);
+    CHECK(g_slots[0].frequency_ms == 40);
+
+    // The far right, which is normally the densest end: the same interval.
+    resetFeed();
+    resetStreams(&config);
+    holdAt(DGLAB_TOUCH_SPLIT - 1, DGLAB_TOUCH_VALUE_TOP, 1);
+
+    for (int i = 0; i < 40; i++)
+        stepSlot(&g_stream_a, HALF_A);
+
+    CHECK(g_slots[0].frequency_ms == 40);
+
+    // And the interval follows the parameter, not the position.
+    config.frequency_fixed_ms = 15;
+    resetStreams(&config);
+    resetFeed();
+    holdAt(DGLAB_TOUCH_SPLIT / 2, DGLAB_TOUCH_VALUE_TOP, 1);
+
+    for (int i = 0; i < 40; i++)
+        stepSlot(&g_stream_a, HALF_A);
+
+    CHECK(g_slots[0].frequency_ms == 15);
+}
+
 // Lifting the finger runs the release curve and then stops uploading, exactly the
 // way a controller that stops being sampled does in the motion mode - and the
 // pulse interval stays where the finger left it while the value decays.
@@ -538,6 +583,7 @@ int main(void)
     testPositionsBecomeSlots();
     testDensityIsNotTheValue();
     testSharedParameters();
+    testFixedDensityIgnoresTheAxis();
     testReleaseThenStop();
     testClampBandsReachTheEnds();
     testHeldAtZeroIsSilent();

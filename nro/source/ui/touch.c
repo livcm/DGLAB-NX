@@ -83,7 +83,11 @@ static void drawMarker(DglabCanvas* canvas, unsigned x, unsigned y)
 // panel by eye without turning the field into graph paper. The ticks come from
 // the axis the mapping uses, not from the width of the panel: that is what keeps
 // them evenly spaced now that the axis no longer starts at the edge of the screen.
-static void drawGrid(DglabCanvas* canvas)
+//
+// While the density is fixed the horizontal axis does nothing, so its ticks are
+// not drawn: ink there would describe a position that cannot be dialled in. The
+// value axis is unaffected - that one is still the input.
+static void drawGrid(DglabCanvas* canvas, bool density_fixed)
 {
     const DglabTheme* theme = dglabThemeGet();
     int field_height = TOUCH_FIELD_BOTTOM - TOUCH_FIELD_TOP;
@@ -104,14 +108,16 @@ static void drawGrid(DglabCanvas* canvas)
         dglabCanvasFill(canvas, DGLAB_TOUCH_DENSITY_LEFT, y, axis_width, 1, theme->muted);
     }
 
-    for (int half = 0; half < 2; half++) {
-        uint32_t start = dglabTouchDensityStart(probes[half]);
-        int density_span = (int)(dglabTouchDensityEnd(probes[half]) - start);
+    if (!density_fixed) {
+        for (int half = 0; half < 2; half++) {
+            uint32_t start = dglabTouchDensityStart(probes[half]);
+            int density_span = (int)(dglabTouchDensityEnd(probes[half]) - start);
 
-        for (int step = 1; step < 4; step++) {
-            int x = (int)start + density_span * step / 4;
+            for (int step = 1; step < 4; step++) {
+                int x = (int)start + density_span * step / 4;
 
-            dglabCanvasFill(canvas, x, TOUCH_FIELD_TOP, 1, field_height, theme->muted);
+                dglabCanvasFill(canvas, x, TOUCH_FIELD_TOP, 1, field_height, theme->muted);
+            }
         }
     }
 }
@@ -131,13 +137,21 @@ static void drawField(DglabCanvas* canvas, const DglabTouchScreenState* state)
 
     dglabCanvasSetClip(canvas, 0, TOUCH_FIELD_TOP, DGLAB_TOUCH_PANEL_WIDTH, field_height);
 
-    drawGrid(canvas);
+    drawGrid(canvas, state->density_fixed);
 
-    dglabCanvasFill(canvas, DGLAB_TOUCH_DENSITY_LEFT, TOUCH_FIELD_TOP, 1, field_height,
-        theme->rule);
+    // The centre line splits the two halves, so it stays whatever the density is
+    // doing; the two lines that close the density axis go with the axis.
+    if (!state->density_fixed) {
+        dglabCanvasFill(canvas, DGLAB_TOUCH_DENSITY_LEFT, TOUCH_FIELD_TOP, 1, field_height,
+            theme->rule);
+    }
+
     dglabCanvasFill(canvas, DGLAB_TOUCH_SPLIT, TOUCH_FIELD_TOP, 1, field_height, theme->rule);
-    dglabCanvasFill(canvas, DGLAB_TOUCH_DENSITY_RIGHT, TOUCH_FIELD_TOP, 1, field_height,
-        theme->rule);
+
+    if (!state->density_fixed) {
+        dglabCanvasFill(canvas, DGLAB_TOUCH_DENSITY_RIGHT, TOUCH_FIELD_TOP, 1, field_height,
+            theme->rule);
+    }
 
     if (state->held_a)
         drawMarker(canvas, state->x_a, state->y_a);

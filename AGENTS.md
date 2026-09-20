@@ -468,6 +468,16 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
     验收：`make -C nro` 编译通过，`tests/canvas` 用两套文案各渲染一遍，`tests/lang` 检查新 key
     三方一致；**2026-09-18 实机确认 applet 模式与 title override 下抑制都生效**（服务端运行期间
     主机不再自动休眠）。
+13. 波形密度的共用开关：高级参数页新增 `density`（可变 / 固定）与 `fixed density`
+    （默认 65ms，10~500ms、5ms 一格），存在同一份 `config/motion.cfg` 里，所以对任意玩法
+    （体感、触屏）都生效。可变＝各玩法沿用原来的驱动（体感跟随波形值、触屏跟随横轴），
+    固定＝脉冲间隔恒为 `fixed density`，波形值与包络照旧跟随输入；触屏页在固定模式下不再
+    画密度轴（竖向刻度与两条端点竖线），中线与波形值刻度保留。`frequency_follows_level`
+    仍是模式自定的运行时字段，只在可变时起作用。改动集中在 `motion_feed`（间隔的唯一出口）、
+    `motion_settings`（多一个开关型设置）与触屏页的绘制；IPC、协议、sysmodule 一行未改。
+    验收：`tests/motion` 覆盖默认值/步进/夹紧/文件往返与旧文件升级、`tests/touch` 覆盖固定
+    时横轴失效、`tests/canvas` 覆盖参数页两行与固定模式下密度轴不画、`tests/lang` 覆盖新 key；
+    实机确认待做。
 
 ### 未完成
 
@@ -475,9 +485,10 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
     100、底栏上方那条 0），横轴＝脉冲密度（**外端＝两条白线的端点 x=24/1255，内端＝中线**，
     连线之外夹紧——手指够不到屏幕边缘，用边缘当端点会让密度停在 32～98ms），纯位置
     驱动；抬手沿 `release` 曲线淡出、超 `idle stop` 停流（沿用“全零批次不上传”）。
-    参数与体感玩法共用一份 `config/motion.cfg`，不新增参数，复用 `NET_WAVEFORM` 与
+    参数与体感玩法共用一份 `config/motion.cfg`（没有触屏专属参数；共用的密度开关见
+    上面第 13 条），复用 `NET_WAVEFORM` 与
     `motion_feed` 的包络/节奏逻辑。输入层、映射层、玩法页与上传都已实现，主机测试在
-    `tests/touch`（83 项）与 `tests/canvas`/`tests/lang`，资料与设计见 `docs/touch-input.md`。
+    `tests/touch`（103 项）与 `tests/canvas`/`tests/lang`，资料与设计见 `docs/touch-input.md`。
     2026-09-19 实机确认可正常运行。**剩余：两端极值与主机模式提示的实机验收**
     （底座进玩法应看到玩法区留白 + 居中提示）、手感调参，然后把实测数据（LIFO 深度、坐标、
     可达范围）写回 `docs/touch-input.md`。

@@ -9,6 +9,7 @@
 
 #include <dglab/nro/motion_feed.h>
 
+#include <stdbool.h>
 #include <stddef.h>
 
 typedef enum {
@@ -23,6 +24,8 @@ typedef enum {
     DglabMotionSetting_IdleStop,
     DglabMotionSetting_FrequencyFast,  ///< interval at full intensity
     DglabMotionSetting_FrequencyStill, ///< interval while still
+    DglabMotionSetting_DensityFixed,   ///< waveform density: variable or fixed
+    DglabMotionSetting_FrequencyFixed, ///< the interval while it is fixed
     DglabMotionSetting_StrengthMax,    ///< waveform strength at full intensity
     DglabMotionSetting_Count,
 } DglabMotionSetting;
@@ -37,9 +40,17 @@ void dglabMotionSettingsDefault(DglabMotionFeedConfig* config);
 /// larger jump.
 void dglabMotionSettingsStep(DglabMotionFeedConfig* config, unsigned setting, int steps);
 
-/// The value as the screen shows it, e.g. "0.05", "6.00" or "30ms".
+/// The value as the screen shows it, e.g. "0.05", "6.00" or "30ms". The switch
+/// row answers "fixed" or "variable" instead of a number; the screen draws the
+/// localized words for it (dglab/ui/strings.h) and this is the plain word a
+/// console-free caller prints.
 void dglabMotionSettingsFormat(const DglabMotionFeedConfig* config, unsigned setting, char* out,
     size_t out_size);
+
+/// True for the one setting that is a switch rather than a number. The screen
+/// shows a word for it (the file still stores 0 or 1, and Format answers in the
+/// same plain words the console-free caller can print).
+bool dglabMotionSettingsIsSwitch(unsigned setting);
 
 /// What the setting does, in one sentence.
 const char* dglabMotionSettingDescription(unsigned setting);
