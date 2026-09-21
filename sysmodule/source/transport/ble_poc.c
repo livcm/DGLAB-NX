@@ -56,6 +56,12 @@
 // probe can show that a filter on the old value finds nothing.
 #define POC_UUID16_LEGACY_ADVERTISED_SERVICE 0x1812u
 
+// Company id in the advertisement's manufacturer specific data (AD type 0xFF)
+// as the phone scanner reports it after the device's firmware update. It is the
+// BLE module vendor's id - SIG company identifier 0x000A is "Qualcomm
+// Technologies International (QTIL)", the former CSR - not DG-LAB's.
+#define POC_ADVERTISED_COMPANY_ID 0x000Au
+
 // Sentinel for the control scan in pocScanControlCompany: not a UUID, so it can
 // never collide with a real filter.
 #define POC_FILTER_CONTROL_COMPANY 0xFFFEu
@@ -949,8 +955,8 @@ static bool pocSubscribe(PocWorker* w)
 // relying on the event handle firing.
 static void pocRunBtdrvScanProbe(PocWorker* w)
 {
-    static const u16 kInterval[3] = { 0x0060u, 0x0060u, 0x0030u };
-    static const u16 kWindow[3] = { 0x0030u, 0x0030u, 0x0030u };
+    static const u16 kInterval[4] = { 0x0060u, 0x0060u, 0x0060u, 0x0030u };
+    static const u16 kWindow[4] = { 0x0030u, 0x0030u, 0x0030u, 0x0030u };
     static u8 previous_event[sizeof(((BtdrvBleEventInfo*)0)->data)];
     BtdrvAddress scanned_address;
     Event event;
@@ -962,7 +968,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v11 (filters the advertised 0x180C, three filter modes)");
+    pocLog("btdrv probe: v12 (also filters the advertised manufacturer id 0x000A)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
@@ -1019,14 +1025,18 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     rc = btdrvEnableBleScanFilter(false);
     pocLog("btdrv probe: EnableBleScanFilter(false) rc=0x%08X", (u32)rc);
 
-    // Three phases, because the filter's meaning on this firmware is not
-    // documented anywhere: no filter at all, the advertised service UUID
-    // (0x180C since the device's firmware update) with the filter enabled, and
-    // the same filter with the filter switched off again.
-    static const u16 kPhaseUuid[3] = { 0x0000u, POC_UUID16_ADVERTISED_SERVICE, 0x0000u };
-    static const bool kPhaseFilterOn[3] = { false, true, false };
+    // Four phases, because the filter's meaning on this firmware is not
+    // documented anywhere: no filter at all, a filter on the advertised service
+    // UUID (0x180C since the device's firmware update), a filter on the
+    // manufacturer-specific data the new firmware advertises, and finally the
+    // UUID filter with the filter switched off again.
+    static const u16 kPhaseUuid[4] = {
+        0x0000u, POC_UUID16_ADVERTISED_SERVICE, 0x0000u, POC_UUID16_ADVERTISED_SERVICE,
+    };
+    static const u16 kPhaseCompany[4] = { 0x0000u, 0x0000u, POC_ADVERTISED_COMPANY_ID, 0x0000u };
+    static const bool kPhaseFilterOn[4] = { false, true, true, false };
 
-    for (u32 phase = 0; phase < 3 && !pocStopRequested(); phase++) {
+    for (u32 phase = 0; phase < 4 && !pocStopRequested(); phase++) {
         u32 deadline;
         u32 fetches = 0;
         u32 empties = 0;
@@ -1057,6 +1067,27 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
             rc = btdrvAddBleScanFilterCondition(&filter);
             pocLog("btdrv probe: AddBleScanFilterCondition(0x%04X, type 0x03) rc=0x%08X",
                 uuid, (u32)rc);
+        }
+
+        if (kPhaseCompany[phase] != 0) {
+            BtdrvBleAdvertiseFilter filter;
+            u16 company = kPhaseCompany[phase];
+
+            // Manufacturer specific data: AD type 0xFF, then the company id in
+            // little endian (docs/ble-poc.md).
+            memset(&filter, 0, sizeof(filter));
+            filter.index = 0;
+            filter.adv.size = 2;
+            filter.adv.type = 0xFF;
+            filter.adv.data[0] = (u8)(company & 0xFF);
+            filter.adv.data[1] = (u8)(company >> 8);
+            filter.mask[0] = 0xFF;
+            filter.mask[1] = 0xFF;
+            filter.mask_size = 2;
+
+            rc = btdrvAddBleScanFilterCondition(&filter);
+            pocLog("btdrv probe: AddBleScanFilterCondition(company 0x%04X, type 0xFF) rc=0x%08X",
+                company, (u32)rc);
         }
 
         rc = btdrvEnableBleScanFilter(kPhaseFilterOn[phase]);
