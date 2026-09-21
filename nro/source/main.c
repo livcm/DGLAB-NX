@@ -1934,9 +1934,11 @@ int main(int argc, char* argv[])
         // The BLE PoC view takes the console and the screen over, so the
         // framebuffer and the shared font are released while it runs and built
         // again afterwards - including the fonts, which used to be left closed
-        // (see appDisplayReopen).
+        // (see appDisplayReopen). It drives the IPC session this loop already
+        // holds: the sysmodule registers with max_sessions=1, so the view opening
+        // its own session would fail with 0x615 while the socket page works.
         appDisplaySuspend();
-        dglabBlePocViewRun();
+        dglabBlePocViewRun(&dglab);
 
         if (!appDisplayReopen())
             break;

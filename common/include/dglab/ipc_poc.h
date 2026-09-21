@@ -67,12 +67,32 @@ enum {
     DglabPocAction_ScanWithAdvertisedUuid = 9, ///< Scan filtered by 0x1812 only.
     DglabPocAction_ScanWithGeneralFilter = 10, ///< Scan using btm's general (manufacturer data) filter.
     DglabPocAction_ProbeBtdrvScan = 11, ///< Last driver-level attempt: set scan parameters and poll btdrv's BLE event queue.
+    // Identity probe: read the local adapter's own properties and the BLE
+    // channel map, then run the GATT client register/unregister sequence.
+    // Those reads are self-validating (a name, a MAC, a channel bitmap), which
+    // is what decides whether libnx's btdrv command numbers still match the
+    // firmware's: a drifted number returns success with nothing usable.
+    DglabPocAction_ProbeBtdrvIdentity = 12,
+    // Positive control for "does btm's scan machinery run for this process at
+    // all": btm's general scan is a manufacturer-data filter and the stored
+    // value is Nintendo's company ID, which matches nothing in a normal room.
+    // Each press scans for the next company ID that phones and earbuds actually
+    // advertise. Only a hit is a verdict; a miss is not.
+    DglabPocAction_ScanWithCommonCompany = 13,
 };
 
 // Direct connect: skip the scan entirely and connect to this address. Useful
 // because btm's scan filters are system configured and may not match a generic
 // BLE peripheral.
 #define DGLAB_POC_START_FLAG_TARGET_ADDRESS (1u << 0)
+
+// Start without the diagnostic probes. The BLE manager binds its internal
+// connection to the session that first initialized it, and the identity probe
+// (and the driver-level probe) both touch that state; a session started for a
+// plain scan therefore has to be able to opt out, otherwise "does btm scan for
+// this process at all" can never be observed on a clean console. See
+// docs/ble-re.md.
+#define DGLAB_POC_START_FLAG_SKIP_PROBES (1u << 1)
 
 typedef struct {
     u64 applet_resource_user_id;

@@ -303,11 +303,32 @@ static bool pocStateIsActive(u32 state)
     }
 }
 
-static Result pocSendStart(Service* dglab)
+// Scanning and probing cannot share a session: the probes touch the BLE manager
+// state (see docs/ble-re.md), so a session started for a scan asks the sysmodule
+// to skip them. Pressing A starts a normal session, which runs the automatic
+// identity probe in the first session after a boot.
+static bool pocActionIsScan(u32 action)
+{
+    switch (action) {
+        case DglabPocAction_Rescan:
+        case DglabPocAction_ScanWithProtocolUuid:
+        case DglabPocAction_ScanWithAdvertisedUuid:
+        case DglabPocAction_ScanWithGeneralFilter:
+        case DglabPocAction_ScanWithCommonCompany:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static Result pocSendStart(Service* dglab, bool skip_probes)
 {
     DglabPocStartRequest request = { 0 };
 
     request.applet_resource_user_id = appletGetAppletResourceUserId();
+
+    if (skip_probes)
+        request.flags |= DGLAB_POC_START_FLAG_SKIP_PROBES;
 
     g_target_address_valid = loadTargetAddress(request.target_address);
 
@@ -327,7 +348,7 @@ static Result pocSendAction(Service* dglab, u32 action)
     return serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_ACTION, request);
 }
 
-void dglabBlePocViewRun(void)
+void dglabBlePocViewRun(Service* dglab)
 {
     consoleInit(NULL);
 
@@ -351,13 +372,13 @@ void dglabBlePocViewRun(void)
     printf("querying sysmodule...\n");
     consoleUpdate(NULL);
 
-    Service dglab;
-    Result rc = smGetService(&dglab, DGLAB_IPC_SERVICE_NAME);
-
+    // The session belongs to the caller (see the header): this view must not
+    // open its own, because the sysmodule serves one session at a time.
+    DglabIpcVersion version = { 0 };
+    Result rc = serviceDispatchOut(dglab, DGLAB_IPC_CMD_GET_VERSION, version);
     if (R_FAILED(rc)) {
-        printf("\nDGLAB sysmodule not found (0x%08X)\n", rc);
-        printf("Install the sysmodule and reboot the console.\n");
-        printf("If it is installed, check that it is running.\n");
+        printf("GetVersion failed (0x%08X)\n", rc);
+        printf("The sysmodule stopped while this view was open.\n");
         printf("\nPress + to exit.\n");
         consoleUpdate(NULL);
 
@@ -368,15 +389,6 @@ void dglabBlePocViewRun(void)
             consoleUpdate(NULL);
         }
 
-        consoleExit(NULL);
-        return;
-    }
-
-    DglabIpcVersion version = { 0 };
-    rc = serviceDispatchOut(&dglab, DGLAB_IPC_CMD_GET_VERSION, version);
-    if (R_FAILED(rc)) {
-        printf("GetVersion failed (0x%08X)\n", rc);
-        serviceClose(&dglab);
         consoleExit(NULL);
         return;
     }
@@ -392,10 +404,10 @@ void dglabBlePocViewRun(void)
         // to know whether a run is active, because the sysmodule drops actions
         // when no worker is running.
         memset(&status, 0, sizeof(status));
-        status_rc = serviceDispatchOut(&dglab, DGLAB_IPC_POC_CMD_STATUS, status);
+        status_rc = serviceDispatchOut(dglab, DGLAB_IPC_POC_CMD_STATUS, status);
 
         if (R_SUCCEEDED(status_rc))
-            pocPollLog(&dglab);
+            pocPollLog(dglab);
 
         bool run_active = R_SUCCEEDED(status_rc) && pocStateIsActive(status.state);
 
@@ -403,10 +415,10 @@ void dglabBlePocViewRun(void)
             break;
 
         if (down & HidNpadButton_A)
-            pocSendStart(&dglab);
+            pocSendStart(dglab, false);
 
         if (down & HidNpadButton_Minus)
-            serviceDispatch(&dglab, DGLAB_IPC_POC_CMD_STOP);
+            serviceDispatch(dglab, DGLAB_IPC_POC_CMD_STOP);
 
         u32 action = 0;
 
@@ -430,14 +442,23 @@ void dglabBlePocViewRun(void)
             action = DglabPocAction_ScanWithGeneralFilter;
         else if (down & HidNpadButton_Left)
             action = DglabPocAction_ProbeBtdrvScan;
+        else if (down & HidNpadButton_Right)
+            action = DglabPocAction_ProbeBtdrvIdentity;
+        // Same action on the right stick button: the first hardware attempt
+        // pressed that instead of the D-pad, and the identity probe is the one
+        // step the static analysis is blocked on (docs/ble-re.md).
+        else if (down & HidNpadButton_StickR)
+            action = DglabPocAction_ProbeBtdrvIdentity;
+        else if (down & HidNpadButton_StickL)
+            action = DglabPocAction_ScanWithCommonCompany;
 
         if (action != 0) {
             // Start a run first when idle so a single button press works from
             // the idle screen.
             if (!run_active)
-                pocSendStart(&dglab);
+                pocSendStart(dglab, pocActionIsScan(action));
 
-            pocSendAction(&dglab, action);
+            pocSendAction(dglab, action);
         }
 
         consoleClear();
@@ -463,11 +484,12 @@ void dglabBlePocViewRun(void)
         printf("A start  X zero-B0  B battery  R aruid0  L auto  Y disconn  - stop  + exit\n");
         printf("ZL rescan(0x1812->0x180C)  ZR scan 0x180C  Up scan 0x1812  Down general filter\n");
         printf("Left btdrv scan probe (sets scan parameters, polls the queue)\n");
+        printf("Right(D-pad)/StickR identity probe (automatic in the first session after boot)\n");
+        printf("scan keys start a session with the probes skipped (clean scan)\n");
+        printf("StickL control scan (common manufacturer IDs; a hit proves scanning works)\n");
 
         consoleUpdate(NULL);
     }
-
-    serviceClose(&dglab);
 
     if (g_log_file != NULL)
         fclose(g_log_file);
