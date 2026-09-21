@@ -399,9 +399,20 @@ void dglabBlePocViewRun(Service* dglab)
     DglabPocStatus status;
     Result status_rc = 0;
 
+    // The key that opened this page - A in the menu - is still reported as
+    // "pressed down" by the first padUpdate here, and that used to start a
+    // session (and with it the identity probe) before the user touched
+    // anything. Swallow the buttons of the first frame.
+    bool swallow_first_frame = true;
+
     while (appletMainLoop()) {
         padUpdate(&pad);
         u64 down = padGetButtonsDown(&pad);
+
+        if (swallow_first_frame) {
+            swallow_first_frame = false;
+            down = 0;
+        }
 
         // Refresh the status before handling buttons: the action handling needs
         // to know whether a run is active, because the sysmodule drops actions
