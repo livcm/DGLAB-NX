@@ -1011,7 +1011,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v16 (dumps the full scan result so the AD bytes are visible)");
+    pocLog("btdrv probe: v17 (dumps the device record where it actually appears)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
@@ -1381,6 +1381,19 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                         info.scan_result.address.address[2], info.scan_result.address.address[3],
                         info.scan_result.address.address[4], info.scan_result.address.address[5],
                         info.scan_result.rssi);
+
+                    // The device record is the interesting payload and this is
+                    // where it shows up: dump its AD structures (the
+                    // manufacturer data at AD type 0xFF is what btm's general
+                    // scan needs as pattern_data).
+                    for (u32 row = 0; row < 6u; row++) {
+                        const u8* p = info.data + row * 16u;
+
+                        pocLog("btdrv probe:   %03X %02X%02X%02X%02X %02X%02X%02X%02X "
+                            "%02X%02X%02X%02X %02X%02X%02X%02X", row * 16u,
+                            p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+                            p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+                    }
                 }
             }
 
