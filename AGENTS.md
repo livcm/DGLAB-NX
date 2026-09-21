@@ -434,76 +434,21 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
 2. 建立 Sysmodule；
 3. 建立 IPC；
 4. 实现可离线测试的 Socket V3 协议层（编解码、强度状态机、会话层）并在电脑上测试；
-5. 实现 WebSocket 模式传输：Switch 作为 WebSocket 服务端，手机 DG-LAB App 通过
-   局域网接入（BLE 由手机负责，Switch 不直接持有蓝牙连接）：
-   1. WebSocket 握手与帧（平台无关 + 主机测试）；
-   2. DG-LAB Socket 协议消息（绑定、强度、波形、清空、心跳）；
-   3. Sysmodule 网络模块与 IPC 命令；
-   4. NRO 界面（连接信息、地址/二维码、测试按钮）；
+5. 实现 WebSocket 模式传输；
 6. 把 V3 波形/强度数据接到 Socket 协议（复用协议层已有的波形编码）；
 7. 实现最小 NRO Client 的完整交互；
 8. 实现 Joy-Con 传感器输入（实机已确认能驱动输出，剩调参）；
 9. 实现基础 UI；
-10. NRO 元信息与版本管理：NACP 的应用名 `DGLAB-NX`、作者 `livcm` 与版本由
-    `nro/Makefile` 写入，图标是 `nro/DGLAB-NX.jpg`（256×256，配色同界面主题）；
-    About 页显示应用版本、IPC 版本与构建标识。发行版本只有一个来源——仓库根
-    `VERSION`（初始 `0.3.0`）；IPC 接口版本仍归 `common/include/dglab/ipc.h` 的
-    `DGLAB_IPC_PROTOCOL_VERSION`，两者不要混用（见 `docs/ipc.md` 的“版本”，
-    组件内的约定见 `nro/AGENTS.md`）。
-11. 浅色模式：三态主题偏好（默认“跟随系统”，可手动覆盖“浅色 / 深色”），浅色调色板
-    从原生 HOS 浅色主题的 1280×720 截图逐像素量出（表格见 `docs/nro-ui.md` 的
-    「浅色主题」）。跟随系统走 `setsysGetColorSetId()`，**只在启动与重建画面时读一次**
-    （不做轮询），取不到就以深色为默认并在日志里写明；偏好与语言一起存
-    `sdmc:/switch/DGLAB-NX/config/app.cfg`（`theme=`，`dglab/ui/settings.c` 是唯一
-    所有者）。关于页在语言行下方显示主题行，按 `Y` 循环。截图里量不到的
-    `error` / `warn` / 对话框三色先沿用深色值，文档标注“未量到”。
-    验收：`tests/canvas` 用两套主题把每一屏在 720p/1080p 各渲染一遍，`tests/lang` 的
-    `test_appcfg.c` 覆盖旧文件升级与取值规则；实机确认跟随系统与手动覆盖都生效。
-12. NRO 侧抑制自动休眠：服务端运行期间由 NRO（applet）调 `appletSetAutoSleepDisabled()` 关掉
-    主机自动休眠，停服/退出时恢复；**只恢复自己关的**（本来就关的不接管），失败只记日志并退回
-    旧警告文案。唯一所有者是 `nro/source/platform/auto_sleep.c`，socket 页与体感页把轮询到的
-    服务端状态喂给它。**手动休眠仍会卡死、NRO 退出后服务端仍在跑时自动休眠仍会卡死**，这两条是
-    文档里的已知边界（`docs/dglab-socket.md` 的「睡眠与唤醒」）。不改 sysmodule：`set:sys` 的
-    `setsysSetSleepSettings()` 路线评估后放弃。
-    验收：`make -C nro` 编译通过，`tests/canvas` 用两套文案各渲染一遍，`tests/lang` 检查新 key
-    三方一致；**2026-09-18 实机确认 applet 模式与 title override 下抑制都生效**（服务端运行期间
-    主机不再自动休眠）。
-13. 波形密度的共用开关：高级参数页新增 `density`（可变 / 固定）与 `fixed density`
-    （默认 65ms，10~500ms、5ms 一格），存在同一份 `config/motion.cfg` 里，所以对任意玩法
-    （体感、触屏）都生效。可变＝各玩法沿用原来的驱动（体感跟随波形值、触屏跟随横轴），
-    固定＝脉冲间隔恒为 `fixed density`，波形值与包络照旧跟随输入；触屏页在固定模式下不再
-    画密度轴（竖向刻度与两条端点竖线），中线与波形值刻度保留。`frequency_follows_level`
-    仍是模式自定的运行时字段，只在可变时起作用。改动集中在 `motion_feed`（间隔的唯一出口）、
-    `motion_settings`（多一个开关型设置）与触屏页的绘制；IPC、协议、sysmodule 一行未改。
-    验收：`tests/motion` 覆盖默认值/步进/夹紧/文件往返与旧文件升级、`tests/touch` 覆盖固定
-    时横轴失效、`tests/canvas` 覆盖参数页两行与固定模式下密度轴不画、`tests/lang` 覆盖新 key；
-    实机确认待做。
+10. NRO 元信息与版本管理；
+11. 浅色模式；
+12. NRO 侧抑制自动休眠；
+13. 波形密度的共用开关；
+14. 触屏玩法。
 
 ### 未完成
 
-1. 触屏玩法：屏幕左右均分，左半区→A 通道、右半区→B 通道；纵轴＝波形值（页头那条白线
-    100、底栏上方那条 0），横轴＝脉冲密度（**外端＝两条白线的端点 x=24/1255，内端＝中线**，
-    连线之外夹紧——手指够不到屏幕边缘，用边缘当端点会让密度停在 32～98ms），纯位置
-    驱动；抬手沿 `release` 曲线淡出、超 `idle stop` 停流（沿用“全零批次不上传”）。
-    参数与体感玩法共用一份 `config/motion.cfg`（没有触屏专属参数；共用的密度开关见
-    上面第 13 条），复用 `NET_WAVEFORM` 与
-    `motion_feed` 的包络/节奏逻辑。输入层、映射层、玩法页与上传都已实现，主机测试在
-    `tests/touch`（103 项）与 `tests/canvas`/`tests/lang`，资料与设计见 `docs/touch-input.md`。
-    2026-09-19 实机确认可正常运行。**剩余：两端极值与主机模式提示的实机验收**
-    （底座进玩法应看到玩法区留白 + 居中提示）、手感调参，然后把实测数据（LIFO 深度、坐标、
-    可达范围）写回 `docs/touch-input.md`。
-    若之后还要第二种玩法，候选是摇杆、按键连打、旋转角度，做完第一种再定。
-2. deko3d UI 后端（路线 A）**：把呈现层从 libnx framebuffer 换成 deko3d，绘制层
-    （`canvas.c` 与三屏布局）零改动。做法：device/queue/swapchain + PitchLinear 图像，
-    CPU 照旧写像素（`dkMemBlockGetCpuAddr` + `dkMemBlockFlushCpuCache`），再用
-    `dkCmdBufCopyBufferToImage` / `dkCmdBufBlitImage` 上屏，不写着色器；`nro/Makefile`
-    链接 `-ldeko3d`。开工前先确认 swapchain 是否接受 PitchLinear，不接受就退化成
-    “CPU 写纹理 + blit”。评估与核对过的事实见 `docs/nro-ui.md` 的
-    “framebuffer → deko3d 迁移评估”。路线 A 用 `deko3d.h` 的 C API 就够，不需要
-    C++17，也不需要安装 portlibs。
-    验收：三屏 × 720p/1080p 的实机截图与改造前一致，`tests/canvas` 不受影响。
-3. Game Mod / Overlay：由于游戏与 NRO 前端不能同时运行，因此需要由 Overlay 来监控和管理 Sysmodule 和 Game Mod 的运行状态，两者同时开发；
-4. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
+1. Game Mod / Overlay：由于游戏与 NRO 前端不能同时运行，因此需要由 Overlay 来监控和管理 Sysmodule 和 Game Mod 的运行状态，两者同时开发；
+2. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
 
 ### 已搁置
 
