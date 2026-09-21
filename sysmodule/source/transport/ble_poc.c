@@ -956,26 +956,46 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v6 (dumps 0x60 bytes at the data start, connects even without a scan hit)");
+    pocLog("btdrv probe: v7 (retries InitializeBle for a clean client_if, always tries to connect)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
 
     pocStopScan(w);
 
-    rc = btdrvInitialize();
-    pocLog("btdrv probe: btdrvInitialize rc=0x%08X", (u32)rc);
+    // The manager registers a GATT client when InitializeBle brings it up, and
+    // the connect call needs that interface number. A previous session can
+    // leave the manager holding an unregistered client (ClientRegistration
+    // result=0x37, client_if=0xFF), in which case a fresh btdrv session is what
+    // gets a usable one - so reopen the service and try again.
+    for (u32 attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+            eventClose(&event);
+            btdrvExit();
+            svcSleepThread(500000000ull); // 500ms
+        }
 
-    if (R_FAILED(rc))
-        return;
+        rc = btdrvInitialize();
+        pocLog("btdrv probe: btdrvInitialize rc=0x%08X (attempt %u)", (u32)rc, attempt);
 
-    memset(&event, 0, sizeof(event));
-    rc = btdrvInitializeBle(&event);
-    pocLog("btdrv probe: btdrvInitializeBle rc=0x%08X", (u32)rc);
+        if (R_FAILED(rc))
+            return;
 
-    if (R_FAILED(rc)) {
-        btdrvExit();
-        return;
+        memset(&event, 0, sizeof(event));
+        rc = btdrvInitializeBle(&event);
+        pocLog("btdrv probe: btdrvInitializeBle rc=0x%08X", (u32)rc);
+
+        if (R_FAILED(rc)) {
+            btdrvExit();
+            return;
+        }
+
+        client_if = 0xFF;
+        pocDrainBleEvents("btdrv probe after InitializeBle", 1000u, &client_if);
+        pocLog("btdrv probe: client_if=0x%02X (attempt %u)", client_if, attempt);
+
+        if (client_if != 0xFF)
+            break;
     }
 
     bool enabled = false;
@@ -984,11 +1004,6 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     rc = btdrvEnableBle();
     pocLog("btdrv probe: btdrvEnableBle rc=0x%08X", (u32)rc);
-
-    // The manager registers its own GATT client when InitializeBle brings it
-    // up; that event carries the interface number the connect call wants.
-    pocDrainBleEvents("btdrv probe after InitializeBle", 1000u, &client_if);
-    pocLog("btdrv probe: client_if=0x%02X", client_if);
 
     // Start from a known filter state: a filter left enabled by an earlier run
     // is one of the ways a scan can come back with nothing at all.

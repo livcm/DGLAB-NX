@@ -597,6 +597,27 @@ v5 探针把 +0x200 起的 0x60 字节整段打出来、标出事件是否与上
 **无论有没有扫到设备都会用配置地址试连一次**，用来验证"干净会话里 client_if 能不能过这个
 检查"。
 
+### 第三十次实机（2026-09-21，v6：`client_if` 又被上一次会话弄脏）
+
+    identity: first session after boot, running the probe before any scan   ← 第一个会话被身份探针占掉
+    ...
+    action queued 11
+    action: btdrv scan probe
+    btdrv probe: v6 (dumps 0x60 bytes at the data start, connects even without a scan hit)
+    btdrv probe after InitializeBle: ClientRegistration result=0x00000037 client_if=0xFF ×4
+    btdrv probe: client_if=0xFF
+    ...（两个阶段的 100 条事件与上一轮逐字节相同）
+    btdrv probe: no scan result, falling back to the configured address
+    btdrv probe: no address to connect to (have_address=1 client_if=0xFF)
+
+`←` 这次是在**第二个**会话里按的（第一个会话被身份探针自动跑掉了），而身份探针那几次失败连接
+已经把管理器里的客户端注销掉（`result=0x37 / client_if=0xFF`），所以 connect 那一步还是没能
+执行。事实上有两轮日志都出现过同样规律：**管理器可以被重新注册，但要靠新的 btdrv 会话**。
+
+v7 探针因此自己解决：`InitializeBle` 之后如果 `client_if` 还是 `0xFF`，就关掉会话、
+`btdrvExit()`、等 500ms、重开一次（最多 3 次），拿到干净的 `client_if` 再继续；扫描结束后
+无论有没有扫到设备都会用配置地址试连。
+
 ### 当前状态：暂停（2026-09-21）
 
 BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv
