@@ -13,6 +13,10 @@
 #define PROBE_WAIT_LIMIT_MS 12000u
 #define PROBE_MAX_SERVICES 8u
 
+// The service UUID the device advertises (docs/dglab-protocol.md). Repeated
+// here because the NRO does not include the sysmodule's protocol headers.
+#define PROBE_ADVERTISED_UUID16 0x180Cu
+
 // Print to the console and mirror the line into the view's log file, so a run
 // can be reported back without photographing the screen.
 static void probeLog(const char* fmt, ...)
@@ -76,6 +80,23 @@ void dglabAppletBleProbeRun(const BtdrvAddress* addr, const char* address_path)
     rc = btdevAcquireBleConnectionStateChangedEvent(&event);
     probeLog("probe: AcquireBleConnectionStateChangedEvent rc=0x%08X", (u32)rc);
 
+    // Nintendo's flow is scan-then-connect: btm:u's smart device scan tells btm
+    // which device the caller is interested in, and the connect then has an
+    // address it has actually seen. Without this the connect is accepted
+    // (rc=0) but nothing happens (2026-09-22 hardware round).
+    {
+        BtdrvGattAttributeUuid uuid = { 0 };
+
+        uuid.size = 2;
+        uuid.uuid[0] = (u8)(PROBE_ADVERTISED_UUID16 & 0xFFu);
+        uuid.uuid[1] = (u8)(PROBE_ADVERTISED_UUID16 >> 8);
+
+        rc = btdevStartBleScanSmartDevice(&uuid);
+        probeLog("probe: StartBleScanSmartDevice(0x%04X) rc=0x%08X",
+            (unsigned)PROBE_ADVERTISED_UUID16, (u32)rc);
+        svcSleepThread(3000000000ull); // let btm see the device first
+    }
+
     rc = btdevConnectToGattServer(*addr);
     probeLog("probe: btdevConnectToGattServer rc=0x%08X", (u32)rc);
 
@@ -99,6 +120,8 @@ void dglabAppletBleProbeRun(const BtdrvAddress* addr, const char* address_path)
 
     if (!connected) {
         probeLog("probe: no connection after %ums\n", waited);
+        probeLog("probe: StopBleScanSmartDevice rc=0x%08X",
+            (u32)btdevStopBleScanSmartDevice());
         eventClose(&event);
         btdevExit();
         return;
@@ -122,7 +145,8 @@ void dglabAppletBleProbeRun(const BtdrvAddress* addr, const char* address_path)
     }
 
     btdevDisconnectFromGattServer(handle);
-    probeLog("probe: disconnected");
+    probeLog("probe: disconnected, StopBleScanSmartDevice rc=0x%08X",
+        (u32)btdevStopBleScanSmartDevice());
 
     eventClose(&event);
     btdevExit();
