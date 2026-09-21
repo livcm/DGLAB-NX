@@ -13,22 +13,11 @@
 #define PROBE_WAIT_LIMIT_MS 12000u
 #define PROBE_MAX_SERVICES 8u
 
-// The service UUID the device advertises (docs/dglab-protocol.md). Repeated
-// here because the NRO does not include the sysmodule's protocol headers.
-#define PROBE_ADVERTISED_UUID16 0x180Cu
-
-// btm:u command 10, GetBleScanResultsForSmartDevice. libnx has no wrapper for
-// it, so the request is built here the same way the sysmodule's PoC builds it
-// (docs/ble-poc.md) - in this process the ARUID is a real applet's.
-static Result probeGetSmartScanResults(u64 aruid, BtdrvBleScanResult* results, u8 count,
-    u8* total_out)
-{
-    return serviceDispatchInOut(btmuGetServiceSession_IBtmUserCore(), 10, aruid, *total_out,
-        .buffer_attrs = { SfBufferAttr_HipcMapAlias | SfBufferAttr_Out },
-        .buffers = { { results, sizeof(BtdrvBleScanResult) * count } },
-        .in_send_pid = true,
-    );
-}
+// Company id in the device's manufacturer specific data (the phone shows
+// 0x000A). The btdrv-level scan finds the device with exactly this filter, so
+// the general (manufacturer) scan is used here too: btm's smart device scan
+// reported nothing at all (2026-09-22 hardware round).
+#define PROBE_ADVERTISED_COMPANY_ID 0x000Au
 
 // Print to the console and mirror the line into the view's log file, so a run
 // can be reported back without photographing the screen.
@@ -93,57 +82,61 @@ void dglabAppletBleProbeRun(BtdrvAddress* addr, const char* address_path)
     rc = btdevAcquireBleConnectionStateChangedEvent(&event);
     probeLog("probe: AcquireBleConnectionStateChangedEvent rc=0x%08X", (u32)rc);
 
-    // Nintendo's flow is scan-then-connect: btm:u's smart device scan tells btm
-    // which device the caller is interested in, and the connect then has an
-    // address it has actually seen. Without this the connect is accepted
-    // (rc=0) but nothing happens (2026-09-22 hardware round).
+    // Nintendo's flow is scan-then-connect: the connect is accepted (rc=0) but
+    // nothing happens unless btm has seen the device itself. The general
+    // (manufacturer data) scan is the one that actually reports this device.
     {
-        BtdrvGattAttributeUuid uuid = { 0 };
+        BtdrvBleAdvertisePacketParameter param;
+        BtdrvBleScanResult results[10];
+        Event scan_event;
+        bool found = false;
+        u8 total = 0;
 
-        uuid.size = 2;
-        uuid.uuid[0] = (u8)(PROBE_ADVERTISED_UUID16 & 0xFFu);
-        uuid.uuid[1] = (u8)(PROBE_ADVERTISED_UUID16 >> 8);
+        memset(&param, 0, sizeof(param));
+        param.company_id = PROBE_ADVERTISED_COMPANY_ID;
 
-        rc = btdevStartBleScanSmartDevice(&uuid);
-        probeLog("probe: StartBleScanSmartDevice(0x%04X) rc=0x%08X",
-            (unsigned)PROBE_ADVERTISED_UUID16, (u32)rc);
+        rc = btdevAcquireBleScanEvent(&scan_event);
+        probeLog("probe: AcquireBleScanEvent rc=0x%08X", (u32)rc);
 
-        // Read btm's smart-device scan results: the connect only counts for an
-        // address btm itself has reported. The configured address is kept as a
-        // fallback.
-        {
-            BtdrvBleScanResult results[4];
-            u64 aruid = appletGetAppletResourceUserId();
-            u8 total = 0;
+        rc = btdevStartBleScanGeneral(param);
+        probeLog("probe: StartBleScanGeneral(company=0x%04X) rc=0x%08X",
+            (unsigned)PROBE_ADVERTISED_COMPANY_ID, (u32)rc);
 
-            for (u32 poll = 0; poll < 10; poll++) {
-                svcSleepThread(500000000ull); // 500ms
-                total = 0;
-                memset(results, 0, sizeof(results));
-                rc = probeGetSmartScanResults(aruid, results, 4, &total);
+        for (u32 poll = 0; poll < 12; poll++) {
+            svcSleepThread(500000000ull); // 500ms
+            total = 0;
+            memset(results, 0, sizeof(results));
+            rc = btdevGetBleScanResult(results, 10, &total);
 
-                if (poll < 3 || (R_SUCCEEDED(rc) && total > 0))
-                    probeLog("probe: smart scan poll %u rc=0x%08X total=%u", poll, (u32)rc,
-                        total);
+            if (poll < 3 || (R_SUCCEEDED(rc) && total > 0))
+                probeLog("probe: general poll %u rc=0x%08X total=%u", poll, (u32)rc, total);
 
-                if (R_FAILED(rc) || total == 0)
-                    continue;
+            if (R_FAILED(rc) || total == 0)
+                continue;
 
-                for (u8 k = 0; k < total && k < 4; k++)
-                    probeLog("probe:   smart[%u] %02X:%02X:%02X:%02X:%02X:%02X",
-                        k, results[k].addr.address[0], results[k].addr.address[1],
-                        results[k].addr.address[2], results[k].addr.address[3],
-                        results[k].addr.address[4], results[k].addr.address[5]);
+            for (u8 k = 0; k < total && k < 10; k++) {
+                probeLog("probe:   dev[%u] %02X:%02X:%02X:%02X:%02X:%02X", k,
+                    results[k].addr.address[0], results[k].addr.address[1],
+                    results[k].addr.address[2], results[k].addr.address[3],
+                    results[k].addr.address[4], results[k].addr.address[5]);
 
-                {
-                    BtdrvAddress first = results[0].addr;
-
-                    memcpy(addr, first.address, sizeof(addr->address));
-                    probeLog("probe: connecting to the address btm reported");
+                if (memcmp(results[k].addr.address, addr->address, 6) == 0) {
+                    found = true;
+                } else if (!found && k == 0u) {
+                    // Keep btm's own report as the connect target when it lists
+                    // the device under an address we did not have.
+                    memcpy(addr->address, results[k].addr.address, 6);
                 }
-                break;
             }
+
+            if (found)
+                break;
         }
+
+        rc = btdevStopBleScanGeneral();
+        probeLog("probe: StopBleScanGeneral rc=0x%08X (device reported=%u)", (u32)rc,
+            found ? 1u : 0u);
+        eventClose(&scan_event);
     }
 
     rc = btdevConnectToGattServer(*addr);
@@ -168,9 +161,7 @@ void dglabAppletBleProbeRun(BtdrvAddress* addr, const char* address_path)
     }
 
     if (!connected) {
-        probeLog("probe: no connection after %ums\n", waited);
-        probeLog("probe: StopBleScanSmartDevice rc=0x%08X",
-            (u32)btdevStopBleScanSmartDevice());
+        probeLog("probe: no connection after %ums", waited);
         eventClose(&event);
         btdevExit();
         return;
@@ -194,8 +185,7 @@ void dglabAppletBleProbeRun(BtdrvAddress* addr, const char* address_path)
     }
 
     btdevDisconnectFromGattServer(handle);
-    probeLog("probe: disconnected, StopBleScanSmartDevice rc=0x%08X",
-        (u32)btdevStopBleScanSmartDevice());
+    probeLog("probe: disconnected");
 
     eventClose(&event);
     btdevExit();
