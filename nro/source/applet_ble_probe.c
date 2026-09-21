@@ -19,6 +19,19 @@
 // reported nothing at all (2026-09-22 hardware round).
 #define PROBE_ADVERTISED_COMPANY_ID 0x000Au
 
+// btm:u command 20, GetBleConnectionState. libnx has no wrapper; the request is
+// built like the sysmodule's PoC builds it, with this applet's ARUID. This is
+// what the connection state event is supposed to make readable.
+static Result probeGetConnectionState(u64 aruid, BtdrvBleConnectionInfo* info, u8 count,
+    u8* total_out)
+{
+    return serviceDispatchInOut(btmuGetServiceSession_IBtmUserCore(), 20, aruid, *total_out,
+        .buffer_attrs = { SfBufferAttr_HipcPointer | SfBufferAttr_Out },
+        .buffers = { { info, sizeof(BtdrvBleConnectionInfo) * count } },
+        .in_send_pid = true,
+    );
+}
+
 // Print to the console and mirror the line into the view's log file, so a run
 // can be reported back without photographing the screen.
 static void probeLog(const char* fmt, ...)
@@ -153,6 +166,27 @@ void dglabAppletBleProbeRun(BtdrvAddress* addr, const char* address_path)
             if (R_SUCCEEDED(wait_rc)) {
                 events++;
                 probeLog("probe: connection state event #%u after %ums", events, waited);
+
+                // The event says the state changed; btm:u command 20 is what
+                // actually reports it.
+                {
+                    BtdrvBleConnectionInfo state[4];
+                    u8 state_total = 0;
+                    Result state_rc;
+
+                    memset(state, 0, sizeof(state));
+                    state_rc = probeGetConnectionState(appletGetAppletResourceUserId(), state, 4,
+                        &state_total);
+                    probeLog("probe:   GetConnectionState rc=0x%08X total=%u", (u32)state_rc,
+                        state_total);
+
+                    for (u8 k = 0; k < state_total && k < 4; k++)
+                        probeLog("probe:     state[%u] handle=%u addr=%02X:%02X:%02X:%02X:%02X:%02X",
+                            k, state[k].connection_handle, state[k].addr.address[0],
+                            state[k].addr.address[1], state[k].addr.address[2],
+                            state[k].addr.address[3], state[k].addr.address[4],
+                            state[k].addr.address[5]);
+                }
             }
 
             total = 0;
