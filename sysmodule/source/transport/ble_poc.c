@@ -46,9 +46,15 @@
 #define POC_NOTIFY_LOG_LIMIT 8u
 #define POC_SCAN_POLL_LOG_EVERY 10u
 
-// Service UUID the Coyote 3.0 puts into its advertisement. Reported by scanning
-// the device with a phone BLE scanner; see docs/ble-poc.md.
-#define POC_UUID16_ADVERTISED_SERVICE 0x1812u
+// Service UUID the Coyote puts into its advertisement. It used to be 0x1812
+// (the HID service); after a DG-LAB device firmware update the phone scanner
+// shows 0x180C in the advertisement instead (2026-09-21, confirmed by the user
+// against the device's own address). See docs/ble-poc.md.
+#define POC_UUID16_ADVERTISED_SERVICE 0x180Cu
+
+// The same UUID as it was before that firmware update: kept so the driver-level
+// probe can show that a filter on the old value finds nothing.
+#define POC_UUID16_LEGACY_ADVERTISED_SERVICE 0x1812u
 
 // Sentinel for the control scan in pocScanControlCompany: not a UUID, so it can
 // never collide with a real filter.
@@ -943,8 +949,8 @@ static bool pocSubscribe(PocWorker* w)
 // relying on the event handle firing.
 static void pocRunBtdrvScanProbe(PocWorker* w)
 {
-    static const u16 kInterval[2] = { 0x0060u, 0x0030u };
-    static const u16 kWindow[2] = { 0x0030u, 0x0030u };
+    static const u16 kInterval[3] = { 0x0060u, 0x0060u, 0x0030u };
+    static const u16 kWindow[3] = { 0x0030u, 0x0030u, 0x0030u };
     static u8 previous_event[sizeof(((BtdrvBleEventInfo*)0)->data)];
     BtdrvAddress scanned_address;
     Event event;
@@ -956,7 +962,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v10 (dumps the head and the +0x200 region of every new event)");
+    pocLog("btdrv probe: v11 (filters the advertised 0x180C, three filter modes)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
@@ -1013,36 +1019,49 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     rc = btdrvEnableBleScanFilter(false);
     pocLog("btdrv probe: EnableBleScanFilter(false) rc=0x%08X", (u32)rc);
 
-    for (u32 phase = 0; phase < 2 && !pocStopRequested(); phase++) {
+    // Three phases, because the filter's meaning on this firmware is not
+    // documented anywhere: no filter at all, the advertised service UUID
+    // (0x180C since the device's firmware update) with the filter enabled, and
+    // the same filter with the filter switched off again.
+    static const u16 kPhaseUuid[3] = { 0x0000u, POC_UUID16_ADVERTISED_SERVICE, 0x0000u };
+    static const bool kPhaseFilterOn[3] = { false, true, false };
+
+    for (u32 phase = 0; phase < 3 && !pocStopRequested(); phase++) {
         u32 deadline;
         u32 fetches = 0;
         u32 empties = 0;
         u32 events = 0;
         u32 scan_results = 0;
 
+        rc = btdrvClearBleScanFilters();
+        pocLog("btdrv probe: phase %u: ClearBleScanFilters rc=0x%08X", phase, (u32)rc);
+
         rc = btdrvSetBleScanParameter(kInterval[phase], kWindow[phase]);
         pocLog("btdrv probe: SetBleScanParameter(0x%04X, 0x%04X) rc=0x%08X", kInterval[phase],
             kWindow[phase], (u32)rc);
 
-        if (phase == 1) {
+        if (kPhaseUuid[phase] != 0) {
             BtdrvBleAdvertiseFilter filter;
+            u16 uuid = kPhaseUuid[phase];
 
             memset(&filter, 0, sizeof(filter));
             filter.index = 0;
             filter.adv.size = 2;
             filter.adv.type = 0x03; // complete list of 16-bit service UUIDs
-            filter.adv.data[0] = 0x12;
-            filter.adv.data[1] = 0x18; // 0x1812, little endian
+            filter.adv.data[0] = (u8)(uuid & 0xFF);
+            filter.adv.data[1] = (u8)(uuid >> 8);
             filter.mask[0] = 0xFF;
             filter.mask[1] = 0xFF;
             filter.mask_size = 2;
 
             rc = btdrvAddBleScanFilterCondition(&filter);
-            pocLog("btdrv probe: AddBleScanFilterCondition(0x1812) rc=0x%08X", (u32)rc);
-
-            rc = btdrvEnableBleScanFilter(true);
-            pocLog("btdrv probe: EnableBleScanFilter(true) rc=0x%08X", (u32)rc);
+            pocLog("btdrv probe: AddBleScanFilterCondition(0x%04X, type 0x03) rc=0x%08X",
+                uuid, (u32)rc);
         }
+
+        rc = btdrvEnableBleScanFilter(kPhaseFilterOn[phase]);
+        pocLog("btdrv probe: phase %u: EnableBleScanFilter(%u) rc=0x%08X", phase,
+            kPhaseFilterOn[phase] ? 1u : 0u, (u32)rc);
 
         rc = btdrvStartBleScan();
         pocLog("btdrv probe: btdrvStartBleScan (phase %u) rc=0x%08X", phase, (u32)rc);
