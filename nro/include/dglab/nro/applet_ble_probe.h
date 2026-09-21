@@ -15,4 +15,5 @@
 #include <switch/services/btdrv_types.h>
 
 /// Run one connect attempt against addr and report what the stack does.
-void dglabAppletBleProbeRun(const BtdrvAddress* addr, const char* address_path);
+/// addr is updated in place when btm's own scan reports a different address.
+void dglabAppletBleProbeRun(BtdrvAddress* addr, const char* address_path);

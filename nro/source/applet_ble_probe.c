@@ -17,6 +17,19 @@
 // here because the NRO does not include the sysmodule's protocol headers.
 #define PROBE_ADVERTISED_UUID16 0x180Cu
 
+// btm:u command 10, GetBleScanResultsForSmartDevice. libnx has no wrapper for
+// it, so the request is built here the same way the sysmodule's PoC builds it
+// (docs/ble-poc.md) - in this process the ARUID is a real applet's.
+static Result probeGetSmartScanResults(u64 aruid, BtdrvBleScanResult* results, u8 count,
+    u8* total_out)
+{
+    return serviceDispatchInOut(btmuGetServiceSession_IBtmUserCore(), 10, aruid, *total_out,
+        .buffer_attrs = { SfBufferAttr_HipcMapAlias | SfBufferAttr_Out },
+        .buffers = { { results, sizeof(BtdrvBleScanResult) * count } },
+        .in_send_pid = true,
+    );
+}
+
 // Print to the console and mirror the line into the view's log file, so a run
 // can be reported back without photographing the screen.
 static void probeLog(const char* fmt, ...)
@@ -54,7 +67,7 @@ static void probeUuid(char* out, size_t out_size, const BtdrvGattAttributeUuid* 
     }
 }
 
-void dglabAppletBleProbeRun(const BtdrvAddress* addr, const char* address_path)
+void dglabAppletBleProbeRun(BtdrvAddress* addr, const char* address_path)
 {
     BtdrvBleConnectionInfo info[4];
     BtdevGattService services[PROBE_MAX_SERVICES];
@@ -94,7 +107,43 @@ void dglabAppletBleProbeRun(const BtdrvAddress* addr, const char* address_path)
         rc = btdevStartBleScanSmartDevice(&uuid);
         probeLog("probe: StartBleScanSmartDevice(0x%04X) rc=0x%08X",
             (unsigned)PROBE_ADVERTISED_UUID16, (u32)rc);
-        svcSleepThread(3000000000ull); // let btm see the device first
+
+        // Read btm's smart-device scan results: the connect only counts for an
+        // address btm itself has reported. The configured address is kept as a
+        // fallback.
+        {
+            BtdrvBleScanResult results[4];
+            u64 aruid = appletGetAppletResourceUserId();
+            u8 total = 0;
+
+            for (u32 poll = 0; poll < 10; poll++) {
+                svcSleepThread(500000000ull); // 500ms
+                total = 0;
+                memset(results, 0, sizeof(results));
+                rc = probeGetSmartScanResults(aruid, results, 4, &total);
+
+                if (poll < 3 || (R_SUCCEEDED(rc) && total > 0))
+                    probeLog("probe: smart scan poll %u rc=0x%08X total=%u", poll, (u32)rc,
+                        total);
+
+                if (R_FAILED(rc) || total == 0)
+                    continue;
+
+                for (u8 k = 0; k < total && k < 4; k++)
+                    probeLog("probe:   smart[%u] %02X:%02X:%02X:%02X:%02X:%02X",
+                        k, results[k].addr.address[0], results[k].addr.address[1],
+                        results[k].addr.address[2], results[k].addr.address[3],
+                        results[k].addr.address[4], results[k].addr.address[5]);
+
+                {
+                    BtdrvAddress first = results[0].addr;
+
+                    memcpy(addr, first.address, sizeof(addr->address));
+                    probeLog("probe: connecting to the address btm reported");
+                }
+                break;
+            }
+        }
     }
 
     rc = btdevConnectToGattServer(*addr);
