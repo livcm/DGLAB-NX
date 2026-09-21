@@ -46,6 +46,12 @@
 #define POC_NOTIFY_LOG_LIMIT 8u
 #define POC_SCAN_POLL_LOG_EVERY 10u
 
+// The driver-level probe's phone window: how long it keeps scanning to find the
+// target before giving up, and how long it keeps watching after the target
+// shows up (the user reads "TAP CONNECT ON THE PHONE NOW" on the console screen).
+#define POC_PROBE_FIND_MS 15000u
+#define POC_PROBE_PHONE_WINDOW_MS 20000u
+
 // Service UUID the Coyote puts into its advertisement. It used to be 0x1812
 // (the HID service); after a DG-LAB device firmware update the phone scanner
 // shows 0x180C in the advertisement instead (2026-09-21, confirmed by the user
@@ -1005,7 +1011,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v14 (connect matrix before and after the scan)");
+    pocLog("btdrv probe: v15 (announces when to connect from the phone)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
@@ -1054,14 +1060,6 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     rc = btdrvEnableBle();
     pocLog("btdrv probe: btdrvEnableBle rc=0x%08X", (u32)rc);
 
-    // Before any scanning: does the connect work at all in this session?
-    if (g_poc.use_target_address) {
-        BtdrvAddress target;
-
-        memcpy(target.address, g_poc.target_address, sizeof(target.address));
-        pocConnectMatrix("btdrv probe pre-scan", client_if, &target);
-    }
-
     // Start from a known filter state: a filter left enabled by an earlier run
     // is one of the ways a scan can come back with nothing at all.
     rc = btdrvClearBleScanFilters();
@@ -1070,18 +1068,16 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     rc = btdrvEnableBleScanFilter(false);
     pocLog("btdrv probe: EnableBleScanFilter(false) rc=0x%08X", (u32)rc);
 
-    // Four phases, because the filter's meaning on this firmware is not
-    // documented anywhere: no filter at all, a filter on the advertised service
-    // UUID (0x180C since the device's firmware update), a filter on the
-    // manufacturer-specific data the new firmware advertises, and finally the
-    // UUID filter with the filter switched off again.
-    static const u16 kPhaseUuid[4] = {
-        0x0000u, POC_UUID16_ADVERTISED_SERVICE, 0x0000u, POC_UUID16_ADVERTISED_SERVICE,
-    };
-    static const u16 kPhaseCompany[4] = { 0x0000u, 0x0000u, POC_ADVERTISED_COMPANY_ID, 0x0000u };
-    static const bool kPhaseFilterOn[4] = { false, true, true, false };
+    // One phase now: the earlier four-mode run (docs/ble-poc.md) showed that
+    // only a filter on the advertised manufacturer-specific data (AD 0xFF,
+    // company 0x000A) makes the manager report the device - no filter and the
+    // 0x180C service filter never did. The 20-second phone window is handled
+    // separately after this phase.
+    static const u16 kPhaseUuid[4] = { 0x0000u };
+    static const u16 kPhaseCompany[4] = { POC_ADVERTISED_COMPANY_ID };
+    static const bool kPhaseFilterOn[4] = { true };
 
-    for (u32 phase = 0; phase < 4 && !pocStopRequested(); phase++) {
+    for (u32 phase = 0; phase < 1 && !pocStopRequested(); phase++) {
         u32 deadline;
         u32 fetches = 0;
         u32 empties = 0;
@@ -1257,30 +1253,140 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                 have_address = true;
             }
 
-            // Connect while the stack has just seen the device, instead of
-            // after every phase has been stopped: a connect right here is the
-            // "recently seen" case the earlier rounds could not test.
-            if (!tried_connect && client_if != 0xFF) {
-                tried_connect = true;
-
-                rc = btdrvTriggerConnection(scanned_address, 0);
-                pocLog("btdrv probe: TriggerConnection(%02X:%02X:%02X:%02X:%02X:%02X) rc=0x%08X",
-                    scanned_address.address[0], scanned_address.address[1],
-                    scanned_address.address[2], scanned_address.address[3],
-                    scanned_address.address[4], scanned_address.address[5], (u32)rc);
-
-                rc = btdrvConnectGattServer(client_if, scanned_address, true, g_poc.aruid);
-                pocLog("btdrv probe: ConnectGattServer (right after the scan result) rc=0x%08X",
-                    (u32)rc);
-
-                pocDrainBleEvents("btdrv probe after immediate connect", 3000u, NULL);
-            }
         }
 
         pocLog("btdrv probe: phase %u done fetches=%u empty=%u events=%u scan_results=%u", phase,
             fetches, empties, events, scan_results);
 
         btdrvStopBleScan();
+    }
+
+    // The phone window. Keep the same kind of scan running; the moment the
+    // target shows up, say so (these lines appear on the console screen, so the
+    // user does not have to time anything), then keep watching for 20 seconds.
+    // Whether the target's advertisements stop and come back is what separates
+    // "the stack refuses" from "the device refuses" (docs/ble-poc.md).
+    if (g_poc.use_target_address && !pocStopRequested()) {
+        BtdrvAddress phone_target;
+        BtdrvAddress seen[4];
+        u32 seen_count = 0u;
+        u32 scan_deadline;
+        u32 window_end = 0u;
+        u32 target_last_ms = 0u;
+        u32 fetches = 0u;
+        u32 devices = 0u;
+        bool target_seen = false;
+        bool advertising = false;
+
+        memcpy(phone_target.address, g_poc.target_address, sizeof(phone_target.address));
+        memset(seen, 0, sizeof(seen));
+
+        rc = btdrvClearBleScanFilters();
+        pocLog("btdrv probe: window: ClearBleScanFilters rc=0x%08X", (u32)rc);
+
+        rc = btdrvSetBleScanParameter(0x0060u, 0x0030u);
+        pocLog("btdrv probe: window: SetBleScanParameter(0x0060, 0x0030) rc=0x%08X", (u32)rc);
+
+        {
+            BtdrvBleAdvertiseFilter filter;
+
+            memset(&filter, 0, sizeof(filter));
+            filter.index = 0;
+            filter.adv.size = 2;
+            filter.adv.type = 0xFF;
+            filter.adv.data[0] = (u8)(POC_ADVERTISED_COMPANY_ID & 0xFF);
+            filter.adv.data[1] = (u8)(POC_ADVERTISED_COMPANY_ID >> 8);
+            filter.mask[0] = 0xFF;
+            filter.mask[1] = 0xFF;
+            filter.mask_size = 2;
+
+            rc = btdrvAddBleScanFilterCondition(&filter);
+            pocLog("btdrv probe: window: AddBleScanFilterCondition(company 0x%04X) rc=0x%08X",
+                (u32)POC_ADVERTISED_COMPANY_ID, (u32)rc);
+        }
+
+        rc = btdrvEnableBleScanFilter(true);
+        pocLog("btdrv probe: window: EnableBleScanFilter(true) rc=0x%08X", (u32)rc);
+
+        rc = btdrvStartBleScan();
+        pocLog("btdrv probe: window: btdrvStartBleScan rc=0x%08X", (u32)rc);
+
+        scan_deadline = pocNowMs() + POC_PROBE_FIND_MS;
+
+        while (!pocStopRequested()) {
+            BtdrvBleEventInfo info;
+            BtdrvBleEventType type = 0;
+            u32 now = pocNowMs();
+            u32 limit = (window_end != 0u) ? window_end : scan_deadline;
+            bool address_nonzero = false;
+            u32 i;
+
+            if (now >= limit)
+                break;
+
+            if (target_seen) {
+                bool now_advertising = (now - target_last_ms) < 3000u;
+
+                if (now_advertising != advertising) {
+                    advertising = now_advertising;
+                    pocLog("btdrv probe: window: target %s advertising (%us in)",
+                        advertising ? "is" : "stopped",
+                        (unsigned)((now - (window_end - POC_PROBE_PHONE_WINDOW_MS)) / 1000u));
+                }
+            }
+
+            memset(&info, 0, sizeof(info));
+            eventWait(&event, 200ull * 1000000ull);
+            rc = btdrvGetBleManagedEventInfo(&info, sizeof(info), &type);
+            fetches++;
+
+            if (R_FAILED(rc))
+                continue;
+
+            for (i = 0; i < sizeof(info.scan_result.address.address); i++) {
+                if (info.scan_result.address.address[i] != 0)
+                    address_nonzero = true;
+            }
+
+            if (!address_nonzero)
+                continue;
+
+            devices++;
+
+            {
+                bool known = false;
+
+                for (i = 0; i < seen_count; i++) {
+                    if (memcmp(seen[i].address, info.scan_result.address.address, 6) == 0)
+                        known = true;
+                }
+
+                if (!known && seen_count < 4u) {
+                    seen[seen_count++] = info.scan_result.address;
+                    pocLog("btdrv probe: window: device %02X:%02X:%02X:%02X:%02X:%02X rssi=%d",
+                        info.scan_result.address.address[0], info.scan_result.address.address[1],
+                        info.scan_result.address.address[2], info.scan_result.address.address[3],
+                        info.scan_result.address.address[4], info.scan_result.address.address[5],
+                        info.scan_result.rssi);
+                }
+            }
+
+            if (memcmp(info.scan_result.address.address, phone_target.address, 6) == 0) {
+                target_seen = true;
+                target_last_ms = now;
+
+                if (window_end == 0u) {
+                    window_end = now + POC_PROBE_PHONE_WINDOW_MS;
+                    pocLog("btdrv probe: >>> TAP CONNECT ON THE PHONE NOW <<<");
+                    pocLog("btdrv probe: >>> watching the advertisement for %u more seconds <<<",
+                        (unsigned)(POC_PROBE_PHONE_WINDOW_MS / 1000u));
+                }
+            }
+        }
+
+        btdrvStopBleScan();
+        pocLog("btdrv probe: window done fetches=%u devices=%u target_seen=%u",
+            fetches, devices, target_seen ? 1u : 0u);
     }
 
     btdrvClearBleScanFilters();
@@ -1301,7 +1407,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     if (!have_address) {
         pocLog("btdrv probe: no address to connect to (client_if=0x%02X)", client_if);
     } else {
-        pocConnectMatrix("btdrv probe post-scan", client_if, &scanned_address);
+        pocConnectMatrix("btdrv probe after window", client_if, &scanned_address);
     }
 
     eventClose(&event);

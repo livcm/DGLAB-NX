@@ -851,6 +851,26 @@ direct / background、`TriggerConnection` timeout 0 / 0x1000），每次排水 1
 下一步两条线：一是用手机在控制台探针运行期间连一次设备（证明那一刻设备是可连接的），
 二是继续在固件里找 opcode `0x6AA` 的处理端，看它返回 `0x68` 的条件是什么。
 
+### v15（2026-09-22）：探针自己告诉你什么时候点手机
+
+"手机连一下"这种对照实验靠人对时间是不现实的（手机上点连接是瞬间的事，探针又是一长串
+固定流程）。所以 v15 把流程改成**由探针发出提示**：
+
+1. 只用**厂商数据过滤器**（AD `0xFF` + 公司号 `0x000A`）扫一段，找到目标设备；
+2. 目标一出现，屏幕上打出
+
+       btdrv probe: >>> TAP CONNECT ON THE PHONE NOW <<<
+       btdrv probe: >>> watching the advertisement for 20 more seconds <<<
+
+   然后**继续扫 20 秒**，期间每 3 秒窗口判断一次目标是否还在广播，状态一变就记一行
+   `target is advertising` / `target stopped advertising (Ns in)`；
+3. 窗口结束后停扫，再跑一次连接矩阵（direct / background、TriggerConnection 两种 timeout），
+   看看手机连过之后栈的态度有没有变化。
+
+也就是说：**看到那两行提示再点手机连接**，不用掐时间；设备是否因为手机连上而停止广播，
+日志会直接写出来。如果 15 秒内没找到设备，窗口不会打开，日志是
+`window done ... target_seen=0`。
+
 ### 当前状态：暂停（2026-09-21）
 
 BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv
