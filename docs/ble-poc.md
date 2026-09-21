@@ -901,17 +901,54 @@ direct / background、`TriggerConnection` timeout 0 / 0x1000），每次排水 1
 | `rc=0x0005568F`（`Btm`/0x2AB） | btm 拒绝（ARUID/状态不对） |
 | `no connection after 12000ms` | 请求被接受但没有连上，需要看连接状态事件 |
 
+### 第三十九～四十三次实机（2026-09-22，applet 侧探针）
+
+手机端确认设备可连接（一点就连上），于是把 Nintendo 给 applet 的那条路（`btm:u`，NRO 里
+按 `Y`，详见上文「applet 侧连接探针」）跑了一串对照，结论如下：
+
+    probe: btdevInitialize rc=0x00000000
+    probe: AcquireBleConnectionStateChangedEvent rc=0x00000000
+    probe: StartBleScanGeneral(company=0x000A) rc=0x00000000
+    probe: pass 0 StopBleScanGeneral rc=0x00000000 (device reported=0)
+    probe: stored params rc=0x00000000 company=0x0553 pattern=000100000100
+    probe: pass 1 StopBleScanGeneral rc=0x00000000 (device reported=0)   ← 用控制台自己的参数也一样
+    probe: btdevConnectToGattServer rc=0x00000000                        ← 请求被受理
+    probe: connection state event #1 after 100ms
+    probe:   GetConnectionState rc=0x00000000 total=0                    ← 受理但没有任何连接
+    probe: no connection after 30000ms
+
+（扫描事件一次都没触发，`eventWait` 从未成功；smart-device 扫描同样是 `total=0`。）
+
+汇总成两条路的画像：
+
+| 组件 | 扫描 | 连接 |
+| --- | --- | --- |
+| sysmodule → btdrv | ✅ 能扫到设备（`EA:A8:AC:22:2C:18`，rssi≈-40，AD 内容可解出） | ❌ 本地检查通过后被栈拒绝（`Bluetooth/0x1806`，栈状态 `0x68`） |
+| NRO(applet) → btm:u | ❌ 无事件、结果恒 0（含控制台自己的参数） | ⚠️ `rc=0` 被受理，但无连接、无状态（`total=0`） |
+
+设备广播内容（`←` 探针 dump 解出）：flags、厂商数据（AD `0xFF`，公司号 `0x000A`，其后 4 个
+零字节）、完整本地名 `47L121000`；**广播包里没有服务 UUID `0x180C`**，所以 btm 的
+smart-device（按 UUID）扫描天然扫不到——这是它 `total=0` 的直接原因。
+
+剩下只有两类可能：btm 侧还有未满足的前置（配对/登记/auto-connection 开关），或栈对
+"非任天堂客户端发起的 LE 连接"确有准入限制。继续挖需要更多实机循环，收益不确定。
+
 ### 当前状态：暂停（2026-09-21）
 
-BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv
-请求形状过时"这个理由（形状其实一致，见 `docs/ble-re.md` 的「判定（2026-09-21 夜，更正）」）。
-剩下的是语义/状态问题：扫描结果走哪条路径、显式注册为什么回 `0x37`、`ConnectGattServer`
-为什么回 `Bluetooth/0x14F`。重开顺序写在 `docs/ble-re.md` 的「下一步（更正后）」；
-`tools/ble-re/upstream.md` 的草稿等整条研究做完再整理（第 1、4 条已作废）。
+**2026-09-22 收尾**：不需要固件补丁；libnx 的 btdrv 请求形状与固件一致（第一轮的"形状
+漂移"结论已被 `docs/ble-re.md` 的更正推翻）。扫描这一段已经做通（btdrv + 厂商数据过滤器，
+设备记录、地址、rssi、AD 内容都能拿到），**卡点只在"发起连接"**：
 
-本页的探针保留原样，下次开工时可以直接接着用：`A` 起会话（首次会话自动跑身份探针，
-含 btdrv 注册/连接尝试与 btm:u ARUID 对照）、`←` 跑驱动级扫描探针、`StickL` 跑常见厂商
-ID 的对照扫描。
+- sysmodule 走 btdrv：本地检查通过后被栈以状态 `0x68` 拒绝（`Bluetooth/0x1806`）；
+- NRO 走 btm:u：请求被受理（`rc=0`）但既不产生连接也没有任何状态记录，扫描也不产出事件/结果。
+
+也就是说 BLE 直连要复工，下一步必须解决"btm 的前置条件"或"栈的准入"其中之一；重开顺序
+仍需更新到 `docs/ble-re.md`（当前那节描述的是更早的状态）。`tools/ble-re/upstream.md`
+的草稿等整条研究做完再整理（第 1、4 条已作废）。
+
+本页探针保留原样，接着可用：`A` 起会话、`←` 驱动级扫描探针（含手机对照窗口，v17）、
+**空闲屏 `Y` = applet 侧连接探针**（两遍扫描对照 + 连接 + GATT 表）、`StickL` 常见厂商 ID
+对照扫描。所有实验代码与结论都已提交（最新 `f8ef401` 之后的文档提交）。
 
 ### 结论（截至 HOS 22.5.0 / AMS 1.11.2）
 
