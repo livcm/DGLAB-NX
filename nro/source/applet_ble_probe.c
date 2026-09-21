@@ -132,8 +132,17 @@ void dglabAppletBleProbeRun(BtdrvAddress* addr, const char* address_path)
                 (unsigned)param.company_id, (u32)rc);
 
             for (u32 poll = 0; poll < 12; poll++) {
-            svcSleepThread(500000000ull); // 500ms
-            total = 0;
+                // Wait on the scan event first, the way the sysmodule's PoC
+                // does: btm signals results through it, and polling without
+                // draining it returned total=0 on every pass (2026-09-22).
+                {
+                    Result scan_wait_rc = eventWait(&scan_event, 500000000ull);
+
+                    if (R_SUCCEEDED(scan_wait_rc))
+                        probeLog("probe: pass %u scan event after poll %u", pass, poll);
+                }
+
+                total = 0;
             memset(results, 0, sizeof(results));
             rc = btdevGetBleScanResult(results, 10, &total);
 
