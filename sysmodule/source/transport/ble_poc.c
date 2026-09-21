@@ -1011,7 +1011,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v15 (announces when to connect from the phone)");
+    pocLog("btdrv probe: v16 (dumps the full scan result so the AD bytes are visible)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
@@ -1191,13 +1191,18 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                 // Two regions, always: the head is where a ClientRegistration
                 // lands, and everything device-shaped so far has sat at +0x200
                 // (docs/ble-poc.md, v5-v9 rounds).
+                // The first region is wider now: a scan result's AD structures
+                // start at +0x0D, and the manufacturer data (AD 0xFF, company
+                // 0x000A, six data bytes) is what btm's general scan needs as
+                // its pattern_data.
                 static const u32 kBase[2] = { 0x00u, 0x200u };
+                static const u32 kRows[2] = { 6u, 2u };
 
                 pocLog("btdrv probe: event #%u type=%u nonzero=%u first=0x%03X repeat=%u",
                     events, (u32)type, nonzero, first, repeat ? 1u : 0u);
 
                 for (u32 region = 0; region < 2; region++) {
-                    for (u32 row = 0; row < 2; row++) {
+                    for (u32 row = 0; row < kRows[region]; row++) {
                         const u8* p = info.data + kBase[region] + row * 16u;
 
                         pocLog("btdrv probe:   %03X %02X%02X%02X%02X %02X%02X%02X%02X "
