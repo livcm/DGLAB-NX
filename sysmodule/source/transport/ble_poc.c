@@ -953,6 +953,42 @@ static bool pocSubscribe(PocWorker* w)
 // sets explicit scan parameters, tries an unfiltered scan and a scan filtered on
 // the advertised service UUID, and polls the event queue directly instead of
 // relying on the event handle firing.
+// The connect call answers Bluetooth/0x1806 in every state tried so far (clean
+// client_if, device just scanned, scan stopped), and the firmware maps that
+// Result from a "null/invalid argument" status inside its message layer
+// (docs/ble-re.md). So try the variants side by side, before and after a scan:
+// direct vs background connect, and the address-based TriggerConnection with
+// and without a timeout.
+static void pocConnectMatrix(const char* label, u8 client_if, const BtdrvAddress* addr)
+{
+    Result rc;
+
+    if (client_if == 0xFF) {
+        pocLog("%s: no client_if, connect matrix skipped", label);
+        return;
+    }
+
+    pocLog("%s: connect matrix for %02X:%02X:%02X:%02X:%02X:%02X (client_if=0x%02X)", label,
+        addr->address[0], addr->address[1], addr->address[2], addr->address[3],
+        addr->address[4], addr->address[5], client_if);
+
+    rc = btdrvConnectGattServer(client_if, *addr, true, g_poc.aruid);
+    pocLog("%s: ConnectGattServer(direct) rc=0x%08X", label, (u32)rc);
+    pocDrainBleEvents(label, 1500u, NULL);
+
+    rc = btdrvConnectGattServer(client_if, *addr, false, g_poc.aruid);
+    pocLog("%s: ConnectGattServer(background) rc=0x%08X", label, (u32)rc);
+    pocDrainBleEvents(label, 1500u, NULL);
+
+    rc = btdrvTriggerConnection(*addr, 0);
+    pocLog("%s: TriggerConnection(timeout 0) rc=0x%08X", label, (u32)rc);
+    pocDrainBleEvents(label, 1500u, NULL);
+
+    rc = btdrvTriggerConnection(*addr, 0x1000u);
+    pocLog("%s: TriggerConnection(timeout 0x1000) rc=0x%08X", label, (u32)rc);
+    pocDrainBleEvents(label, 1500u, NULL);
+}
+
 static void pocRunBtdrvScanProbe(PocWorker* w)
 {
     static const u16 kInterval[4] = { 0x0060u, 0x0060u, 0x0060u, 0x0030u };
@@ -969,7 +1005,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v13 (recognises scan results by payload, connects while the device is fresh)");
+    pocLog("btdrv probe: v14 (connect matrix before and after the scan)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
@@ -1017,6 +1053,14 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     rc = btdrvEnableBle();
     pocLog("btdrv probe: btdrvEnableBle rc=0x%08X", (u32)rc);
+
+    // Before any scanning: does the connect work at all in this session?
+    if (g_poc.use_target_address) {
+        BtdrvAddress target;
+
+        memcpy(target.address, g_poc.target_address, sizeof(target.address));
+        pocConnectMatrix("btdrv probe pre-scan", client_if, &target);
+    }
 
     // Start from a known filter state: a filter left enabled by an earlier run
     // is one of the ways a scan can come back with nothing at all.
@@ -1254,17 +1298,10 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
         pocLog("btdrv probe: no scan result, falling back to the configured address");
     }
 
-    if (have_address && client_if != 0xFF) {
-        pocLog("btdrv probe: connect attempt to %02X:%02X:%02X:%02X:%02X:%02X (client_if=0x%02X)",
-            scanned_address.address[0], scanned_address.address[1], scanned_address.address[2],
-            scanned_address.address[3], scanned_address.address[4], scanned_address.address[5],
-            client_if);
-        rc = btdrvConnectGattServer(client_if, scanned_address, true, g_poc.aruid);
-        pocLog("btdrv probe: ConnectGattServer rc=0x%08X", (u32)rc);
-        pocDrainBleEvents("btdrv probe after ConnectGattServer", 3000u, NULL);
+    if (!have_address) {
+        pocLog("btdrv probe: no address to connect to (client_if=0x%02X)", client_if);
     } else {
-        pocLog("btdrv probe: no address to connect to (have_address=%u client_if=0x%02X)",
-            have_address ? 1u : 0u, client_if);
+        pocConnectMatrix("btdrv probe post-scan", client_if, &scanned_address);
     }
 
     eventClose(&event);

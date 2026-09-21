@@ -802,6 +802,32 @@ v13 探针两处改动：扫描结果改成**按载荷判断**（地址非零即
 那一刻**立刻发一次 `TriggerConnection` + `ConnectGattServer`（再排水 3 秒），测的就是
 "协议栈刚见过它"这个组合。
 
+### 第三十七次实机（2026-09-21，v13：扫描通了，连接还是不通）
+
+    btdrv probe: phase 0 done fetches=50 empty=0 events=50 scan_results=0
+    btdrv probe: phase 1 done fetches=50 empty=0 events=50 scan_results=0
+    btdrv probe: device EA:A8:AC:22:2C:18 status=2 type=0 addr_type=1 entries=3 rssi=-42
+    btdrv probe: TriggerConnection(EA:A8:AC:22:2C:18) rc=0x00300C71
+    btdrv probe: ConnectGattServer (right after the scan result) rc=0x00300C71
+    ...
+    btdrv probe: device 61:6A:4C:DE:6C:3E status=2 type=0 addr_type=1 entries=3 rssi=-43
+    btdrv probe: phase 3 done fetches=50 empty=0 events=50 scan_results=50
+    btdrv probe: done, 99 scan result(s) in total
+    btdrv probe: ConnectGattServer rc=0x00300C71        ← 四段都跑完之后再连，同样
+
+结论：
+
+1. **扫描完全通了**：phase 2/3 各 50 条设备记录，目标设备 `status=2`（发现新设备）、
+   `addr_type=1`（随机静态）、`entries=3`、`rssi=-42`；同场还有另一台设备
+   `61:6A:4C:DE:6C:3E`。之前 `scan_results=0` 纯粹是探针用 `type` 判断造成的。
+2. **连接仍然被拒**，而且"刚扫到就立刻连"和"扫完再连"都是同一个码。查固件侧：
+   `0x00300C71` 由消息层的状态 `0x68`（"某个必需对象为空"）映射而来，也就是说连接请求在
+   **发往蓝牙栈的消息层**就被挡下了，而不是协议栈拒绝了对端。
+
+v14 探针把连接做成"矩阵"：在**扫描前**和**扫描后**各试四种变体（`ConnectGattServer`
+direct / background、`TriggerConnection` timeout 0 / 0x1000），每次排水 1.5 秒。这样一次
+运行就能看出到底是哪种调用形态、哪种时序能过。
+
 ### 当前状态：暂停（2026-09-21）
 
 BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv
