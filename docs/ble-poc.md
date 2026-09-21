@@ -767,6 +767,41 @@ v11 探针改成三种模式各跑一段：不加过滤器 / `0x180C` + 启用�
 每段 10 秒、逐段清空过滤器，日志里 `repeat=0` 的事件才会打出载荷；目标地址仍会在整块
 0x400 里全文搜索。
 
+### 第三十六次实机（2026-09-21，v12：设备终于出现在事件里）
+
+    btdrv probe: phase 0 done ... scan_results=1     ← 只有那条全零标记
+    btdrv probe: AddBleScanFilterCondition(0x180C, type 0x03) rc=0x00000000
+    btdrv probe: phase 1 done fetches=50 empty=0 events=50 scan_results=0
+    btdrv probe: AddBleScanFilterCondition(company 0x000A, type 0xFF) rc=0x00000000
+    btdrv probe: event #1 type=0 nonzero=100 first=0x004 repeat=0
+    btdrv probe:   000 00000000 020001EA A8AC222C 18020106
+    btdrv probe: target address at offset 0x007
+    btdrv probe: phase 2 done fetches=50 empty=0 events=50 scan_results=0
+    btdrv probe: phase 3 done fetches=50 empty=0 events=50 scan_results=0
+    btdrv probe: ConnectGattServer rc=0x00300C71
+
+这条日志把扫描这一段彻底讲清楚了：
+
+1. **设备确实能被扫到**——但只在**厂商自定义数据（AD 类型 `0xFF`，公司号 `0x000A`）**
+   被当作过滤器时。按 `0x180C` 服务过滤、以及不加过滤器都不出现设备记录（说明这套固件上
+   "启用过滤器"是必要条件，而且手机看到的 `0x180C` 很可能来自扫描响应而不是广播包本身）。
+2. 载荷**就是 libnx 的 `BtdrvBleScanResult` 布局**，逐字节对得上：
+
+       +0x00 u32 result   = 0
+       +0x04 u8  status   = 2            ← "发现新设备"
+       +0x05 u8  device_type = 0
+       +0x06 u8  ble_addr_type = 1       ← 随机静态地址
+       +0x07 u8[6] address  = EA:A8:AC:22:2C:18   ← 目标设备
+       +0x0D ...            = 02 01 06（Flags AD 结构）
+
+   所以布局没问题，**唯一坏掉的是 `type` 出参**（恒为 0），而我们之前正是靠它判断
+   `scan_results`，于是把设备记录全跳过了。
+3. 连接仍然回 `Bluetooth/0x1806`——但这一次的连接是在**四段扫描全部结束之后**才发的。
+
+v13 探针两处改动：扫描结果改成**按载荷判断**（地址非零即为设备），并且**在设备刚被扫到的
+那一刻**立刻发一次 `TriggerConnection` + `ConnectGattServer`（再排水 3 秒），测的就是
+"协议栈刚见过它"这个组合。
+
 ### 当前状态：暂停（2026-09-21）
 
 BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv

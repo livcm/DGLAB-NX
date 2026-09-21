@@ -964,11 +964,12 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     bool have_previous = false;
     u8 client_if = 0xFF;
     bool have_address = false;
+    bool tried_connect = false;
     u32 total_scan_results = 0;
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v12 (also filters the advertised manufacturer id 0x000A)");
+    pocLog("btdrv probe: v13 (recognises scan results by payload, connects while the device is fresh)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
@@ -1182,16 +1183,11 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
             memcpy(previous_event, info.data, sizeof(previous_event));
             have_previous = true;
 
-            if (type != BtdrvBleEventType_ScanResult)
-                continue;
-
-            scan_results++;
-            total_scan_results++;
-
-            // A scan result with an all-zero address is the manager's
-            // "scan started/stopped" marker, not a device: taking it as the
-            // target is how the 2026-09-21 run ended up connecting to
-            // 00:00:00:00:00:00.
+            // libnx's type output is not usable on this firmware (it answers 0
+            // or a stale value), so a scan result is recognised by its payload
+            // instead: the layout is BtdrvBleScanResult and a real device has a
+            // non-zero address. An all-zero address is the manager's
+            // "scan started/stopped" marker, not a device.
             bool address_nonzero = false;
 
             for (u32 i = 0; i < sizeof(info.scan_result.address.address); i++) {
@@ -1199,18 +1195,41 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                     address_nonzero = true;
             }
 
-            if (!have_address && address_nonzero) {
+            if (!address_nonzero)
+                continue;
+
+            scan_results++;
+            total_scan_results++;
+
+            pocLog("btdrv probe: device %02X:%02X:%02X:%02X:%02X:%02X status=%u type=%u addr_type=%u entries=%u rssi=%d",
+                info.scan_result.address.address[0], info.scan_result.address.address[1],
+                info.scan_result.address.address[2], info.scan_result.address.address[3],
+                info.scan_result.address.address[4], info.scan_result.address.address[5],
+                info.scan_result.status, info.scan_result.device_type,
+                info.scan_result.ble_addr_type, info.scan_result.count, info.scan_result.rssi);
+
+            if (!have_address) {
                 scanned_address = info.scan_result.address;
                 have_address = true;
             }
 
-            if (scan_results <= 5) {
-                pocLog("btdrv probe: scan result status=%u addr=%02X:%02X:%02X:%02X:%02X:%02X entries=%u rssi=%d",
-                    info.scan_result.status, info.scan_result.address.address[0],
-                    info.scan_result.address.address[1], info.scan_result.address.address[2],
-                    info.scan_result.address.address[3], info.scan_result.address.address[4],
-                    info.scan_result.address.address[5], info.scan_result.count,
-                    info.scan_result.rssi);
+            // Connect while the stack has just seen the device, instead of
+            // after every phase has been stopped: a connect right here is the
+            // "recently seen" case the earlier rounds could not test.
+            if (!tried_connect && client_if != 0xFF) {
+                tried_connect = true;
+
+                rc = btdrvTriggerConnection(scanned_address, 0);
+                pocLog("btdrv probe: TriggerConnection(%02X:%02X:%02X:%02X:%02X:%02X) rc=0x%08X",
+                    scanned_address.address[0], scanned_address.address[1],
+                    scanned_address.address[2], scanned_address.address[3],
+                    scanned_address.address[4], scanned_address.address[5], (u32)rc);
+
+                rc = btdrvConnectGattServer(client_if, scanned_address, true, g_poc.aruid);
+                pocLog("btdrv probe: ConnectGattServer (right after the scan result) rc=0x%08X",
+                    (u32)rc);
+
+                pocDrainBleEvents("btdrv probe after immediate connect", 3000u, NULL);
             }
         }
 
