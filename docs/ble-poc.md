@@ -543,6 +543,32 @@ ClientRegistration 变成 `result=0 / client_if!=0xFF`，就说明**不需要补
 下一次的探针（v4）会打印整块缓冲里**第一个非零字节的偏移**和那附近的 32 字节，先把这 50
 条事件到底是什么弄清楚，再决定是解码布局不对还是扫描本身没启动。
 
+### 第二十八次实机（2026-09-21，v4：数据落在 +0x200）
+
+    btdrv probe: v4 (dumps where each event's data starts, connects to what it scans)
+    btdrv probe: client_if=0x02                      ← 这一轮开机后先跑的是身份探针
+    btdrv probe: event #1 type=0 nonzero=70 first=0x200
+    btdrv probe:   200 BC804E74 7AFE0000 00000000 00000000
+    btdrv probe:   210 00000000 00000000 00000000 00000000
+    btdrv probe:   220 00000000 00002404 18B85CCB 4653D995
+    btdrv probe: phase 0 done fetches=50 empty=0 events=50 scan_results=0
+    btdrv probe: phase 1 done fetches=50 empty=0 events=50 scan_results=0
+    btdrv probe: no scanned address to connect to (have_address=0 client_if=0x02)
+
+要点：
+
+1. 70 个非零字节**全在 +0x200 之后**（前 0x200 字节是零），事件 #1/#2/#3 逐字节相同，
+   两个阶段也一样——是同一个事件被反复交回来，不是 50 个不同设备。
+2. `type` 出参是 0。固件侧确认事件槽是 `{长度 @0x1af890, payload[0x400] @0x1af898,
+   类型 @0x1afc98}`，取事件时把 payload 整块拷出来、类型单独写进 u32 出参（见
+   `docs/ble-re.md` 的「事件是怎么交出来的」）。类型真的是 0、数据真的从 +0x200 开始，
+   所以 libnx 的 `BtdrvBleEventInfo` 布局（字段都在 +0）对不上这次返回。
+3. 同一轮开机里第一次按 `←` 时 `client_if=0xFF`、第二次是 `0x02`，和上一轮一致：**第一个
+   会话按 `←` 才能拿到干净的管理器状态**。
+
+v5 探针把 +0x200 起的 0x60 字节整段打出来、标出事件是否与上一条完全相同，并在整块里搜
+配置的目标地址——这三样加起来就能判断那 0x200 之后的内容是不是扫描结果。
+
 ### 当前状态：暂停（2026-09-21）
 
 BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv

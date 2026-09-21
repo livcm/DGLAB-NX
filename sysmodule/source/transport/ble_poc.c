@@ -945,18 +945,21 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 {
     static const u16 kInterval[2] = { 0x0060u, 0x0030u };
     static const u16 kWindow[2] = { 0x0030u, 0x0030u };
+    static u8 previous_event[sizeof(((BtdrvBleEventInfo*)0)->data)];
     BtdrvAddress scanned_address;
     Event event;
     Result rc;
+    bool have_previous = false;
     u8 client_if = 0xFF;
     bool have_address = false;
     u32 total_scan_results = 0;
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v4 (dumps where each event's data starts, connects to what it scans)");
+    pocLog("btdrv probe: v5 (dumps 0x60 bytes at the data start, spots repeats)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
+    memset(previous_event, 0, sizeof(previous_event));
 
     pocStopScan(w);
 
@@ -1074,15 +1077,17 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
             // Three lines per event: where the data starts and what is there.
             if (events <= 3) {
+                bool repeat = have_previous &&
+                    memcmp(previous_event, info.data, sizeof(previous_event)) == 0;
                 u32 base = (first & ~0xFu);
 
-                if (base + 48u > sizeof(info.data))
-                    base = sizeof(info.data) - 48u;
+                if (base + 0x60u > sizeof(info.data))
+                    base = sizeof(info.data) - 0x60u;
 
-                pocLog("btdrv probe: event #%u type=%u nonzero=%u first=0x%03X", events,
-                    (u32)type, nonzero, first);
+                pocLog("btdrv probe: event #%u type=%u nonzero=%u first=0x%03X repeat=%u",
+                    events, (u32)type, nonzero, first, repeat ? 1u : 0u);
 
-                for (u32 row = 0; row < 3; row++) {
+                for (u32 row = 0; row < 6; row++) {
                     const u8* p = info.data + base + row * 16u;
 
                     pocLog("btdrv probe:   %03X %02X%02X%02X%02X %02X%02X%02X%02X "
@@ -1090,7 +1095,22 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                         p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
                         p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
                 }
+
+                // The configured address is the one thing that tells a real scan
+                // result from the manager's own noise: the device is advertising
+                // while the probe runs.
+                if (g_poc.use_target_address) {
+                    for (u32 i = 0; i + 6u <= sizeof(info.data); i++) {
+                        if (memcmp(info.data + i, g_poc.target_address, 6) == 0) {
+                            pocLog("btdrv probe: target address at offset 0x%03X", i);
+                            break;
+                        }
+                    }
+                }
             }
+
+            memcpy(previous_event, info.data, sizeof(previous_event));
+            have_previous = true;
 
             if (type != BtdrvBleEventType_ScanResult)
                 continue;

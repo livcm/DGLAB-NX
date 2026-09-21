@@ -447,22 +447,11 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
 
 ### 未完成
 
-1. Game Mod / Overlay：由于游戏与 NRO 前端不能同时运行，因此需要由 Overlay 来监控和管理 Sysmodule 和 Game Mod 的运行状态，两者同时开发；
-2. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
+1. BLE 模式（sysmodule 直连设备）: 2026-09-21 发现，不需要固件补丁，卡点在语义/状态；判定与重开顺序见 `docs/ble-re.md`。
+2. Game Mod / Overlay：由于游戏与 NRO 前端不能同时运行，因此需要由 Overlay 来监控和管理 Sysmodule 和 Game Mod 的运行状态，两者同时开发；
+3. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
 
 ### 已搁置
-
-#### BLE 模式（sysmodule 直连设备）
-
-在 HOS 22.5.0 + AMS 1.11.2 上，Switch 后台 Sysmodule 直连 BLE 外设不可用
-（btm/bt 只面向任天堂自家设备；btdrv 的 BLE 事件载荷为空、GATT 客户端注册失败）。
-完整实测记录见 `docs/ble-poc.md`。
-
-这个模式只有在需要时才会重启，且必须先做**只读逆向**：从固件提取 `bluetooth` 进程，
-确认失败点属于"结构/调用顺序变化"（改绑定即可，不需要补丁）还是"缺少通用 GATT
-central"（需要 exefs patch 或直接放弃）。不要在没有逆向结论前尝试补丁方案。
-
-**2026-09-21：不需要固件补丁，卡点在语义/状态；判定与重开顺序见 `docs/ble-re.md`。**
 
 #### Socket V4 协议
 
@@ -473,9 +462,11 @@ V4 的消息外壳（`hello` / `message` / `heartbeat` / `ping` /
 beta 稳定与 App 版本确认；在此之前不写半成品代码，只保留 `docs/dglab-socket.md`
 里已核对的 V4 事实。验收：`tests/net` 增加 V4 外壳用例与回环端到端，再实机。
 
-#### deko3d UI 后端（路线 A）
+#### 迁移到 deko3d UI 后端（路线 A）
 
-把呈现层从 libnx framebuffer 换成 deko3d，绘制层
+迁移收益较低，暂搁置。
+
+技术路线：把呈现层从 libnx framebuffer 换成 deko3d，绘制层
 （`canvas.c` 与三屏布局）零改动。做法：device/queue/swapchain + PitchLinear 图像，
 CPU 照旧写像素（`dkMemBlockGetCpuAddr` + `dkMemBlockFlushCpuCache`），再用
 `dkCmdBufCopyBufferToImage` / `dkCmdBufBlitImage` 上屏，不写着色器；`nro/Makefile`
