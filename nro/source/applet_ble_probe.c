@@ -105,17 +105,33 @@ void dglabAppletBleProbeRun(BtdrvAddress* addr, const char* address_path)
         bool found = false;
         u8 total = 0;
 
-        memset(&param, 0, sizeof(param));
-        param.company_id = PROBE_ADVERTISED_COMPANY_ID;
-
         rc = btdevAcquireBleScanEvent(&scan_event);
         probeLog("probe: AcquireBleScanEvent rc=0x%08X", (u32)rc);
 
-        rc = btdevStartBleScanGeneral(param);
-        probeLog("probe: StartBleScanGeneral(company=0x%04X) rc=0x%08X",
-            (unsigned)PROBE_ADVERTISED_COMPANY_ID, (u32)rc);
+        // Two passes: the device's own company id, then the parameters the
+        // console itself has stored. The second one is the control: if that also
+        // reports nothing, btm is not running our general scan at all
+        // (2026-09-22 round).
+        for (u32 pass = 0; pass < 2 && !found; pass++) {
+            if (pass == 0) {
+                memset(&param, 0, sizeof(param));
+                param.company_id = PROBE_ADVERTISED_COMPANY_ID;
+            } else {
+                Result stored_rc;
 
-        for (u32 poll = 0; poll < 12; poll++) {
+                memset(&param, 0, sizeof(param));
+                stored_rc = btdevGetBleScanParameter(0xFFFFu, &param);
+                probeLog("probe: stored params rc=0x%08X company=0x%04X pattern=%02X%02X%02X%02X%02X%02X",
+                    (u32)stored_rc, param.company_id, param.pattern_data[0],
+                    param.pattern_data[1], param.pattern_data[2], param.pattern_data[3],
+                    param.pattern_data[4], param.pattern_data[5]);
+            }
+
+            rc = btdevStartBleScanGeneral(param);
+            probeLog("probe: pass %u StartBleScanGeneral(company=0x%04X) rc=0x%08X", pass,
+                (unsigned)param.company_id, (u32)rc);
+
+            for (u32 poll = 0; poll < 12; poll++) {
             svcSleepThread(500000000ull); // 500ms
             total = 0;
             memset(results, 0, sizeof(results));
@@ -142,13 +158,15 @@ void dglabAppletBleProbeRun(BtdrvAddress* addr, const char* address_path)
                 }
             }
 
-            if (found)
-                break;
+                if (found)
+                    break;
+            }
+
+            rc = btdevStopBleScanGeneral();
+            probeLog("probe: pass %u StopBleScanGeneral rc=0x%08X (device reported=%u)", pass,
+                (u32)rc, found ? 1u : 0u);
         }
 
-        rc = btdevStopBleScanGeneral();
-        probeLog("probe: StopBleScanGeneral rc=0x%08X (device reported=%u)", (u32)rc,
-            found ? 1u : 0u);
         eventClose(&scan_event);
     }
 
