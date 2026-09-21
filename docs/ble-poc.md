@@ -652,6 +652,33 @@ v7 探针因此自己解决：`InitializeBle` 之后如果 `client_if` 还是 `0
 v8 探针：忽略全零地址的 ScanResult（回落到配置地址再连），并且**每条内容与上一条不同的事件
 都会打印载荷**（不再只看前 3 条），这样真正的设备记录一出现就能看到。
 
+### 第三十二次实机（2026-09-21，v8：事件种类、以及连到配置地址的尝试）
+
+    btdrv probe: v8 (dumps every new payload, ignores zero scan addresses)
+    btdrv probe: client_if=0x02 (attempt 0)
+    btdrv probe: event #1 type=0 len=.. 000 37000000 FF000000 ..   ← ClientRegistration 0x37/0xFF
+    btdrv probe: event #3 type=7 len=.. 000 00000000 02000000 ..   ← ClientRegistration 0/0x02
+    btdrv probe: event #4 type=7 len=.. 000 00000000 04000000 ..   ← 另一个客户端 0x04
+    btdrv probe: event #5 type=6 len=.. 200 BC804E74 7AFE0000 ..   ← 数据在 +0x200 的那条
+    btdrv probe: scan result status=0 addr=00:00:00:00:00:00 entries=0 rssi=0
+    btdrv probe: event #8/#9 000 00000000 03010000 / 03000000      ← 0x03 注册/注销
+    btdrv probe: connect attempt to EA:A8:AC:22:2C:18 (client_if=0x02)
+    btdrv probe: ConnectGattServer rc=0x00300C71
+
+要点：
+
+1. 事件槽里现在能看到**多个客户端的注册/注销**（`client_if` 0x02/0x03/0x04），说明这个槽是
+   全系统共享的，我们读到的不全是自己的事件。
+2. 那条"数据在 +0x200"的事件这次被标成 `type=6`（上一轮是 0），再次说明 `type` 出参不可信；
+   它只出现一次、内容与别的都不同，仍然带一个地址样子的六字节和一个 v4 UUID。
+3. **连到配置地址的尝试这次真的发生了**，结果 `0x00300C71`（`Bluetooth/0x1806`）——与
+   `TriggerConnection` 同一个码。也就是说 `client_if` 这一层已经过了，卡在"设备/协议栈"这一层。
+
+v9 探针换了个更硬的办法来识别事件：**读之前把缓冲区预填成 `0xAA`**。固件拷贝时不看我们给的
+长度（用管理器里的 size），所以"最后一个不是 `0xAA` 的字节"就是这次事件的实际长度，而长度按
+发布点表可以直接对应到类型（0x08/0x0c/0x14/0x148/0x214/0x24c…）。日志里现在有
+`len=0x...`，全空读也会表现为整块 `0xAA`。
+
 ### 当前状态：暂停（2026-09-21）
 
 BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv
