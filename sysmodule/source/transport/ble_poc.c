@@ -948,6 +948,10 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     Result rc;
     u32 total_scan_results = 0;
 
+    // Version marker: if a log has no line below this one, the build that ran
+    // is older than the counters (2026-09-21 hardware round).
+    pocLog("btdrv probe: v2 (clears filters first, counts empty/events)");
+
     pocStopScan(w);
 
     rc = btdrvInitialize();

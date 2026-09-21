@@ -315,6 +315,9 @@ static bool pocActionIsScan(u32 action)
         case DglabPocAction_ScanWithAdvertisedUuid:
         case DglabPocAction_ScanWithGeneralFilter:
         case DglabPocAction_ScanWithCommonCompany:
+        // The driver-level probe owns btdrv for the length of the run, so it
+        // starts a session with probes skipped, exactly like the scan variants.
+        case DglabPocAction_ProbeBtdrvScan:
             return true;
         default:
             return false;
