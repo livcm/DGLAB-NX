@@ -382,30 +382,38 @@ general 过滤器固定为任天堂 company ID `0x0553`）。下一步要么按�
 先确认**managed BLE 事件队列是否按会话隔离**：如果不是，它可能本来就是 `btm` 自己的
 事件，而不是我们那次调用的返回。所以现在不能据此断定注册被拒。
 
-## 下一步（更正后）
+## 下一步（2026-09-22 更新）
 
-形状问题已经排除，剩下的都是**语义/状态**问题。按这个顺序做：
+形状问题已经排除，**扫描也做通了**，现在只剩"发起连接"这一件事。实机状态（细节与日志见
+`docs/ble-poc.md`）：
 
-1. **扫描链**（后面一切的前置）。`StartBleScan`(55)/`StopBleScan`(56) 只是管理器
-   `+0x28(1/0)`（vtable `0x159a50` → `0x1c410` → `0x10000`），形状早就对，所以要查的是
-   "扫描开起来之后结果从哪来"：`0x137b0`（加过滤器 → 管理器 `+0x40`，vtable `0x159a68` →
-   `0x1c440` → `0x10de0`）、`0x139f0`（`EnableBleScanFilter`）、`0x1cc00`（cmd 79
-   `GetBleManagedEventInfo`）、以及事件队列本身（`pocDrainBleEvents` 已经在打印原始
-   载荷）。目标：能稳定看到 Coyote 的广播/地址。**判读的岔路口**：驱动级探针现在给出
-   `fetches/empty/events/scan_results` 并记录前 8 条非空事件，下一次实机应当能区分
-   "事件队列整个是空的（问题在投递/会话）"与"有事件但没有 ScanResult（问题在过滤/扫描
-   本身）"——若连我们自己 `AddBleScanFilterCondition` / `EnableBleScanFilter` 的回执
-   （`BtdrvBleEventType_ScanFilter`）都不出现，就属于前者。
-2. **注册与连接**。显式 `RegisterGattClient`(62) 为什么回 `result=0x37`（链路：
-   `0x1c960` → `0x13a80` → 管理器 `+0x70`，vtable `0x159a98` → `0x1c4a0` → `0x112a0`）；
-   `ConnectGattServer`(65) 为什么回 `Bluetooth/0x14F`（`0x1c9c0` → `0x13c30`）。
-   注意"用管理器在 `InitializeBle` 里给出的 `client_if`"这条经验仍然有效。
-3. **服务发现 → 订阅 → B0/B1**：现在可以直接用 libnx 的 `btdev`/`btdrv` 封装，
-   每步入库前先实机验证一次。
+- **sysmodule → btdrv**：`StartBleScan` + 厂商数据过滤器（AD `0xFF`、公司号 `0x000A`）
+  能稳定拿到设备记录（地址、`status=2`、`addr_type=1`、rssi≈-40、AD 内容可解）；
+  `ConnectGattServer`(65) / `TriggerConnection`(23) 在本地检查通过后由**栈本身**拒绝，
+  返回 `Bluetooth/0x1806`（= 栈状态 `0x68` 经状态表映射，见上文「管理器虚表、事件发布点
+  与连接失败点」）。
+- **NRO(applet) → btm:u**：`btdevConnectToGattServer` 返回 `0`（受理，不像 sysmodule 那样
+  被 `Sf`/`Btm` 拒），但只触发一次连接状态事件、`GetConnectionState` 恒为 `total=0`；
+  它的 smart-device 与 general 扫描都不报结果（连控制台自己存储的参数也一样），
+  **扫描事件从不触发**。
+- 设备侧没问题：手机一点就连上；广播里带 flags、厂商数据（公司号 `0x000A`，其后 4 个零
+  字节）和本地名 `47L121000`，**没有服务 UUID `0x180C`**（所以 btm 按 UUID 过滤的
+  smart-device 扫描看不到它）。
+
+因此复工只剩两条路线，二选一（或都试）：
+
+1. **btm 的前置条件**：排查 applet 侧还缺什么——`btdevEnableBleAutoConnection`（auto
+   connection 开关）、`btdevGetBleScanParameter2`（控制台存储的 smart-device UUID）、
+   以及系统流程是否需要先把设备登记进 btm 的列表（例如经由 `ns`/`btm` 的配对流程）。
+   判据：让 `btm` 的扫描自己报出设备（`total>0` + `dev[0]`），随后连接应当成立。
+2. **栈的准入**：若确认栈对"非任天堂客户端发起的 LE 连接"有门禁，则给这套结论收尾
+   （证据链完整：扫描可用、请求形状正确、设备可连，连接被栈拒），BLE 模式按"架构上不可行"
+   搁置，等固件/资料有新线索再评估。
 
 重开工需要的入口都在仓库里：`tools/ble-re/`（`nso2elf.py`、`peek.py`、`find_xref.py`、
-`abi_sizes.py`、`make_ips.py`、`ghidra/`）、本页上面的「命令 → 请求形状」表、
-`docs/ble-poc.md` 的探针说明。用到的地址与命令 case 都可用
+`abi_sizes.py`、`make_ips.py`、`ghidra/`）、本页上面的「命令 → 请求形状」表与
+「管理器虚表、事件发布点与连接失败点」、`docs/ble-poc.md` 的探针说明（`←` 驱动级扫描、
+空闲屏 `Y` applet 侧连接探针）。用到的地址与命令 case 都可用
 `analyzeHeadless ... -postScript DecompileAt.java <地址>` 复现（命令 case 地址由
 `0x11884e` 的字节表 + `0x1d4d4` 的分支表算出）。
 
