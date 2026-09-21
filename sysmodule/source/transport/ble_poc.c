@@ -1248,6 +1248,14 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                 info.scan_result.status, info.scan_result.device_type,
                 info.scan_result.ble_addr_type, info.scan_result.count, info.scan_result.rssi);
 
+            // Some events carry the address four bytes further in (after
+            // result/client_if/handle fields) instead of at the BtdrvBleScanResult
+            // offset, so print that reading too - the 2026-09-22 log had the
+            // device at +0x0C while the libnx layout pointed at garbage.
+            pocLog("btdrv probe:   (same payload at +0x0C: %02X:%02X:%02X:%02X:%02X:%02X)",
+                info.data[0x0C], info.data[0x0D], info.data[0x0E], info.data[0x0F],
+                info.data[0x10], info.data[0x11]);
+
             if (!have_address) {
                 scanned_address = info.scan_result.address;
                 have_address = true;

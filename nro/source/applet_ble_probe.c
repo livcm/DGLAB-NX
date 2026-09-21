@@ -10,7 +10,7 @@
 #include <string.h>
 
 #define PROBE_WAIT_STEP_MS 100u
-#define PROBE_WAIT_LIMIT_MS 12000u
+#define PROBE_WAIT_LIMIT_MS 30000u
 #define PROBE_MAX_SERVICES 8u
 
 // Company id in the device's manufacturer specific data (the phone shows
@@ -143,16 +143,36 @@ void dglabAppletBleProbeRun(BtdrvAddress* addr, const char* address_path)
     probeLog("probe: btdevConnectToGattServer rc=0x%08X", (u32)rc);
 
     if (R_SUCCEEDED(rc)) {
+        u32 events = 0;
+
         while (waited < PROBE_WAIT_LIMIT_MS) {
-            eventWait(&event, 100000000ull); // 100ms
+            Result wait_rc = eventWait(&event, 100000000ull); // 100ms
+
             waited += PROBE_WAIT_STEP_MS;
+
+            if (R_SUCCEEDED(wait_rc)) {
+                events++;
+                probeLog("probe: connection state event #%u after %ums", events, waited);
+            }
 
             total = 0;
             memset(info, 0, sizeof(info));
             rc = btdevGetBleConnectionInfoList(info, 4, &total);
 
-            if (R_FAILED(rc) || total == 0)
+            if (R_FAILED(rc))
                 continue;
+
+            if (total != 0)
+                probeLog("probe: connection list after %ums: total=%u handle=%u", waited, total,
+                    info[0].connection_handle);
+
+            if (total == 0) {
+                // No connection yet: a state event without an entry means the
+                // stack started something, so keep waiting either way.
+                if (waited % 5000u < PROBE_WAIT_STEP_MS)
+                    probeLog("probe: still waiting after %ums (state events=%u)", waited, events);
+                continue;
+            }
 
             handle = info[0].connection_handle;
             connected = true;
