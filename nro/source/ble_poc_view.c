@@ -450,16 +450,26 @@ void dglabBlePocViewRun(Service* dglab)
             // While a run is active Y is the disconnect action; on the idle
             // screen it starts the applet-side connect probe instead, which has
             // to run in this process to get a real AppletResourceUserId.
-            if (run_active)
+            if (run_active) {
                 action = DglabPocAction_Disconnect;
-            else if (g_target_address_valid) {
+            } else {
                 BtdrvAddress probe_address;
+
+                if (!g_target_address_valid)
+                    g_target_address_valid = loadTargetAddress(g_target_address);
+
+                if (!g_target_address_valid) {
+                    char line[LOG_LINE_MAX];
+
+                    snprintf(line, sizeof(line), "applet probe: no address in %s",
+                        ADDRESS_FILE_PATH);
+                    logPushLine(line);
+                    continue;
+                }
 
                 memcpy(probe_address.address, g_target_address, sizeof(probe_address.address));
                 dglabAppletBleProbeRun(&probe_address, ADDRESS_FILE_PATH);
             }
-            else
-                printf("applet probe: no target address in %s\n", ADDRESS_FILE_PATH);
         }
         else if (down & HidNpadButton_R)
             action = DglabPocAction_RestartSession;
@@ -505,6 +515,12 @@ void dglabBlePocViewRun(Service* dglab)
 
         printf("\n");
         printLog();
+
+        // The applet-side probe runs from the idle screen, so the address has to
+        // be known before any session is started. pocSendStart() reloads it per
+        // session as before.
+        if (!g_target_address_valid)
+            g_target_address_valid = loadTargetAddress(g_target_address);
 
         if (g_target_address_valid) {
             printf("target: %02X:%02X:%02X:%02X:%02X:%02X (from %s)\n", g_target_address[0],
