@@ -569,6 +569,34 @@ ClientRegistration 变成 `result=0 / client_if!=0xFF`，就说明**不需要补
 v5 探针把 +0x200 起的 0x60 字节整段打出来、标出事件是否与上一条完全相同，并在整块里搜
 配置的目标地址——这三样加起来就能判断那 0x200 之后的内容是不是扫描结果。
 
+### 第二十九次实机（2026-09-21，v5：那 50 条事件不是扫描结果）
+
+    btdrv probe: v5 (dumps 0x60 bytes at the data start, spots repeats)
+    btdrv probe: client_if=0xFF                      ← 这一轮又是身份探针先跑
+    btdrv probe: event #1 type=0 nonzero=70 first=0x200 repeat=0
+    btdrv probe:   200 BC804E74 7AFE0000 00000000 00000000
+    btdrv probe:   220 00000000 00002404 18B85CCB 4653D995
+    btdrv probe:   230 E6CFA55D 9ECD25A6 EB000000 00000400
+    btdrv probe: event #2 ... repeat=1 / #3 ... repeat=1
+    btdrv probe: phase 0 done fetches=50 empty=0 events=50 scan_results=0
+    btdrv probe: phase 1 done fetches=50 empty=0 events=50 scan_results=0
+
+结论：
+
+1. 那 70 个非零字节里有一个 BLE 地址样子的 6 字节（`BC:80:4E:74:7A:FE`）和一个 v4 UUID
+   （`240418B8-5CCB-4653-D995-E6CFA55D9ECD`），但没有目标地址，`repeat=1` 说明 100 次调用
+   拿到的是**同一条**事件。
+2. 固件侧确认扫描结果事件的载荷是 0x148、类型是 6；而这条事件的载荷超过 0x200，只能是
+   类型 8（`ClientNotify`，0x24c）或 13（`ServerAttributeOperation`，0x214）。两个阶段里
+   连我们自己发过滤器、开扫描都没有产生新事件——**扫描没有产出任何 ScanResult**。
+3. `type` 出参恒为 0：libnx 从响应 `+0x10` 读那个 u32，而固件只在响应带够出参块时才写它，
+   所以这一轮之后不再依赖类型来判断，改用**载荷大小 + 内容**识别事件。
+
+连接那边另有收获（见 `docs/ble-re.md`）：`ConnectGattServer` 的 `Bluetooth/0x14F` 是在
+**调用协议栈之前**由两次 `client_if` 查表失败产生的，跟地址无关。所以 v6 探针在扫描结束后
+**无论有没有扫到设备都会用配置地址试连一次**，用来验证"干净会话里 client_if 能不能过这个
+检查"。
+
 ### 当前状态：暂停（2026-09-21）
 
 BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv

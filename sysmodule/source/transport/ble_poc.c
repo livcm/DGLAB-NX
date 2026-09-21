@@ -956,7 +956,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v5 (dumps 0x60 bytes at the data start, spots repeats)");
+    pocLog("btdrv probe: v6 (dumps 0x60 bytes at the data start, connects even without a scan hit)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
@@ -1142,10 +1142,18 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     btdrvClearBleScanFilters();
     pocLog("btdrv probe: done, %u scan result(s) in total", total_scan_results);
 
-    // If the scan did produce a device, this is the one thing the earlier
-    // rounds could never test: a connect in the same session, to an address the
-    // stack has just seen. The configured address was never the problem, so a
-    // failure here is about the stack's state, not about a stale address.
+    // The connect method (manager +0x88 = 0x59b0) answers Bluetooth/0x14F when
+    // either of its two client_if lookups finds an entry, before it ever talks
+    // to the stack. So the interesting question is whether a *clean* session -
+    // one where the manager has just handed out client_if - gets past that
+    // check. Connect to the scanned address when the scan produced one, and to
+    // the configured address otherwise.
+    if (!have_address && g_poc.use_target_address) {
+        memcpy(scanned_address.address, g_poc.target_address, sizeof(scanned_address.address));
+        have_address = true;
+        pocLog("btdrv probe: no scan result, falling back to the configured address");
+    }
+
     if (have_address && client_if != 0xFF) {
         pocLog("btdrv probe: connect attempt to %02X:%02X:%02X:%02X:%02X:%02X (client_if=0x%02X)",
             scanned_address.address[0], scanned_address.address[1], scanned_address.address[2],
@@ -1155,7 +1163,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
         pocLog("btdrv probe: ConnectGattServer rc=0x%08X", (u32)rc);
         pocDrainBleEvents("btdrv probe after ConnectGattServer", 3000u, NULL);
     } else {
-        pocLog("btdrv probe: no scanned address to connect to (have_address=%u client_if=0x%02X)",
+        pocLog("btdrv probe: no address to connect to (have_address=%u client_if=0x%02X)",
             have_address ? 1u : 0u, client_if);
     }
 
