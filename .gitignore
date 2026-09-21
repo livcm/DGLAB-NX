@@ -21,6 +21,15 @@ sysmodule/[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-
 # see docs/dglab-protocol.md.
 reference/
 
+# Firmware, keys and extraction results used by the read-only Bluetooth
+# reverse engineering (tools/ble-re/, docs/ble-re.md). None of this may be
+# committed: it is copyrighted firmware and console-specific key material.
+*.nca
+*.keys
+prod.keys
+tools/ble-re/work/
+tools/ble-re/out/
+
 # macOS
 .DS_Store
 
@@ -28,3 +37,6 @@ reference/
 .vscode/
 .idea/
 *.swp
+
+# Python bytecode caches (tools/ble-re/)
+__pycache__/

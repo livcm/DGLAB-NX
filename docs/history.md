@@ -1511,3 +1511,223 @@ App 不同步断开**——`stop` 路径把 `slot->tx` 整个丢掉了，连 `cl
 - `nro/source/main.c:784-785` 的注释说 `+` 在菜单里仍可用，实际菜单只处理 `B`/`A`/方向键；
 - `sysmodule/source/transport/net_socket.c:613-621` 的 `kCandidates[]` 只有一个元素，
   是"只允许这一个 id"规则的载体，注释已经写明，保留即可。
+
+## ble-re：固件只读逆向过程（2026-09-21）
+
+结论与证据在 `docs/ble-re.md`，这里只留过程。
+
+**清理**：按用户要求把 Eden 残留（`~/.local/share/eden`、`~/.config/eden`、
+`~/.cache/eden`，共约 318 MB）移入废纸篓。Eden 与 Ryujinx 的固件是同一份（234 个 NCA
+文件名逐一比对一致），所以素材改用 Ryujinx。
+
+**搭工具**：hactool 从源码构建（`git clone --recursive` +
+`cp config.mk.template config.mk` + `make`）；Ghidra 用 `brew install ghidra`
+（12.1.3，配 brew 的 openjdk@21——headless 需要 `JAVA_HOME`，项目目录还要预先建好，
+否则报 `Directory not found`）。
+
+**踩到的坑**：
+
+1. Ryujinx 把每个 NCA 存成 `<hash>.nca/00` 这样的**分片目录**，hactool 打不开；先把
+   分片按名字顺序拼回单文件才行（第一次用 `xargs cat` 被路径里的空格弄坏了）。
+2. `strings -t x` 给的是**文件偏移**，要经过段映射才是虚拟地址；`adrp`+`add`、
+   `adrp`+`ldr`、`adr` 三种寻址都得覆盖——漏掉 `adr` 时，服务名表看起来"没人引用"，
+   白绕了很久。
+3. 读 switchbrew 的 Title list 时，名字单元格排在版本单元格后面，逐行读会错位一格：
+   这次先误把 `bluetooth` 认成 `010000000000000C`、`btm` 认成 `0x2B`，用模块自身的
+   字符串（`btdrv`/`bt`、`btm:u`/`btm:sys`/`btm:dbg`）交叉验证后才改回 `0x0B`/`0x2A`。
+4. Ghidra 的 Java 脚本必须放在 `-scriptPath` 指到的目录里，只给绝对路径会报
+   "Failed to find source bundle"；`getReferencesTo` 返回迭代器而不是数组，
+   而编译错误会以 "class could not be found" 的形式冒出来。
+
+**当前卡点**（详见 `docs/ble-re.md`）：`btdrv` 的命令处理表已经找到（`0x159a28`，
+137 项），但"表下标 ↔ libnx 命令号"的证据互相矛盾（`0x3E` 像
+`RegisterGattClient`，`0x2E` 却不像 `InitializeBle`），因此还不能把 PoC 的失败点归类成
+"绑定漂移"还是"固件拒绝"。
+
+**2026-09-21 增补（主机侧探针）**：用户要求把"能在主机上验证的"直接做掉，于是把判定
+这一步做成实机探针：
+
+- `common/include/dglab/ipc_poc.h` 加 `DglabPocAction_ProbeBtdrvIdentity = 12`；
+- `sysmodule/source/transport/ble_poc.c` 加 `pocDrainBleEvents` 与
+  `pocRunBtdrvIdentityProbe`。0x400 字节的 `BtdrvBleEventInfo` 放 `.bss`（只有 PoC
+  worker 用），这样新函数的栈帧仍在 1 KB 以下——`tests/stack` 的白名单没有动，它仍然
+  能对新的大栈帧报错；探针本身只做读和本地注册（不写 BF、不改可见性/广播、不动电台
+  开关、不碰 DG-LAB 设备）；
+- `nro/source/ble_poc_view.c` 把探针绑到 `Right` 并加了一行按键提示；
+- 再加一个阳性对照：`StickL` 用 Apple/Microsoft/Samsung 的厂商 ID 轮换做 general 扫描
+  （`pocScanControlCompany`），用来把"btm 不替我们扫描"和"过滤器没匹配上"分开——
+  只有扫到设备才是结论，扫不到不算；
+- 判读规则（名称/MAC/信道图 + "BLE 未初始化时空转排水"）写进 `docs/ble-re.md`
+  的「主机侧验证」，操作说明写进 `docs/ble-poc.md`。
+
+验证：`make` 通过（sysmodule + NRO 都重建，`release/` 布局完整）；`tests/stack`
+124 个函数全部 < 1024 字节；`tests/protocol` 64、`tests/ipc` 51、`tests/net` 71、
+`tests/motion` 43、`tests/touch` 103、`tests/canvas` 1943、`tests/lang` 913，全部 0 失败。
+**实机部分按规矩由用户执行**：sysmodule 要重装并重启主机，否则跑的还是旧二进制。
+
+**2026-09-21 实机反馈（`0x00000615`）**：用户装好新 sysmodule 并重启后，进 BLE PoC 页面
+仍然显示 `DGLAB sysmodule not found (0x00000615)`，但 socket 页能正常起服务端（sysmodule
+日志里 `server start, dglab v0.3.0-12-g0107c24-dirty` 也在）。查到根因：菜单化那次提交
+（`940bd6a feat: build the NRO socket screen`）之后，`main()` 全程持有一个 `dglab` IPC
+会话，而 PoC 页面又自己 `smGetService` 开第二个；sysmodule 是
+`smRegisterService(..., max_sessions=1)`，第二个会话被 SM 拒掉。旧版 NRO 本身只有 PoC
+一个会话，所以这个页面从菜单化之后就再没打开过。
+
+修法（NRO 侧，不改 sysmodule、不用重启主机）：`dglabBlePocViewRun()` 改为接收调用方的
+`Service*` 并复用，页面不再自己开会话、也不再 `serviceClose`（会话归调用方）；
+`main()` 把 `&dglab` 传进去。规则写进 `nro/AGENTS.md` 的「边界」，说明写进
+`docs/ble-poc.md`。
+
+**2026-09-21 第十三次实机（身份探针跑通）**：`Right` 之后拿到
+`address=A4:38:CC:87:FD:2B`、`name='Nintendo Switch'`、`IsBluetoothEnabled=1`、
+`btmGetState=6` → **libnx 的命令号在 22.5.0 上没有漂移**，`docs/ble-re.md` 里那条
+"(A) 绑定漂移"的疑问被否掉。但同一份日志里 BLE 侧命令
+（`GetChannelMap` 40 / `GetBleChannelMap` 258 / `GetBleManagedEventInfo` 79 /
+`InitializeBle` 46）全返回 `0x0000F601` = `MAKERESULT(Module_Kernel,
+KernelError_ConnectionClosed=123)`，而**同一会话更早**的驱动级探针里 `InitializeBle`
+返回 `0`。判断为状态问题：BLE 管理器把内部连接绑在初始化它的那个会话上，会话结束
+（`btdrvExit()`）之后新会话只剩 ConnectionClosed；完全不碰 BLE 的
+`IsBluetoothEnabled` / `GetAdapterProperty` 照常可用是旁证。
+
+据此改动：驱动级探针不再每次会话自动运行（`Left` 手动），会话开头先睡 300 ms 处理排队
+的动作，保证新会话的第一次蓝牙操作就是用户要的那个探针。下一步要在**重启主机后的干净
+状态**下重跑 `Right`，看 `InitializeBle` 是否回到 0、`client_if` 是否仍是 `0xFF`。
+
+**2026-09-21 第十四次实机（只有扫描）**：这轮驱动级探针确实没自动跑，会话里一次 btdrv
+BLE 调用都没有，`btm:u` 的三种过滤器扫描仍然全是 `events=0 polls=16 devices=0` —— 说明
+"扫描不出事件"不是被我们自己的 btdrv 调用弄脏的。身份探针又没跑到：用户按的是 `R` 肩键
+（日志里十几次 `action queued 5` = rescan），不是十字键右。于是把身份探针改成**开机后
+第一次会话自动执行**（第一次会话里用户若主动要求别的动作则跳过并留到下次），不再依赖
+按键；会话开头仍保留 300 ms 给 NRO 把 START + ACTION 一起送过来。
+
+**2026-09-21 第十五次实机（干净启动下的身份探针）**：确认 `0xF601` 那一串的源头是
+**`btdrvGetChannelMap`（cmd 40）**——干净启动下它之前每条命令都是 0，它自己开始返回
+`MAKERESULT(Module_Kernel, KernelError_ConnectionClosed)`，同一会话里它之后的每条命令也都
+是同一个错误。固件在收到这条请求后把我们的会话关掉了；`GetBleChannelMap` /
+`GetBleManagedEventInfo` / `InitializeBle` 的 `0xF601` 都是被殃及。第十三轮里 cmd 40
+之前调用 `InitializeBle` 返回过 0，所以 cmd 46 本身没问题。
+
+据此改动：身份探针改成先做 BLE 侧测量、两条 channel map 放最后；START 新增
+`DGLAB_POC_START_FLAG_SKIP_PROBES`，用扫描键从空闲界面起会话时不跑任何探针，好让
+"干净状态下 btm 到底会不会替这个进程扫描"能被单独观察。
+
+**2026-09-21 第十六 / 十七次实机（干净扫描 + 干净探针，判定收口）**：两次各重启一次。
+干净扫描（START 带 `SKIP_PROBES`，整个会话没有一次 btdrv 调用）里
+`btdevStartBleScanSmartDevice(0x1812) rc=0` 但 `events=0 polls=16 devices=0`；干净探针里
+`btdrvInitializeBle` 成功、随后排水到的事件一律是
+`ClientRegistration result=0x37 / client_if=0xFF / status=0`（连续 16 条），跑完探针后
+`btdevStartBleScan*` 变成 `rc=0x0005168F`（会话结束又恢复）。
+
+判定：**(A) 绑定漂移——否；(C) 栈里没有通用 central——否；(B) 固件侧不给后台 sysmodule
+通用 BLE central——是**。按约定停下报告，不写 exefs patch / mitm；结论与残余不确定项
+（`0x37` 归属、队列是否按会话隔离、`0x37` 的固件语义）写在 `docs/ble-re.md` 的「判定」，
+`AGENTS.md` §15 与 `README.md` 的 BLE 状态同步更新。
+
+**2026-09-21 参数形状逆向与探针（计划「先对齐固件参数布局」）**：
+
+1. 从 `bluetooth` 模块的适配层把 BLE 段每条命令的**请求形状**导出（按虚表 137 槽的地址
+   区间切分），并与 libnx `btdrv.c` 的请求宏逐条对照，结果写进 `docs/ble-re.md` 的
+   「参数布局对照」。关键一条：固件对 **cmd 62（RegisterGattClient）拷 0x40 字节参数块**，
+   而 libnx 只发 0x14 字节（`size` + UUID）——多出的 0x2C 字节是请求缓冲里的残留，
+   正好解释干净启动下仍然 `result=0x37 / client_if=0xFF`。另一条：cmd 40 用的是
+   `HipcMapAlias` 缓冲，而固件那条更像是要指针缓冲，调完就把会话关掉。
+2. 探针实现（只改 PoC 调试代码）：`pocRawRegisterProbe` 用三种 0x40 字节布局重发 cmd 62
+   （内联 / 指针缓冲、UUID 在块首或 +0x20），**外加一次同一会话内的正面对照**（先 libnx
+   形状、紧接着固件形状，其它条件不变）；`pocRawChannelMapProbe` 用指针缓冲重发 cmd 40。
+   独立会话的那些实验各自开一次 btdrv，避免"关会话"那条把后面的测量带坏。
+3. 补丁机制备好：`tools/ble-re/make_ips.py` 生成 Atmosphère 的 `exefs_patches` IPS32
+   （偏移 = 0x100 + 地址，写入前先与 ELF 里的原字节比对，版本不符就报错），`--self-test`
+   与 `--verify` 都跑过；真补丁等第 2 步的实机结果，只有仍被拒才打。
+
+验证：`make` 通过；`tests/stack` 125 个函数全部 <1024 字节；其余 host 测试全绿。
+
+**2026-09-21 第十九次实机（形状对齐成功，判定翻回 (A)）**：
+
+    raw register A: ClientRegistration result=0x00000000 client_if=0x02 status=0
+    raw register B (inline, uuid@0x20) rc=0x00029E71
+    raw register C (pointer buffer, uuid@0x0) rc=0x0000F601
+    identity: InitializeBle rc=0x0000E401
+
+用固件要的 **0x40 字节内联块**发 cmd 62，注册**成功**并拿到 `client_if=0x02`；libnx 原来的
+0x14 字节形状才是 `result=0x37 / client_if=0xFF` 的原因。指针缓冲那条（C）返回 `0xF601`
+并把会话关掉，于是后面的 `InitializeBle` 报 `0xE401 = KernelError_InvalidHandle` —— 三个
+实验各开独立会话，责任分得很清楚。也就是说之前"固件侧不给后台 sysmodule 通用 BLE central"
+的中间结论是错的，实际是 **(A) 请求形状漂移**，**不需要 exefs patch / mitm**。
+
+据此改动：删掉形状对照探针，把正确的注册做成可复用的
+`pocBtdrvRegisterGattClientFixed()`；身份探针改成"运输形状"流程——固定注册 → （配了地址时）
+在**同一会话**里 `btdrvConnectGattServer(client_if, addr, true, aruid)` → 排水看
+`ClientConnection` 事件 → `InitializeBle`。`docs/ble-re.md` 的「判定」、根 `AGENTS.md` §15 与
+`README.md` 的 BLE 状态都改成 (A) 的结论；仍然未解释的是 `btm:u` 的扫描不产生事件。
+
+**2026-09-21 第二十次实机（探针输出被日志环吃掉）**：日志里只有 5 次正常会话（配了地址 →
+`direct connect` → `btdevConnectToGattServer rc=0x5568F` ×3 → 超时），身份探针一行都没有。
+原因：探针排水一次写几千字节（16 条事件 × 2 行）冲掉 4KB 的环，而 `pocStart` 每次又会
+`memset` 整个环，NRO 还没轮询到的输出就永久丢了。修法：环 4KB → 16KB、会话开始不再清空环
+（只推进 `log_valid_from`）、排水最多记 4 条事件。另外记下：`btdevConnectToGattServer` 走的
+是 `btm:u`，与我们修好的 btdrv 注册不是同一条路，且日志里那个随机静态地址可能已过期，
+正式测前要用手机确认设备地址。
+
+**2026-09-21 第二十一次实机（顺序搞清楚了）**：探针输出这次完整可见：
+`fixed RegisterGattClient rc=0x00029E71 client_if=0xFF`（在 `InitializeBle` **之前**），
+`InitializeBle rc=0`，随后 `ClientRegistration result=0 client_if=0x02`（固件自己完成注册），
+`EnableBle rc=0`；`btdevConnectToGattServer` 仍是 `0x5568F`（btm:u 那条路）。
+结论：**显式注册要放在 `InitializeBle` 之后**，接口号由管理器给出。探针改成
+`InitializeBle → 取 client_if → 同会话 ConnectGattServer → 排水 6 秒`，并给
+`BtdrvBleEventType_ClientConnection` 加了字段解码（status/conn_id/地址/reason），
+下一次实机就能看到连接结果。
+
+**2026-09-21 第二十二次实机（接口号来源修正）**：显式注册即使放在 `InitializeBle` 之后，
+IPC 也返回 0、事件仍是 `result=0x37 / client_if=0xFF` —— 这条命令在 22.5.0 上不能用；
+有效接口号来自管理器自己在 `InitializeBle` 里的注册（`client_if=0x02`）。于是把
+`pocDrainBleEvents` 增加出参收集成功注册的 `client_if`、删掉显式注册、连接直接用管理器的
+接口号。顺带修掉两个误导读数：`found` 里程碑不再因为"配了目标地址"而点亮（只有真扫到设备
+才点亮）；用户看到的"不到 5 秒 FAILED"是第二次起的会话直接走 `btm:u` 的
+`btdevConnectToGattServer`（`0x5568F` 立即返回，不是超时），与我们在 btdrv 层修的路无关。
+
+**2026-09-21 第二十三次实机（第一次真正发起连接）**：`client_if=0x02` 取对了，
+`btdrvConnectGattServer(client_if=2, EA:A8:AC:22:2C:18, direct, aruid)` 返回
+`0x00029E71`（btdrv 模块自己的 Result，`module 0x71`、`description 0x14F`；模块里有十几处
+`mov w0,#0x9e71; movk w0,#0x2,lsl#16`，是通用失败返回），紧接着管理器又报
+`ClientRegistration result=0x37 / client_if=0xFF`。下一步同时排除两件事：地址可能已过期
+（随机静态地址会变，用手机重扫）；事件载荷布局可能和 libnx 不一致（排水现在会把
+ScanResult 前 32 字节整段打出来并在整块里搜索配置地址、命中打偏移，按 `Left` 跑驱动级扫描
+即可看到）。探针另加两个廉价变体：`is_direct=false` 与 `aruid=0`。
+
+**2026-09-21 第二十四次（btm:u 的 ARUID）**：用户确认设备地址稳定，于是转向"参数形状"另一
+条线：读 `btm:u` 的公共实现（`nx/source/services/btmu.c`）发现 **libnx 的 `btmu*` 封装用
+`appletGetAppletResourceUserId()` 填请求**，而我们的调用发生在 sysmodule 里、那个值没有意义，
+同一批请求还带 `.in_send_pid`。这正好能解释"扫描永远 0 事件、连接被拒（0x5568F）"。
+探针新增 `pocRunBtmuAruidProbe`：按 libnx 的载荷形状、但填 NRO 报上来的真实 ARUID，重发
+cmd 8（StartBleScanForSmartDevice）/ cmd 10（GetBleScanResultsForSmartDevice）/
+cmd 18（BleConnect）/ cmd 20（BleGetConnectionState）并轮询，日志前缀 `btmu:`；
+0x148 字节的扫描结果结构放 `.bss`。
+
+**2026-09-21 第二十五次实机（三条路都试过）**：`ConnectGattServer` 三种参数组合
+（direct/indirect、aruid=NRO/0）全返回 `0x00029E71`；按 libnx 形状但填 NRO 真实 ARUID 的
+`btmu StartBleScanForSmartDevice` 返回 `0x0000060A`。查 switchbrew 的 module 表：
+`0x29E71` = `Bluetooth`(113)/0x14F，`0x60A` = `Sf`(10)/3，`0x5568F` = `Btm`(143)/0x2AB。
+于是结论明确：**`btm:u` 这条路对后台 sysmodule 不通**（无效 ARUID 时 btm 收下请求但什么都不做，
+填 NRO 的 ARUID 时框架层就拒），通用 central 只能走 btdrv；btdrv 已接受我们为客户端，
+连接返回的是 Bluetooth 模块的通用失败，最可能是"该地址在协议栈里还没有记录"。
+探针加了一条 `btdrvTriggerConnection`（cmd 23）作对照，下一步把 btdrv 的扫描链
+（SetBleScanParameter / 过滤器 / StartBleScan）按适配层逐条对齐。
+
+**2026-09-21 第二十六次实机（类型尺寸对照，方向定调）**：`TriggerConnection`(cmd 23) 返回
+`0x00300C71` = `Bluetooth`/0x1806。查固件适配层：这条命令要**6 字节地址 + 0x2BE 字节结构**，
+而 libnx 只发 `{addr; u16 timeout}` 共 8 字节，所以这个错误码同样不能当作"设备不存在"的证据。
+顺手把 libnx 侧的类型尺寸量成表（新增 `tools/ble-re/abi_sizes.py`：编译探头 + 读符号大小）：
+`BtdrvGattAttributeUuid` 0x14 / `BtdrvBleAdvertisePacketData` 0xCC /
+`SetSysBluetoothDevicesSettings` 0x200 / `BtdrvGattId` 0x18 / `BtdrvChannelMapList` 0x88 等。
+对照结论：**不是"整体挪号"能修的**——20.0.0+ 把这一层重新生成成 `bluetooth.autog` 时连类型
+一起换了（0x40 的注册描述符、0x2BE 的设备记录都不是 libnx 的任何类型），
+所以要继续就得逐条命令从适配层+实现体反推结构、按固件形状重建这一层 ABI；
+方法、脚本与判定都已具备，剩下的是工作量。判定本身不变：**不需要固件补丁**。
+
+**2026-09-21 收尾：记入文档、评估对上游的价值**。用户决定"先记入文档，之后再做"，于是把
+重启顺序（扫描链先行 → 连接 → 服务发现/订阅/B0-B1）写进 `docs/ble-re.md` 的「下一步」，
+并把这次的四条发现整理成可直接提交的草稿（`tools/ble-re/upstream.md`）：cmd 62 的载荷变成
+0x40 字节、cmd 40 会让固件关会话、`btm:u` 是 applet 专用（`Sf/0x60A` 证据）、
+20.0.0+ 的 btdrv ABI 与 `btdrv_types.h` 不一致（含"固件要拷多少 vs libnx 类型尺寸"对照表）。
+核过 libnx 现状：`btdrv.h` 版本注记只到 12.x、`btmu.c` 最后一次改动 2020-12-29，仓库里没有
+任何 20.0.0+/`bluetooth.autog` 的记录，所以这些是**新信息**；提交动作留给用户。

@@ -10,7 +10,7 @@
 | 模式 | 连接方式 | 状态 |
 | --- | --- | --- |
 | WebSocket | sysmodule 与手机 DG-LAB App 建立 WebSocket 会话：Switch 当服务端，App 扫码连入（Switch 不主动外连）；手机负责与设备之间的 BLE，并把波形数据转发给设备 | 已实现（Socket V3） |
-| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | 未实现，该模式已搁置，见 `docs/ble-poc.md` |
+| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | 未实现；逆向结论是**不需要固件补丁**（libnx 的 btdrv 绑定在 20.0.0+ 整体过时），GATT client 注册已在实机跑通；移植工作已暂停、步骤见 `docs/ble-re.md` 的「下一步」，实测记录见 `docs/ble-poc.md` |
 
 两种模式下 Switch 都不直接持有蓝牙连接（WebSocket 模式的 BLE 在手机上）。
 
@@ -22,7 +22,7 @@
 | `nro/` 前端 | 可用：菜单选择玩法——测试屏（地址/二维码/测试键/日志）、体感玩法（Joy-Con 驱动波形）与触屏玩法（左右半区对应 A/B 通道） |
 | `overlay/` | 未实现 |
 | `mods/` | 未实现 |
-| BLE 模式（sysmodule 直连设备） | 未实现，已搁置，见 `docs/ble-poc.md` |
+| BLE 模式（sysmodule 直连设备） | 未实现；逆向判定是"改我们自己的请求形状即可、不需要固件补丁"，注册已实机跑通，见 `docs/ble-re.md`；实测记录见 `docs/ble-poc.md` |
 
 进度与顺序见 `AGENTS.md` §15：骨架、Sysmodule、IPC、Coyote V3 协议层、WebSocket 模式
 传输、波形接入、NRO 交互、Joy-Con 输入、基础 UI、NRO 元信息与版本管理、浅色模式都已完成；
@@ -249,6 +249,7 @@ make -C tests/stack      # sysmodule 的线程栈预算（用 devkitA64 的 gcc 
 | `docs/joycon-input.md` | Joy-Con 六轴资料，以及"动作越大波形值越大"这个可选玩法的设计 |
 | `docs/touch-input.md` | 触屏玩法：libnx 触屏资料、左右半区与两轴映射、与体感共用的参数、实机验收清单 |
 | `docs/ble-poc.md` | BLE 模式（sysmodule 直连设备）的实测记录（未实现，已搁置） |
+| `docs/ble-re.md` | BLE 直连的只读固件逆向：模块归属、固件侧 IPC 形状与当前判定进度 |
 | `docs/docs-audit.md` | 文档约定（谁放哪一层）与 2026-09-17 审计的处置结果 |
 | `docs/history.md` | 文档压缩时移出的历史原文（各文档的迭代过程与审计明细） |
 

@@ -462,8 +462,25 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
 确认失败点属于"结构/调用顺序变化"（改绑定即可，不需要补丁）还是"缺少通用 GATT
 central"（需要 exefs patch 或直接放弃）。不要在没有逆向结论前尝试补丁方案。
 
-除非任务明确要求，否则不要越过上面的顺序做过早的实现：Overlay 与 Game Mod 排在
-界面与玩法之后，复杂 UI 也不要抢在核心功能稳定之前。
+这次只读逆向的进展记在 `docs/ble-re.md`：`bluetooth` 模块（`010000000000000B`，
+20.0.0+ 改名 `bluetooth.autog`）与它的 `btdrv`/`bt` 命令处理表已经定位，但
+"固件命令表下标 ↔ libnx 命令号"的对应关系还没有定论，判定与补丁方案都还没有结论。
+判定这一步的主机侧探针已经就绪：NRO 里按 `Right` 跑 `pocRunBtdrvIdentityProbe`，读本机
+适配器名称/MAC/信道图（命令号漂移的调用给不出这些），并在 BLE 未初始化时空转排水一次，
+用来判断 btdrv 的 BLE 事件队列是否按会话隔离。判读规则见 `docs/ble-re.md`。
+
+**2026-09-21 结论（实物验证）**：`docs/ble-re.md` 的「判定」是 **(A)：libnx 的请求形状过时，
+改我们自己的调用即可**。GATT client 注册曾一直失败（`result=0x37 / client_if=0xFF`），
+原因是 libnx 只发 0x14 字节而固件适配层要 0x40 字节参数块；按固件形状发出去后注册成功
+（`result=0 / client_if=0x02`）。**不需要 exefs patch、不需要 mitm**，BLE 模式不再因为
+"固件封死"而搁置；仍未解决的是 `btm:u` 的扫描不产生事件（见同一节的最后一段）。
+
+**2026-09-21 状态：暂停，等以后做移植。** 20.0.0+ 把 `bluetooth` 重生成成
+`bluetooth.autog`，连参数类型一起换了（注册要 0x40 字节、`TriggerConnection` 要 0x2BE 字节
+等），所以要接着做的是"按固件形状重建 btdrv 这一层 ABI"的移植工作，顺序与入口写在
+`docs/ble-re.md` 的「下一步」（扫描链先行）。`btm:u` 那条路已排除：它是 applet 专用接口，
+后台 sysmodule 用不了（`Sf/0x60A`）。这次可回馈给 libnx 的四条发现草稿在
+`tools/ble-re/upstream.md`。
 
 #### Socket V4 协议
 
@@ -473,3 +490,15 @@ V4 的消息外壳（`hello` / `message` / `heartbeat` / `ping` /
 `pong` / `error` / `client_disconnected`）、`?tid=` 绑定与 V4 二维码。前置是官方
 beta 稳定与 App 版本确认；在此之前不写半成品代码，只保留 `docs/dglab-socket.md`
 里已核对的 V4 事实。验收：`tests/net` 增加 V4 外壳用例与回环端到端，再实机。
+
+#### deko3d UI 后端（路线 A）
+
+把呈现层从 libnx framebuffer 换成 deko3d，绘制层
+（`canvas.c` 与三屏布局）零改动。做法：device/queue/swapchain + PitchLinear 图像，
+CPU 照旧写像素（`dkMemBlockGetCpuAddr` + `dkMemBlockFlushCpuCache`），再用
+`dkCmdBufCopyBufferToImage` / `dkCmdBufBlitImage` 上屏，不写着色器；`nro/Makefile`
+链接 `-ldeko3d`。开工前先确认 swapchain 是否接受 PitchLinear，不接受就退化成
+“CPU 写纹理 + blit”。评估与核对过的事实见 `docs/nro-ui.md` 的
+“framebuffer → deko3d 迁移评估”。路线 A 用 `deko3d.h` 的 C API 就够，不需要
+C++17，也不需要安装 portlibs。
+验收：三屏 × 720p/1080p 的实机截图与改造前一致，`tests/canvas` 不受影响。

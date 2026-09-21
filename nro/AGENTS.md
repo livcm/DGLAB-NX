@@ -20,6 +20,11 @@
 - NRO 不得自己建立或持有 DG-LAB 设备侧连接（BLE/WebSocket），所有 DG-LAB 通信必须通过
   Sysmodule IPC（见根 `AGENTS.md` 的"单一 DG-LAB 连接所有者"）。
 - NRO 的 UI、玩法和业务逻辑应与 BLE/协议层解耦。
+- **同一个进程里只开一个 `dglab` IPC 会话**：sysmodule 用
+  `smRegisterService(..., max_sessions=1)` 注册，而且它的服务循环一次只服务一个会话。
+  菜单循环已经持有一个会话，所以任何子页面（例如 BLE PoC 页面）必须**复用**这个
+  `Service*`，不能自己 `smGetService`——第二个会话会被 SM 直接拒掉（返回 `0x615`，
+  看起来像"sysmodule 没运行"，但 socket 页却照常能用，2026-09-21 就是这样踩的）。
 
 ## 交互模型示例
 
