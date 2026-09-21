@@ -54,11 +54,11 @@
 // never collide with a real filter.
 #define POC_FILTER_CONTROL_COMPANY 0xFFFEu
 
-// The firmware's btdrv adapter for the GATT client registration copies a
-// 0x40-byte argument block out of the request, while libnx sends a 0x14-byte
-// struct (size + 16-byte UUID) inline - so everything past the first 0x14 bytes
-// is whatever happened to sit in the request buffer (docs/ble-re.md).
-#define POC_RAW_REG_SIZE 0x40u
+// Note on a retracted reading of the firmware: the 0x40-byte GATT registration
+// block this file used to send came from treating 0x159a28 as a command table,
+// but that address is the btdrv service object's vtable. The firmware reads
+// libnx's 0x14-byte BtdrvGattAttributeUuid, exactly as libnx sends it; see
+// docs/ble-re.md, "判定（2026-09-21 夜，更正）".
 
 // ---------------------------------------------------------------------------
 // State
@@ -1298,16 +1298,16 @@ static void pocRunBtmuAruidProbe(PocWorker* w)
     }
 }
 
-// Identity probe: the console side of docs/ble-re.md's open question.
+// Identity probe: the console side of docs/ble-re.md.
 //
-// The static analysis could not settle whether libnx's btdrv command numbers
-// still match HOS 22.5.0, because every call this project makes returns success
-// and a drifted command number would look exactly the same. This probe asks for
-// answers a wrong command number cannot fake: the adapter's own name, its
-// BD_ADDR, its class of device, the AFH channel map and the BLE channel map.
-// It then runs the GATT client register/unregister sequence and logs the raw
-// managed events, which is where the ClientRegistration payload becomes
-// readable instead of inferred.
+// The request shapes are settled now (every command case in the firmware's
+// dispatcher has been read; libnx's shapes match), so what this probe is for is
+// semantics: it reads back things a wrong call cannot fake - the adapter's own
+// name, BD_ADDR, class of device, AFH channel map and BLE channel map - brings
+// the manager up with InitializeBle, connects with the client_if the manager
+// hands out, and logs the raw managed events, which is where the
+// ClientRegistration and ClientConnection payloads become readable instead of
+// inferred.
 //
 // Everything here is a read or a purely local registration: no BF write, no
 // visibility/advertise change, no radio state change, nothing that reaches a

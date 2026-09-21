@@ -25,7 +25,7 @@ NRO、Overlay 和 Game Mod 负责具体的用户交互或游戏事件，并通�
 
 | 模式 | 连接方式 | 状态 |
 | --- | --- | --- |
-| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | **未实现**，该模式已搁置（重启前需只读逆向），见 `docs/ble-poc.md` |
+| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | **未实现**，该模式已搁置（只读逆向已完成：不需要固件补丁，卡点是语义/状态），见 `docs/ble-re.md` 与 `docs/ble-poc.md` |
 | WebSocket | sysmodule 与手机 DG-LAB App 建立 WebSocket 会话：Switch 当服务端，App 扫码连入（Switch 不主动外连）；手机负责与设备之间的 BLE，并把波形数据转发给设备 | **已实现**（Socket V3），见 `docs/dglab-socket.md` |
 
 两种模式下的设备侧连接都只能由 sysmodule 建立并持有，其它组件一律走 IPC（见 §3）。
@@ -462,25 +462,23 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
 确认失败点属于"结构/调用顺序变化"（改绑定即可，不需要补丁）还是"缺少通用 GATT
 central"（需要 exefs patch 或直接放弃）。不要在没有逆向结论前尝试补丁方案。
 
-这次只读逆向的进展记在 `docs/ble-re.md`：`bluetooth` 模块（`010000000000000B`，
-20.0.0+ 改名 `bluetooth.autog`）与它的 `btdrv`/`bt` 命令处理表已经定位，但
-"固件命令表下标 ↔ libnx 命令号"的对应关系还没有定论，判定与补丁方案都还没有结论。
-判定这一步的主机侧探针已经就绪：NRO 里按 `Right` 跑 `pocRunBtdrvIdentityProbe`，读本机
-适配器名称/MAC/信道图（命令号漂移的调用给不出这些），并在 BLE 未初始化时空转排水一次，
-用来判断 btdrv 的 BLE 事件队列是否按会话隔离。判读规则见 `docs/ble-re.md`。
+这次只读逆向记在 `docs/ble-re.md`：`bluetooth` 模块（`010000000000000B`，20.0.0+ 的 NPDM
+名是 `bluetooth.autog`）的服务对象虚表（`0x159a28`，137 项）与命令分派
+（`FUN_0001d4b0`，命令 `0..0x102` 各一个 case）都已定位。
 
-**2026-09-21 结论（实物验证）**：`docs/ble-re.md` 的「判定」是 **(A)：libnx 的请求形状过时，
-改我们自己的调用即可**。GATT client 注册曾一直失败（`result=0x37 / client_if=0xFF`），
-原因是 libnx 只发 0x14 字节而固件适配层要 0x40 字节参数块；按固件形状发出去后注册成功
-（`result=0 / client_if=0x02`）。**不需要 exefs patch、不需要 mitm**，BLE 模式不再因为
-"固件封死"而搁置；仍未解决的是 `btm:u` 的扫描不产生事件（见同一节的最后一段）。
+**2026-09-21 结论（静态分析 + 实机日志）**：**不需要 exefs patch、不需要 mitm**；而且
+libnx 的 btdrv 请求形状与 22.5.0 的固件**一致**（逐条读过命令 case：55/56 无参数、
+53 是 0xCC、57/58 是 0x3E、61 是 1 字节 bool、62 是 0x14、23 是 8 字节）。第一轮"形状
+漂移、要按固件形状重建 btdrv ABI"的结论是把服务对象的虚表当成命令表造成的误判，
+已在 `docs/ble-re.md` 更正（旧表保留并标注取代）。仍未解决的是**语义/状态**问题：
+显式 `RegisterGattClient` 返回 `0x37 / client_if=0xFF`、`ConnectGattServer` 返回
+`Bluetooth/0x14F`、扫描拿不到结果；`btm:u` 那条路已排除（applet 专用，`Sf/0x60A`）。
 
-**2026-09-21 状态：暂停，等以后做移植。** 20.0.0+ 把 `bluetooth` 重生成成
-`bluetooth.autog`，连参数类型一起换了（注册要 0x40 字节、`TriggerConnection` 要 0x2BE 字节
-等），所以要接着做的是"按固件形状重建 btdrv 这一层 ABI"的移植工作，顺序与入口写在
-`docs/ble-re.md` 的「下一步」（扫描链先行）。`btm:u` 那条路已排除：它是 applet 专用接口，
-后台 sysmodule 用不了（`Sf/0x60A`）。这次可回馈给 libnx 的四条发现草稿在
-`tools/ble-re/upstream.md`。
+**2026-09-21 状态：暂停，等以后继续。** 重开的顺序写在 `docs/ble-re.md` 的
+「下一步（更正后）」：扫描链先行——先弄清扫描结果走哪条路径，再查注册/连接为什么被拒。
+主机侧探针保留在 `sysmodule/source/transport/ble_poc.c`（NRO 里按 `Right` 自动跑 /
+`Left` 驱动级扫描 / `StickL` 对照扫描）。对上游要提的发现等整条研究做完再整理
+（`tools/ble-re/upstream.md` 里第 1、4 条已作废）。
 
 #### Socket V4 协议
 

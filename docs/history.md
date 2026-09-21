@@ -1731,3 +1731,32 @@ cmd 18（BleConnect）/ cmd 20（BleGetConnectionState）并轮询，日志前�
 20.0.0+ 的 btdrv ABI 与 `btdrv_types.h` 不一致（含"固件要拷多少 vs libnx 类型尺寸"对照表）。
 核过 libnx 现状：`btdrv.h` 版本注记只到 12.x、`btmu.c` 最后一次改动 2020-12-29，仓库里没有
 任何 20.0.0+/`bluetooth.autog` 的记录，所以这些是**新信息**；提交动作留给用户。
+
+## 20. 追加（2026-09-21 夜）：BLE「请求形状漂移」判定被推翻
+
+第一轮逆向把 `btdrv` 服务对象的**虚表**（`0x159a28`，137 项）当成了命令表，据此得出
+"20.0.0+ 把 btdrv 这一层 ABI 重新生成过"（注册要 0x40 字节、`TriggerConnection` 要
+0x2BE 等），并写进了 `docs/ble-re.md`、`docs/ble-poc.md`、根 `AGENTS.md` 与
+`tools/ble-re/upstream.md`。
+
+重做素材身份核对时发现两件事：
+
+1. `/tmp/ble-re/bluetooth.elf`（以及 `exefs/bluetooth/`）其实是从 title
+   `010000000000000c`（NPDM Title Name = `bcat`）解出来的，文件名起错了；要分析的是
+   `010000000000000b` 的 Program NCA `ca66270be492a16bab1d779645965bc8.nca`
+   （NPDM Title Name = `bluetooth.autog`），它与 `programs/010000000000000b/main`、
+   `nso-010000000000000b.elf` 逐字节一致。分析用的那份本身没错，但这条要记进文档。
+2. 真正的命令分派在 `FUN_0001d4b0`：CMIF 头由 `0x1d3c8` 校验，`header.command_id` 经
+   `0x11884e` 的字节表 + `0x1d4d4` 的分支表跳到**每个命令自己的 case**，case 里按 IDL
+   解出载荷后再显式调用某个虚表偏移。逐条读下来，**libnx 的请求形状全部一致**：命令行
+   55/56 无参数（都归结为管理器 `+0x28(1/0)`）、53 是 0xCC、57/58 是 0x3E、61 是 1 字节
+   bool、62 是 0x14、23 是 8 字节。所谓"0x40 字节"是命令 58 复制 0x3E 过滤器结构的栈缓冲，
+   和虚表下标 `0x3E` 混在一起了。
+
+处置：`docs/ble-re.md` 新增「判定（2026-09-21 夜，更正）」与「命令 → 请求形状」表，
+第一轮那几节保留并标注"已被取代"；`docs/ble-poc.md` 的第十九次实机结论和「结论」一节、
+根 `AGENTS.md` §15、`tools/ble-re/upstream.md`（第 1、4 条作废）、
+`sysmodule/source/transport/ble_poc.c` 的注释同步更正。
+"不需要固件补丁"这一条不变；剩下的是**语义/状态**问题（扫描结果走哪条路径、显式注册
+为什么回 `0x37`、`ConnectGattServer` 为什么回 `Bluetooth/0x14F`），顺序见
+`docs/ble-re.md` 的「下一步（更正后）」。

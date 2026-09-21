@@ -333,6 +333,11 @@ ClientRegistration 变成 `result=0 / client_if!=0xFF`，就说明**不需要补
 
 ### 第十九次实机（2026-09-21，形状对齐成功）
 
+> **本节结论已作废（2026-09-21 夜）**：日志本身没错，但"按固件形状（0x40 字节）注册成功"
+> 是误读——`client_if=0x02` 那条事件来自 `InitializeBle` 自己的注册（同一会话会反复投递
+> 4~16 次），显式注册每次都还是 `result=0x37 / client_if=0xFF`。固件侧更正见
+> `docs/ble-re.md` 的「判定（2026-09-21 夜，更正）」：libnx 的请求形状本来就是对的。
+
     raw register A: ClientRegistration result=0x00000000 client_if=0x02 status=0
     raw register A: drained 16 event(s), 0 empty read(s)
     raw register: raw register B (inline, uuid@0x20) rc=0x00029E71
@@ -481,10 +486,11 @@ ClientRegistration 变成 `result=0 / client_if!=0xFF`，就说明**不需要补
 
 ### 当前状态：暂停（2026-09-21）
 
-BLE 直连的判定已经完成——**不需要固件补丁**，卡点是 libnx 的 btdrv 绑定在 20.0.0+
-（`bluetooth.autog`）整体过时。剩下的移植工作（扫描链 → 连接 → 服务发现/订阅/读写）按
-`docs/ble-re.md` 的「下一步」在以后重开；`tools/ble-re/upstream.md` 里是这次可以直接回馈给
-libnx 的四条发现草稿。
+BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv
+请求形状过时"这个理由（形状其实一致，见 `docs/ble-re.md` 的「判定（2026-09-21 夜，更正）」）。
+剩下的是语义/状态问题：扫描结果走哪条路径、显式注册为什么回 `0x37`、`ConnectGattServer`
+为什么回 `Bluetooth/0x14F`。重开顺序写在 `docs/ble-re.md` 的「下一步（更正后）」；
+`tools/ble-re/upstream.md` 的草稿等整条研究做完再整理（第 1、4 条已作废）。
 
 本页的探针保留原样，下次开工时可以直接接着用：`A` 起会话（首次会话自动跑身份探针，
 含 btdrv 注册/连接尝试与 btm:u ARUID 对照）、`Left` 跑驱动级扫描探针、`StickL` 跑常见厂商
@@ -495,14 +501,14 @@ ID 的对照扫描。
 已经排除的可能：扫描过滤器 UUID、扫描参数（interval/window）、事件源选择（managed 与
 LE HID 两个队列）、轮询与事件两种读取方式、按地址直连、以及权限/调用顺序。
 
-剩下的解释是：libnx 的 BLE 绑定（btdrv/btm）面向 HOS 5~9 时代实现，在 22.5.0 上要么
-事件载荷布局已改变（读到的是空/错位数据），要么 Nintendo 只对系统自身的流程开放
-通用 BLE 客户端能力（btm 的 general 过滤固定为 Nintendo company ID `0x0553`、
-smart device 过滤为空、连接请求被直接拒绝）。
+剩下的解释（2026-09-21 更正后）：**请求形状不是原因**（固件的每个命令 case 都读过，与
+libnx 一致），所以问题在事件载荷布局/语义或服务端状态上——例如 `btm:u` 只对 applet 开放
+（`Sf/0x60A`，已排除），btdrv 的事件载荷是否与 `btdrv_types.h` 一致还没验证，
+`ConnectGattServer` 的 `Bluetooth/0x14F` 也没定位到具体分支。
 
-**因此在本机环境下，"Switch 后台 sysmodule 直连 BLE 外设"这条路暂时走不通。**
-继续深入只有两个方向：逆向 HOS 22.5 的 BLE ABI（工作量大、结果不确定，且违反
-"不猜测 API" 的项目原则），或者换传输层。
+**因此这条路的现状是"暂停"，不再是"走不通"**：不需要固件补丁，也不排除能走通，
+只是还差"事件/结果路径 + 注册/连接被拒的确切原因"这一步（顺序见
+`docs/ble-re.md` 的「下一步（更正后）」）。
 
 ## 已知限制
 
