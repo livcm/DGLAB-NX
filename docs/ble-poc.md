@@ -622,6 +622,36 @@ v7 探针因此自己解决：`InitializeBle` 之后如果 `client_if` 还是 `0
 `btdrvExit()`、等 500ms、重开一次（最多 3 次），拿到干净的 `client_if` 再继续；扫描结束后
 无论有没有扫到设备都会用配置地址试连。
 
+### 第三十一次实机（2026-09-21，v7：第一个会话干净，且第一次拿到 ScanResult）
+
+    poc start aruid_low=0x00000089
+    action queued 11                                    ← 进页面没有再自起会话（NRO 已修）
+    action: btdrv scan probe
+    btdrv probe: v7 (retries InitializeBle for a clean client_if, always tries to connect)
+    btdrv probe after InitializeBle: ClientRegistration result=0x00000000 client_if=0x02 status=0 ×4
+    btdrv probe: client_if=0x02 (attempt 0)              ← 一次就拿到，没走重试
+    btdrv probe: event #3 type=7 nonzero=48 first=0x004
+    btdrv probe:   000 00000000 02000000 00000000 00000000
+    btdrv probe: scan result status=0 addr=00:00:00:00:00:00 entries=0 rssi=0   ← 第一次收到
+    btdrv probe: phase 0 done fetches=48 empty=0 events=48 scan_results=1
+    btdrv probe: phase 1 done fetches=50 empty=0 events=50 scan_results=0
+    btdrv probe: connect attempt to 00:00:00:00:00:00 (client_if=0x02)
+    btdrv probe: ConnectGattServer rc=0x00300C71          ← Bluetooth/0x1806，不再是 0x14F
+
+三条结论：
+
+1. **`client_if=0x02` 是干净的**，而且 `ConnectGattServer` 这次返回 `Bluetooth/0x1806`
+   而不是 `0x14F` —— 与固件侧"`0x14F` 来自那两次 client_if 查表"完全吻合。也就是说
+   `0x14F` 确实只是状态问题，剩下的是"地址/设备"这一层。
+2. **扫描会产出 ScanResult 事件了**，但这一条是全零的（`addr=00:00:00:00:00:00 entries=0`），
+   更像"扫描开始/结束"的标记而不是设备记录。探针把它当成目标地址，才有了那次连到
+   `00:00:00:00:00:00` 的尝试。
+3. `type` 出参确实不可靠（同一条 ClientRegistration 载荷这次被标成 type=7），所以识别事件
+   只能靠载荷内容。
+
+v8 探针：忽略全零地址的 ScanResult（回落到配置地址再连），并且**每条内容与上一条不同的事件
+都会打印载荷**（不再只看前 3 条），这样真正的设备记录一出现就能看到。
+
 ### 当前状态：暂停（2026-09-21）
 
 BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv

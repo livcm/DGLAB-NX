@@ -956,7 +956,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v7 (retries InitializeBle for a clean client_if, always tries to connect)");
+    pocLog("btdrv probe: v8 (dumps every new payload, ignores zero scan addresses)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
@@ -1090,10 +1090,13 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
             events++;
 
-            // Three lines per event: where the data starts and what is there.
-            if (events <= 3) {
-                bool repeat = have_previous &&
-                    memcmp(previous_event, info.data, sizeof(previous_event)) == 0;
+            bool repeat = have_previous &&
+                memcmp(previous_event, info.data, sizeof(previous_event)) == 0;
+
+            // Dump the first events and every event whose content is new: the
+            // interesting payloads (a scan result among them) are the ones that
+            // differ from their predecessor.
+            if (events <= 3 || !repeat) {
                 u32 base = (first & ~0xFu);
 
                 if (base + 0x60u > sizeof(info.data))
@@ -1133,7 +1136,18 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
             scan_results++;
             total_scan_results++;
 
-            if (!have_address) {
+            // A scan result with an all-zero address is the manager's
+            // "scan started/stopped" marker, not a device: taking it as the
+            // target is how the 2026-09-21 run ended up connecting to
+            // 00:00:00:00:00:00.
+            bool address_nonzero = false;
+
+            for (u32 i = 0; i < sizeof(info.scan_result.address.address); i++) {
+                if (info.scan_result.address.address[i] != 0)
+                    address_nonzero = true;
+            }
+
+            if (!have_address && address_nonzero) {
                 scanned_address = info.scan_result.address;
                 have_address = true;
             }
