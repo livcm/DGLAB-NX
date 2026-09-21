@@ -22,6 +22,7 @@
 #include <dglab/ipc.h>
 #include <dglab/ipc_poc.h>
 #include <dglab/nro/ble_poc_view.h>
+#include <dglab/nro/applet_ble_probe.h>
 
 // The on screen ring keeps short lines for layout, but the file gets the whole
 // line: the sysmodule log lines carry filter patterns and UUIDs at the end, and
@@ -88,6 +89,11 @@ static void logPushLine(const char* line)
         fprintf(g_log_file, "%s\n", line);
         fflush(g_log_file);
     }
+}
+
+void dglabBlePocViewLogLine(const char* line)
+{
+    logPushLine(line);
 }
 
 // Creates the SD card directories if they are not there yet. A failure here is
@@ -440,8 +446,21 @@ void dglabBlePocViewRun(Service* dglab)
             action = DglabPocAction_WriteZeroB0;
         else if (down & HidNpadButton_B)
             action = DglabPocAction_ReadBattery;
-        else if (down & HidNpadButton_Y)
-            action = DglabPocAction_Disconnect;
+        else if (down & HidNpadButton_Y) {
+            // While a run is active Y is the disconnect action; on the idle
+            // screen it starts the applet-side connect probe instead, which has
+            // to run in this process to get a real AppletResourceUserId.
+            if (run_active)
+                action = DglabPocAction_Disconnect;
+            else if (g_target_address_valid) {
+                BtdrvAddress probe_address;
+
+                memcpy(probe_address.address, g_target_address, sizeof(probe_address.address));
+                dglabAppletBleProbeRun(&probe_address, ADDRESS_FILE_PATH);
+            }
+            else
+                printf("applet probe: no target address in %s\n", ADDRESS_FILE_PATH);
+        }
         else if (down & HidNpadButton_R)
             action = DglabPocAction_RestartSession;
         else if (down & HidNpadButton_L)
@@ -496,6 +515,7 @@ void dglabBlePocViewRun(Service* dglab)
         }
 
         printf("A start  X zero-B0  B battery  R aruid0  L auto  Y disconn  - stop  + exit\n");
+        printf("Y on the idle screen: applet-side connect probe (btm:u, this applet's ARUID)\n");
         printf("ZL rescan(0x1812->0x180C)  ZR scan 0x180C  Up scan 0x1812  Down general filter\n");
         // Spell out "D-pad" everywhere: pressing the L shoulder instead of D-pad
         // Left cost one hardware round (it only toggles the auto-write above).

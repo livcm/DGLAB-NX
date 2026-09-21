@@ -14,3 +14,7 @@
 // second session here fails with 0x615 ("not found") even while the sysmodule
 // is running fine.
 void dglabBlePocViewRun(Service* dglab);
+
+// Append one line to this view's on-screen ring and to its SD log file. Used by
+// the applet-side BLE probe, which prints while the view owns the console.
+void dglabBlePocViewLogLine(const char* line);

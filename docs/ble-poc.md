@@ -103,6 +103,7 @@ BLE 模式已搁置，安装步骤见 `README.md`（`make` 或 `make -C sysmodul
 | `→`（十字键右） | 运行一次 btdrv 身份探针（读本机名称/MAC/信道图 + GATT 注册序列，见下） |
 | `StickL`（按下左摇杆） | 对照扫描：用常见厂商 ID（Apple/Microsoft/Samsung 轮换）扫描，验证扫描机制本身 |
 | `StickR`（按下右摇杆） | 同 `→`：身份探针 |
+| `Y`（空闲屏，未起会话时） | **applet 侧连接探针**：在 NRO 进程里用 `btm:u`（本 applet 的真实 ARUID）连一次设备并打印 GATT 表，见下 |
 | `-` | 停止 PoC（清理并退出） |
 | `+` | 退出 NRO |
 
@@ -870,6 +871,35 @@ direct / background、`TriggerConnection` timeout 0 / 0x1000），每次排水 1
 也就是说：**看到那两行提示再点手机连接**，不用掐时间；设备是否因为手机连上而停止广播，
 日志会直接写出来。如果 15 秒内没找到设备，窗口不会打开，日志是
 `window done ... target_seen=0`。
+
+> **注意**：窗口里的 `target is advertising` **不能**证明设备真的还在广播——管理器会把缓存
+> 的扫描记录反复交回来（同一地址的记录每秒重复好几次），所以"手机连上后广播是否消失"要看
+> 手机端，不能看这条日志。手机端已确认：**设备可连接，一点就连上**。
+
+### applet 侧连接探针（`Y`，2026-09-22）
+
+手机能一点就连上（用户实测），所以"连接被拒"来自 Switch 侧；而 btdrv 那条路无论哪种调用
+形态都被栈以 `0x68` 状态拒掉。剩下最值得试的是 **Nintendo 自己给 applet 的那条路**：
+`btm:u` 的请求里带 AppletResourceUserId，而这个值只有 applet 才有意义——所以这个探针必须
+跑在 **NRO 进程**里，不能放在 sysmodule。
+
+按 `Y`（空闲屏）会执行：
+
+1. `btdevInitialize()`；
+2. `btdevAcquireBleConnectionStateChangedEvent()`；
+3. `btdevConnectToGattServer(<配置里的地址>)`，然后最多等 12 秒，每秒查一次
+   `btdevGetBleConnectionInfoList()`；
+4. 连上就打印连接句柄/地址，再用 `btdevGetGattServices()` 打印 GATT 表（应该能看到
+   `0x180C`），随后断开。
+
+输出同时进屏幕和 `logs/dglab-ble-poc.log`，所以不用拍照。判读：
+
+| 日志 | 含义 |
+| --- | --- |
+| `btdevConnectToGattServer rc=0x00000000` 且 `connected after ...ms` | **applet 这条路能连** → BLE 模式的架构要么放在 applet，要么由 applet 代为连接 |
+| `rc=0x0000060A`（`Sf`/3） | 仍然是服务框架拒请求（我们的载荷形状或 ARUID 问题） |
+| `rc=0x0005568F`（`Btm`/0x2AB） | btm 拒绝（ARUID/状态不对） |
+| `no connection after 12000ms` | 请求被接受但没有连上，需要看连接状态事件 |
 
 ### 当前状态：暂停（2026-09-21）
 
