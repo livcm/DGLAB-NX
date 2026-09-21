@@ -956,7 +956,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v9 (pre-fills the buffer to measure each event's size)");
+    pocLog("btdrv probe: v10 (dumps the head and the +0x200 region of every new event)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
@@ -1053,17 +1053,16 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
             BtdrvBleEventInfo info;
             BtdrvBleEventType type = 0;
             bool empty;
-            u32 filled = 0;
+            u32 nonzero = 0;
             u32 first = sizeof(info.data);
-            u32 last = 0;
 
             eventWait(&event, 200ull * 1000000ull);
 
-            // Pre-fill with a pattern instead of zeroes: the firmware copies its
-            // own size (it ignores the size we pass), so the last byte that is
-            // still the pattern marks how long the event was - and the poster
-            // table gives the event type from that length alone.
-            memset(&info, 0xAA, sizeof(info));
+            // The buffer comes back zero-filled by whoever writes the out
+            // buffer, so a pre-fill pattern cannot measure the copy length
+            // (2026-09-21 v9 round). Counting non-zero bytes still fingerprints
+            // an event well enough.
+            memset(&info, 0, sizeof(info));
             rc = btdrvGetBleManagedEventInfo(&info, sizeof(info), &type);
             fetches++;
 
@@ -1073,18 +1072,16 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                 continue;
             }
 
-            // A call that found nothing leaves the buffer untouched, so the
-            // pattern is how an empty read looks now.
+            // A call that found nothing leaves the (zeroed) buffer untouched.
             for (u32 i = 0; i < sizeof(info.data); i++) {
-                if (info.data[i] != 0xAA) {
+                if (info.data[i] != 0) {
                     if (first == sizeof(info.data))
                         first = i;
-                    last = i;
-                    filled++;
+                    nonzero++;
                 }
             }
 
-            empty = (filled == 0);
+            empty = (nonzero == 0);
 
             if (empty) {
                 empties++;
@@ -1100,24 +1097,23 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
             // interesting payloads (a scan result among them) are the ones that
             // differ from their predecessor.
             if (events <= 3 || !repeat) {
-                u32 base = (first & ~0xFu);
+                // Two regions, always: the head is where a ClientRegistration
+                // lands, and everything device-shaped so far has sat at +0x200
+                // (docs/ble-poc.md, v5-v9 rounds).
+                static const u32 kBase[2] = { 0x00u, 0x200u };
 
-                if (base + 0x60u > sizeof(info.data))
-                    base = sizeof(info.data) - 0x60u;
+                pocLog("btdrv probe: event #%u type=%u nonzero=%u first=0x%03X repeat=%u",
+                    events, (u32)type, nonzero, first, repeat ? 1u : 0u);
 
-                // len is where the copy stopped, so it is the event's size - the
-                // one thing that maps straight onto the firmware's poster table
-                // (0x08/0x0c/0x14/0x148/0x214/0x24c ...).
-                pocLog("btdrv probe: event #%u type=%u len=0x%03X filled=%u first=0x%03X repeat=%u",
-                    events, (u32)type, last + 1u, filled, first, repeat ? 1u : 0u);
+                for (u32 region = 0; region < 2; region++) {
+                    for (u32 row = 0; row < 2; row++) {
+                        const u8* p = info.data + kBase[region] + row * 16u;
 
-                for (u32 row = 0; row < 6; row++) {
-                    const u8* p = info.data + base + row * 16u;
-
-                    pocLog("btdrv probe:   %03X %02X%02X%02X%02X %02X%02X%02X%02X "
-                        "%02X%02X%02X%02X %02X%02X%02X%02X", base + row * 16u,
-                        p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
-                        p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+                        pocLog("btdrv probe:   %03X %02X%02X%02X%02X %02X%02X%02X%02X "
+                            "%02X%02X%02X%02X %02X%02X%02X%02X", kBase[region] + row * 16u,
+                            p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+                            p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+                    }
                 }
 
                 // The configured address is the one thing that tells a real scan

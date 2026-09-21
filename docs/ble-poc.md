@@ -679,6 +679,26 @@ v9 探针换了个更硬的办法来识别事件：**读之前把缓冲区预填
 发布点表可以直接对应到类型（0x08/0x0c/0x14/0x148/0x214/0x24c…）。日志里现在有
 `len=0x...`，全空读也会表现为整块 `0xAA`。
 
+### 第三十三次实机（2026-09-21，v9：长度量不出来，但确认了记录形状）
+
+    btdrv probe: v9 (pre-fills the buffer to measure each event's size)
+    btdrv probe: event #1 type=0 len=0x400 filled=1024 first=0x000 repeat=0
+    btdrv probe:   000 37000000 FF000000 ...
+    btdrv probe: event #5 type=6 len=0x400 filled=1024 first=0x000 repeat=0
+    btdrv probe:   000 00000000 00000000 ...
+    btdrv probe: connect attempt to EA:A8:AC:22:2C:18 (client_if=0x02)
+    btdrv probe: ConnectGattServer rc=0x00300C71
+
+`len=0x400 filled=1024` 的意思是**整块 0x400 都被写掉了**（`0xAA` 一个不剩），所以拷贝长度
+不可能从缓冲区里量出来——出缓冲要么被框架整块清零、要么管理器就是按整块写的。长度法作废。
+
+同一次运行里仍然只有一条"设备形状"的记录（`BC:80:4E:74:7A:FE` + 一个 v4 UUID），
+**始终没有出现配置的目标地址**。
+
+v10 探针把 dump 改成固定看两个区域：`000`–`01F`（ClientRegistration 落在这里）与
+`200`–`21F`（到目前为止所有"像设备"的数据都落在这里），每个内容不同的事件都打这两段，
+这样一次运行就能把所有不同事件的样子看全。
+
 ### 当前状态：暂停（2026-09-21）
 
 BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv
