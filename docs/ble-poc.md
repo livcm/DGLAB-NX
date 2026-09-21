@@ -828,6 +828,29 @@ v14 探针把连接做成"矩阵"：在**扫描前**和**扫描后**各试四种
 direct / background、`TriggerConnection` timeout 0 / 0x1000），每次排水 1.5 秒。这样一次
 运行就能看出到底是哪种调用形态、哪种时序能过。
 
+### 第三十八次实机（2026-09-22，v14：扫描前后差一个错误码）
+
+    扫描前（还没有任何 scan result）：
+      ConnectGattServer(direct)      rc=0x00029E71   ← Bluetooth/0x14F（本地 client_if 检查没过）
+      ConnectGattServer(background)  rc=0x00029E71
+      TriggerConnection(timeout 0)   rc=0x00300C71
+      TriggerConnection(timeout 0x1000) rc=0x00300C71
+      （两条 ConnectGattServer 之后都出现 ClientRegistration 0x37/0xFF，也就是管理器把客户端注销了）
+
+    扫描后（目标设备以 status=2、rssi≈-40 反复出现）：
+      ConnectGattServer(direct)      rc=0x00300C71
+      ConnectGattServer(background)  rc=0x00300C71
+      TriggerConnection(timeout 0)   rc=0x00300C71
+      TriggerConnection(timeout 0x1000) rc=0x00300C71
+
+所以分界线很清楚：**扫到设备之后，本地那层检查就过了**（0x14F 消失），四种形态全部走到
+"发给蓝牙栈"这一步，然后被栈自己的状态 `0x68` 挡回来（映射成 `Bluetooth/0x1806`）。
+也就是说，问题不再是我们的调用形状，也不是 client_if/地址记录，而是**栈拒绝发起这条 LE
+连接**。
+
+下一步两条线：一是用手机在控制台探针运行期间连一次设备（证明那一刻设备是可连接的），
+二是继续在固件里找 opcode `0x6AA` 的处理端，看它返回 `0x68` 的条件是什么。
+
 ### 当前状态：暂停（2026-09-21）
 
 BLE 直连的判定已经完成——**不需要固件补丁**；固件侧的第二次核对更正了"libnx 的 btdrv
