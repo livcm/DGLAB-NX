@@ -346,6 +346,7 @@ static bool pocAcquireEvent(Event* event, bool* active, const char* name,
 // Forward declarations: actions are handled from inside the scan poll loop too.
 static bool pocTakeAction(PocWorker* w, u32* out_action);
 static bool pocHandleAction(PocWorker* w, u32 action);
+static u32 pocDrainBleEvents(const char* label, u32 duration_ms, u8* out_client_if);
 
 static Result pocWriteCharacteristic(BtdevGattCharacteristic* characteristic, const u8* data,
     size_t size)
@@ -944,13 +945,18 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 {
     static const u16 kInterval[2] = { 0x0060u, 0x0030u };
     static const u16 kWindow[2] = { 0x0030u, 0x0030u };
+    BtdrvAddress scanned_address;
     Event event;
     Result rc;
+    u8 client_if = 0xFF;
+    bool have_address = false;
     u32 total_scan_results = 0;
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v2 (clears filters first, counts empty/events)");
+    pocLog("btdrv probe: v3 (counts empty/events, connects to what it scans)");
+
+    memset(&scanned_address, 0, sizeof(scanned_address));
 
     pocStopScan(w);
 
@@ -975,6 +981,11 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     rc = btdrvEnableBle();
     pocLog("btdrv probe: btdrvEnableBle rc=0x%08X", (u32)rc);
+
+    // The manager registers its own GATT client when InitializeBle brings it
+    // up; that event carries the interface number the connect call wants.
+    pocDrainBleEvents("btdrv probe after InitializeBle", 1000u, &client_if);
+    pocLog("btdrv probe: client_if=0x%02X", client_if);
 
     // Start from a known filter state: a filter left enabled by an earlier run
     // is one of the ways a scan can come back with nothing at all.
@@ -1068,6 +1079,11 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
             scan_results++;
             total_scan_results++;
 
+            if (!have_address) {
+                scanned_address = info.scan_result.address;
+                have_address = true;
+            }
+
             if (scan_results <= 5) {
                 pocLog("btdrv probe: scan result status=%u addr=%02X:%02X:%02X:%02X:%02X:%02X entries=%u rssi=%d",
                     info.scan_result.status, info.scan_result.address.address[0],
@@ -1086,6 +1102,23 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     btdrvClearBleScanFilters();
     pocLog("btdrv probe: done, %u scan result(s) in total", total_scan_results);
+
+    // If the scan did produce a device, this is the one thing the earlier
+    // rounds could never test: a connect in the same session, to an address the
+    // stack has just seen. The configured address was never the problem, so a
+    // failure here is about the stack's state, not about a stale address.
+    if (have_address && client_if != 0xFF) {
+        pocLog("btdrv probe: connect attempt to %02X:%02X:%02X:%02X:%02X:%02X (client_if=0x%02X)",
+            scanned_address.address[0], scanned_address.address[1], scanned_address.address[2],
+            scanned_address.address[3], scanned_address.address[4], scanned_address.address[5],
+            client_if);
+        rc = btdrvConnectGattServer(client_if, scanned_address, true, g_poc.aruid);
+        pocLog("btdrv probe: ConnectGattServer rc=0x%08X", (u32)rc);
+        pocDrainBleEvents("btdrv probe after ConnectGattServer", 3000u, NULL);
+    } else {
+        pocLog("btdrv probe: no scanned address to connect to (have_address=%u client_if=0x%02X)",
+            have_address ? 1u : 0u, client_if);
+    }
 
     eventClose(&event);
     btdrvExit();
