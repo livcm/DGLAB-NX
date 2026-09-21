@@ -972,9 +972,19 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     rc = btdrvEnableBle();
     pocLog("btdrv probe: btdrvEnableBle rc=0x%08X", (u32)rc);
 
+    // Start from a known filter state: a filter left enabled by an earlier run
+    // is one of the ways a scan can come back with nothing at all.
+    rc = btdrvClearBleScanFilters();
+    pocLog("btdrv probe: ClearBleScanFilters rc=0x%08X", (u32)rc);
+
+    rc = btdrvEnableBleScanFilter(false);
+    pocLog("btdrv probe: EnableBleScanFilter(false) rc=0x%08X", (u32)rc);
+
     for (u32 phase = 0; phase < 2 && !pocStopRequested(); phase++) {
         u32 deadline;
         u32 fetches = 0;
+        u32 empties = 0;
+        u32 events = 0;
         u32 scan_results = 0;
 
         rc = btdrvSetBleScanParameter(kInterval[phase], kWindow[phase]);
@@ -1009,6 +1019,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
         while (pocNowMs() < deadline && !pocStopRequested()) {
             BtdrvBleEventInfo info;
             BtdrvBleEventType type = 0;
+            bool empty;
 
             eventWait(&event, 200ull * 1000000ull);
 
@@ -1022,10 +1033,29 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                 continue;
             }
 
-            if (fetches <= 3) {
-                pocLog("btdrv probe: fetch type=%u raw=%02X%02X%02X%02X%02X%02X%02X%02X",
-                    (u32)type, info.data[0], info.data[1], info.data[2], info.data[3],
-                    info.data[4], info.data[5], info.data[6], info.data[7]);
+            // An idle queue answers rc=0 with type=0 and an all-zero payload, so
+            // "non-empty" has to be decided from the bytes as well as the type
+            // (docs/ble-poc.md, third hardware round).
+            empty = (type == 0);
+            for (u32 i = 0; i < sizeof(info.data) && empty; i++) {
+                if (info.data[i] != 0)
+                    empty = false;
+            }
+
+            if (empty) {
+                empties++;
+                continue;
+            }
+
+            events++;
+
+            if (events <= 8) {
+                pocLog("btdrv probe: event #%u type=%u raw=%02X%02X%02X%02X%02X%02X%02X%02X "
+                    "%02X%02X%02X%02X%02X%02X%02X%02X", events, (u32)type,
+                    info.data[0], info.data[1], info.data[2], info.data[3],
+                    info.data[4], info.data[5], info.data[6], info.data[7],
+                    info.data[8], info.data[9], info.data[10], info.data[11],
+                    info.data[12], info.data[13], info.data[14], info.data[15]);
             }
 
             if (type != BtdrvBleEventType_ScanResult)
@@ -1044,8 +1074,8 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
             }
         }
 
-        pocLog("btdrv probe: phase %u done fetches=%u scan_results=%u", phase, fetches,
-            scan_results);
+        pocLog("btdrv probe: phase %u done fetches=%u empty=%u events=%u scan_results=%u", phase,
+            fetches, empties, events, scan_results);
 
         btdrvStopBleScan();
     }

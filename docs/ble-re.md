@@ -345,7 +345,11 @@ general 过滤器固定为任天堂 company ID `0x0553`）。下一步要么按�
    "扫描开起来之后结果从哪来"：`0x137b0`（加过滤器 → 管理器 `+0x40`，vtable `0x159a68` →
    `0x1c440` → `0x10de0`）、`0x139f0`（`EnableBleScanFilter`）、`0x1cc00`（cmd 79
    `GetBleManagedEventInfo`）、以及事件队列本身（`pocDrainBleEvents` 已经在打印原始
-   载荷）。目标：能稳定看到 Coyote 的广播/地址。
+   载荷）。目标：能稳定看到 Coyote 的广播/地址。**判读的岔路口**：驱动级探针现在给出
+   `fetches/empty/events/scan_results` 并记录前 8 条非空事件，下一次实机应当能区分
+   "事件队列整个是空的（问题在投递/会话）"与"有事件但没有 ScanResult（问题在过滤/扫描
+   本身）"——若连我们自己 `AddBleScanFilterCondition` / `EnableBleScanFilter` 的回执
+   （`BtdrvBleEventType_ScanFilter`）都不出现，就属于前者。
 2. **注册与连接**。显式 `RegisterGattClient`(62) 为什么回 `result=0x37`（链路：
    `0x1c960` → `0x13a80` → 管理器 `+0x70`，vtable `0x159a98` → `0x1c4a0` → `0x112a0`）；
    `ConnectGattServer`(65) 为什么回 `Bluetooth/0x14F`（`0x1c9c0` → `0x13c30`）。

@@ -158,11 +158,20 @@ NRO 会在连接 sysmodule 之前先输出 `console ready`、日志文件状态�
 
 ## 扫描没有结果时怎么排查
 
-- `events=0`：BLE 事件没收到，问题在事件通路，与设备无关；
-- `events>0, results=0`：广播被过滤或设备没有在广播，按 `ZL` 关闭过滤器重扫；
+驱动级探针（`Left`）现在每个阶段都会给出 `fetches=/empty=/events=/scan_results=` 四个计数，
+并且把前 8 条非空事件的 `type=` 和 16 字节原始载荷打出来。判读：
+
+- `empty==fetches`：事件队列一直是空的（rc=0、type=0、全零载荷），问题在**事件通路**，
+  与设备无关——先别怀疑广播内容；
+- `events>0` 但 `scan_results=0`：事件通路是活的但内容不对。看 `type=`：如果连
+  `ScanFilter`（我们自己的加/清过滤器动作的回执）都没有，说明管理器没在按会话投递；
+  有 `ScanFilter` 却没有 `ScanResult` 才是"扫到了但被过滤/设备没在广播"；
 - `results>0` 但没有 `coyote 3.0 found`：广播内容与预期 AD 类型不一致，
   日志里的 `ad type=.. data=..` 就是它实际广播的内容，此时可以按 `ZR` 直接连接，
   先把 GATT 与通知部分验证掉。
+
+探针在开扫之前会显式 `ClearBleScanFilters` + `EnableBleScanFilter(false)`，
+所以"上一轮留下的过滤器把结果全挡掉"这条不会再来捣乱。
 
 ## 里程碑
 
