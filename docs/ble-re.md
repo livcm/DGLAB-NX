@@ -389,7 +389,7 @@ general 过滤器固定为任天堂 company ID `0x0553`）。下一步要么按�
 
 ## 主机侧流程（当前）
 
-`pocRunBtdrvIdentityProbe`（NRO 里按 `Right`，或开机后第一次会话自动跑）现在是"运输形状"
+`pocRunBtdrvIdentityProbe`（NRO 里按 `→`（十字键右），或开机后第一次会话自动跑）现在是"运输形状"
 的流程，不再是形状对照：本机身份读取 → **固定形状的 GATT client 注册**（`client_if`）→
 （配了地址时）**同会话内连接** → `InitializeBle`。只做只读与本地注册，不写 BF、不改
 可见性/广播、不动电台开关、不接触设备。

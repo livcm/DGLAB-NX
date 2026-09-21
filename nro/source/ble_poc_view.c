@@ -486,8 +486,10 @@ void dglabBlePocViewRun(Service* dglab)
 
         printf("A start  X zero-B0  B battery  R aruid0  L auto  Y disconn  - stop  + exit\n");
         printf("ZL rescan(0x1812->0x180C)  ZR scan 0x180C  Up scan 0x1812  Down general filter\n");
-        printf("Left btdrv scan probe (sets scan parameters, polls the queue)\n");
-        printf("Right(D-pad)/StickR identity probe (automatic in the first session after boot)\n");
+        // Spell out "D-pad" everywhere: pressing the L shoulder instead of D-pad
+        // Left cost one hardware round (it only toggles the auto-write above).
+        printf("D-pad Left  btdrv scan probe (sets scan parameters, polls the queue)\n");
+        printf("D-pad Right / StickR  identity probe (automatic in the first session after boot)\n");
         printf("scan keys start a session with the probes skipped (clean scan)\n");
         printf("StickL control scan (common manufacturer IDs; a hit proves scanning works)\n");
 
