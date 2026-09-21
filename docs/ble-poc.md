@@ -168,6 +168,9 @@ NRO 会在连接 sysmodule 之前先输出 `console ready`、日志文件状态�
 
 - `empty==fetches`：事件队列一直是空的（rc=0、type=0、全零载荷），问题在**事件通路**，
   与设备无关——先别怀疑广播内容；
+- `events>0` 但每条都是 `type=0` 且前 16 字节全零：看探针新打出的 `nonzero=/first=0x..`
+  两行——数据从哪个偏移开始就说明返回布局和 libnx 的 `BtdrvBleScanResult` 不一样
+  （2026-09-21 第二十七次实机就是这个样子）；
 - `events>0` 但 `scan_results=0`：事件通路是活的但内容不对。看 `type=`：如果连
   `ScanFilter`（我们自己的加/清过滤器动作的回执）都没有，说明管理器没在按会话投递；
   有 `ScanFilter` 却没有 `ScanResult` 才是"扫到了但被过滤/设备没在广播"；
@@ -502,6 +505,43 @@ ClientRegistration 变成 `result=0 / client_if!=0xFF`，就说明**不需要补
 探针里另加了一条 `btdrvTriggerConnection`（libnx cmd 23，专门对已知地址发起连接）作为对照。
 下一步的重点转到**把 btdrv 的扫描路线做通**（`SetBleScanParameter` / 过滤器 /
 `StartBleScan` 的适配层形状逐条对齐），这样既能拿到设备的当前地址，也给连接准备"设备记录"。
+
+### 第二十七次实机（2026-09-21，`←` 的驱动级探针真正跑起来了）
+
+    action: btdrv scan probe
+    probes: skipped for this session (START flag)
+    btdrv probe: v3 (counts empty/events, connects to what it scans)
+    btdrv probe: btdrvInitialize rc=0x00000000
+    btdrv probe: btdrvInitializeBle rc=0x00000000
+    btdrv probe: adapter enabled=1
+    btdrv probe: btdrvEnableBle rc=0x00000000
+    btdrv probe after InitializeBle: ClientRegistration result=0x00000037 client_if=0xFF status=0 ×4
+    btdrv probe: client_if=0xFF
+    btdrv probe: ClearBleScanFilters rc=0x00000000
+    btdrv probe: EnableBleScanFilter(false) rc=0x00000000
+    btdrv probe: SetBleScanParameter(0x0060, 0x0030) rc=0x00000000
+    btdrv probe: btdrvStartBleScan (phase 0) rc=0x00000000
+    btdrv probe: event #1 type=0 raw=0000000000000000 0000000000000000    （#2..#3 相同）
+    btdrv probe: phase 0 done fetches=50 empty=0 events=50 scan_results=0
+    ...（phase 1 加了 0x1812 过滤器 + EnableBleScanFilter(true)，结果一样）
+    btdrv probe: done, 0 scan result(s) in total
+    btdrv probe: no scanned address to connect to (have_address=0 client_if=0xFF)
+
+同一轮里第二次按 `←` 的会话 `client_if=0x02`（注册事件 `result=0`），其余完全相同。
+
+三个新事实：
+
+1. **队列不是空的**：10 秒里 50 次调用每次都拿回一条"事件"，没有一次空读。之前记的
+   `events=0` 是旧探针只看前 16 字节造成的——这些事件 `type=0`、前 16 字节全零，但 0x400
+   字节答案的**后面**有非零内容（新计数用的是整块，所以 `empty=0`）。
+2. 所以 cmd 79 的返回**不是** libnx 的 `BtdrvBleScanResult` 布局：真要是扫描结果，
+   地址会在前 8 字节里就出现。要么事件类型/布局和 libnx 不同，要么结果被写在缓冲的另一段。
+3. `client_if` 会被"同一轮开机里先跑过身份探针"影响（那之后注册事件变成
+   `result=0x37 / client_if=0xFF`），干净会话里是 `0x02`。**驱动级探针要在开机后的第一个
+   会话里按 `←`**（那时身份探针还没跑）。
+
+下一次的探针（v4）会打印整块缓冲里**第一个非零字节的偏移**和那附近的 32 字节，先把这 50
+条事件到底是什么弄清楚，再决定是解码布局不对还是扫描本身没启动。
 
 ### 当前状态：暂停（2026-09-21）
 

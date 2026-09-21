@@ -954,7 +954,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     // Version marker: if a log has no line below this one, the build that ran
     // is older than the counters (2026-09-21 hardware round).
-    pocLog("btdrv probe: v3 (counts empty/events, connects to what it scans)");
+    pocLog("btdrv probe: v4 (dumps where each event's data starts, connects to what it scans)");
 
     memset(&scanned_address, 0, sizeof(scanned_address));
 
@@ -1035,6 +1035,8 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
             BtdrvBleEventInfo info;
             BtdrvBleEventType type = 0;
             bool empty;
+            u32 nonzero = 0;
+            u32 first = sizeof(info.data);
 
             eventWait(&event, 200ull * 1000000ull);
 
@@ -1050,12 +1052,18 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
             // An idle queue answers rc=0 with type=0 and an all-zero payload, so
             // "non-empty" has to be decided from the bytes as well as the type
-            // (docs/ble-poc.md, third hardware round).
-            empty = (type == 0);
-            for (u32 i = 0; i < sizeof(info.data) && empty; i++) {
-                if (info.data[i] != 0)
-                    empty = false;
+            // (docs/ble-poc.md, third hardware round). The 2026-09-21 run showed
+            // type=0 with the first 16 bytes clear but bytes further in set, so
+            // count the whole 0x400-byte answer and report where it starts.
+            for (u32 i = 0; i < sizeof(info.data); i++) {
+                if (info.data[i] != 0) {
+                    if (first == sizeof(info.data))
+                        first = i;
+                    nonzero++;
+                }
             }
+
+            empty = (type == 0 && nonzero == 0);
 
             if (empty) {
                 empties++;
@@ -1064,13 +1072,24 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
             events++;
 
-            if (events <= 8) {
-                pocLog("btdrv probe: event #%u type=%u raw=%02X%02X%02X%02X%02X%02X%02X%02X "
-                    "%02X%02X%02X%02X%02X%02X%02X%02X", events, (u32)type,
-                    info.data[0], info.data[1], info.data[2], info.data[3],
-                    info.data[4], info.data[5], info.data[6], info.data[7],
-                    info.data[8], info.data[9], info.data[10], info.data[11],
-                    info.data[12], info.data[13], info.data[14], info.data[15]);
+            // Three lines per event: where the data starts and what is there.
+            if (events <= 3) {
+                u32 base = (first & ~0xFu);
+
+                if (base + 48u > sizeof(info.data))
+                    base = sizeof(info.data) - 48u;
+
+                pocLog("btdrv probe: event #%u type=%u nonzero=%u first=0x%03X", events,
+                    (u32)type, nonzero, first);
+
+                for (u32 row = 0; row < 3; row++) {
+                    const u8* p = info.data + base + row * 16u;
+
+                    pocLog("btdrv probe:   %03X %02X%02X%02X%02X %02X%02X%02X%02X "
+                        "%02X%02X%02X%02X %02X%02X%02X%02X", base + row * 16u,
+                        p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+                        p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+                }
             }
 
             if (type != BtdrvBleEventType_ScanResult)
