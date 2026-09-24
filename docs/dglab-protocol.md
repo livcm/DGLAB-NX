@@ -2,9 +2,10 @@
 
 本文记录本项目对 DG-LAB 蓝牙协议的移植范围、实现位置与验证状态。
 
-本文的 Coyote V3 属于 **BLE 模式**（sysmodule 直接连接 DG-LAB 设备，**未实现、已搁置**）；
-其中的编解码（B0/BF/B1 与波形频率换算）被现行 **WebSocket 模式**复用，见
-`docs/dglab-socket.md` 与 `docs/ipc.md` 的 `NET_WAVEFORM`。
+本文的 Coyote V3 属于 **BLE 模式**（sysmodule 直接连接 DG-LAB 设备，**未实现**：实机已能
+连接、读 GATT 表并写入 BF/B0，但通知路径未通、B1 未验证，且依赖 exefs 补丁）；其中的编解码
+（B0/BF/B1 与波形频率换算）被现行 **WebSocket 模式**复用，见 `docs/dglab-socket.md` 与
+`docs/ipc.md` 的 `NET_WAVEFORM`。
 
 蓝牙协议的代号是 **Coyote**（V2 / V3）。它与 Socket 协议的 V3 / V4 是两条独立的协议线，
 版本号没有对应关系：Socket 那条见 `docs/dglab-socket.md`。
@@ -207,7 +208,8 @@ make -C tests/protocol
 它只复用本文的编解码，不用会话层——不要把这里的待办当成 WebSocket 模式的待办。
 
 - BLE transport 目前只有 PoC（扫描、连接、服务发现、读写、通知），见
-  `docs/ble-poc.md`；它尚未接入本文件的协议会话层，写的还是固定报文；
+  `docs/ble-poc.md`；它已经接上本文件的协议会话层（BF/B0 由 `DglabCoyoteV3Session` 产生），
+  卡在通知路径：设备侧一条通知都没回，B1 与波形输出未验证；
 - 会话层（`dglabCoyoteV3SessionTick()`）目前只被主机测试驱动：它按 BLE 的 100ms
   节拍设计，而 WebSocket 模式是"事件源上传槽位 + 服务端按需补流"，两者节奏模型不同，
   所以会话层随 BLE 模式一并搁置，不是 WebSocket 模式的待办；

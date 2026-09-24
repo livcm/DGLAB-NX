@@ -10,7 +10,7 @@
 | 模式 | 连接方式 | 状态 |
 | --- | --- | --- |
 | WebSocket | sysmodule 与手机 DG-LAB App 建立 WebSocket 会话：Switch 当服务端，App 扫码连入（Switch 不主动外连）；手机负责与设备之间的 BLE，并把波形数据转发给设备 | 已实现（Socket V3） |
-| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | 未实现；逆向结论是**不需要固件补丁**（libnx 的 btdrv 绑定在 20.0.0+ 整体过时），GATT client 注册已在实机跑通；移植工作已暂停、步骤见 `docs/ble-re.md` 的「下一步」，实测记录见 `docs/ble-poc.md` |
+| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | **扫描 + 连接 + GATT 表已实机跑通，但必须安装 exefs 补丁**（见下）：固件把 BLE 客户端在"控制器层"的激活留给了系统自身的配对流程，第三方客户端会被 `result=0x1A` 挡下；补丁跳过这道检查后，sysmodule 能连上设备并读到 `0x180C`/`0x150A`/`0x150B`（外加 `0x180A` 电量、`0xFE59` DFU）。传输层已接上协议层：BF 与 B0 写入稳定 `rc=0`，但**设备侧一条通知都没回来**，B1 与波形输出未验证。完整证据链与补丁说明见 `docs/ble-re.md`，实测记录见 `docs/ble-poc.md` |
 
 两种模式下 Switch 都不直接持有蓝牙连接（WebSocket 模式的 BLE 在手机上）。
 
@@ -22,7 +22,7 @@
 | `nro/` 前端 | 可用：菜单选择玩法——测试屏（地址/二维码/测试键/日志）、体感玩法（Joy-Con 驱动波形）与触屏玩法（左右半区对应 A/B 通道） |
 | `overlay/` | 未实现 |
 | `mods/` | 未实现 |
-| BLE 模式（sysmodule 直连设备） | 未实现；逆向判定是"改我们自己的请求形状即可、不需要固件补丁"，注册已实机跑通，见 `docs/ble-re.md`；实测记录见 `docs/ble-poc.md` |
+| BLE 模式（sysmodule 直连设备） | 未实现；路径已跑通到"连接 + GATT 表 + BF/B0 写入"，**但依赖 exefs 补丁、且通知路径未通**（设备不回 B1，波形无法出）。当前状态与下一步见 `docs/ble-re.md` 的「当前状态（2026-09-25）」；实测记录见 `docs/ble-poc.md` |
 
 进度与顺序见 `AGENTS.md` §15：骨架、Sysmodule、IPC、Coyote V3 协议层、WebSocket 模式
 传输、波形接入、NRO 交互、Joy-Con 输入、基础 UI、NRO 元信息与版本管理、浅色模式都已完成；
@@ -62,14 +62,14 @@ DG-LAB App（手机，负责 BLE）  ──BLE──→  DG-LAB 设备
 | --- | --- |
 | `sysmodule/` | DG-LAB 设备生命周期、协议实现、WebSocket 服务端、IPC 服务端 |
 | `nro/` | Homebrew 前端：界面、二维码、测试按键、日志落盘 |
-| `VERSION` | 前端发行版本，唯一来源（进 NACP 与 About 页） |
-| `lang/` | 界面文案，一个语言一个 `.json`（构建时复制到 `release/DGLAB-NX/lang/`） |
+| `VERSION` | 发行版本，唯一来源（进 NRO 的 NACP 与 About 页，以及 sysmodule 的 `toolbox.json`） |
+| `lang/` | 界面文案，一个语言一个 `.json`（构建时复制到 `build/DGLAB-NX/lang/`） |
 | `overlay/` | Tesla / Ultrahand overlay（未实现） |
 | `mods/` | 特定游戏的联动（未实现） |
 | `common/` | 组件间共享的 IPC 定义与公共类型 |
 | `tests/` | 主机侧测试（protocol / ipc / net / qr / canvas / lang / motion / stack） |
 | `docs/` | 技术文档，见[文档](#文档) |
-| `release/` | 构建产物（不提交） |
+| `build/` | 构建产物（不提交） |
 | `.github/workflows/` | CI：PR / push 的构建检查与 tag 发版，见[发布](#发布) |
 
 ## 构建
@@ -79,15 +79,15 @@ DG-LAB App（手机，负责 BLE）  ──BLE──→  DG-LAB 设备
 
 ```
 export DEVKITPRO=/opt/devkitpro
-make                 # 构建全部组件，产物统一落在 release/
-make clean           # 清除 release/ 与各组件的 build/
+make                 # 构建全部组件，产物统一落在 build/
+make clean           # 清除 build/ 与各组件自己的 build/
 ```
 
 也可以只构建单个组件：
 
 ```
-make -C sysmodule package   # release/<TITLE_ID>/{exefs.nsp,toolbox.json,flags/boot2.flag}
-make -C nro package         # release/DGLAB-NX/{DGLAB-NX.nro, lang/*.json}
+make -C sysmodule package   # build/<TITLE_ID>/{exefs.nsp,toolbox.json,flags/boot2.flag}
+make -C nro package         # build/DGLAB-NX/{DGLAB-NX.nro, lang/*.json}
 ```
 
 sysmodule 的 Title ID 只在 `sysmodule/DGLAB-NX-Core.json` 里写一次，Makefile、安装目录名和
@@ -113,7 +113,7 @@ git push origin v0.3.0
 
 1. 调用 `.github/workflows/ci.yml`：在 `devkitpro/devkita64` 容器里跑 `tests/` 下的全部
    主机侧测试，再用根 `make` 构建；tag 与 `VERSION` 不一致会在编译前失败并打印两个版本号；
-2. 把 `release/` 组装成 SD 卡布局并校验（`exefs.nsp` / `toolbox.json` / `flags/boot2.flag` /
+2. 把 `build/` 组装成 SD 卡布局并校验（`exefs.nsp` / `toolbox.json` / `flags/boot2.flag` /
    NRO / `lang/`，以及 NRO 里确实带着这个 `VERSION`）；Title ID 目录名仍从构建产物推导，
    workflow 里没有另写一份；
 3. 打包成 `DGLAB-NX-<VERSION>-sd.zip` 与 `SHA256SUMS`，创建 Release 并附自动生成的
@@ -131,12 +131,14 @@ PR 和 `main` 上的 push 只跑 `ci.yml`（构建 + 全部主机侧测试），
 ## 安装
 
 ```
-release/00FF072107210721/  →  SD:/atmosphere/contents/00FF072107210721/
-release/DGLAB-NX/          →  SD:/switch/DGLAB-NX/      （整个目录一起拷）
+build/00FF072107210721/    →  SD:/atmosphere/contents/00FF072107210721/
+build/DGLAB-NX/            →  SD:/switch/DGLAB-NX/      （整个目录一起拷）
 ```
 
 sysmodule 带 `flags/boot2.flag`（`toolbox.json` 里也是 `requires_reboot: true`），
-随系统启动加载，复制完要重启主机。overlay 还没实现，所以现在没有 `DGLAB-NX-Ovl.ovl`。
+随系统启动加载，复制完要重启主机。`toolbox.json` 的 `version` 是这份包的发行版本
+（根 `VERSION`），模块管理器类应用会显示它；IPC 接口版本不在这里，它由模块在运行时
+通过 `GET_VERSION` 报给 NRO。overlay 还没实现，所以现在没有 `DGLAB-NX-Ovl.ovl`。
 
 NRO 的运行期文件都在这一个目录下，并且固定分层：
 
@@ -248,7 +250,7 @@ make -C tests/stack      # sysmodule 的线程栈预算（用 devkitA64 的 gcc 
 | `docs/nro-ui.md` | NRO 界面方案调研与实现记录 |
 | `docs/joycon-input.md` | Joy-Con 六轴资料，以及"动作越大波形值越大"这个可选玩法的设计 |
 | `docs/touch-input.md` | 触屏玩法：libnx 触屏资料、左右半区与两轴映射、与体感共用的参数、实机验收清单 |
-| `docs/ble-poc.md` | BLE 模式（sysmodule 直连设备）的实测记录（未实现，已搁置） |
+| `docs/ble-poc.md` | BLE 模式（sysmodule 直连设备）的实测记录（未完成：连接与写入已通、通知路径待解） |
 | `docs/ble-re.md` | BLE 直连的只读固件逆向：模块归属、固件侧 IPC 形状与当前判定进度 |
 | `docs/docs-audit.md` | 文档约定（谁放哪一层）与 2026-09-17 审计的处置结果 |
 | `docs/history.md` | 文档压缩时移出的历史原文（各文档的迭代过程与审计明细） |

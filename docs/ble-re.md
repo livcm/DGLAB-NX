@@ -5,10 +5,11 @@
 **(A) 绑定/结构漂移**（改我们自己代码即可）、**(B) 固件按调用者身份/白名单封死**
 （需要 exefs patch 或放弃）、还是 **(C) 蓝牙栈里没有通用 central 实现**（放弃）。
 
-**当前状态：判定已完成并做过一次更正（2026-09-21 夜）。** 结论是**不需要固件补丁**，
-但"libnx 的请求形状过时"这个理由被推翻了——形状其实是对的，卡点在语义/状态层。
-更正过程见下面「判定（2026-09-21 夜，更正）」；第一轮那几张表保留在文末，均已标注取代。
-本轮不写补丁、不改 `sysmodule/source/transport/ble_poc.c`、不做实机验证。
+**当前状态看「当前状态（2026-09-25）」一节**：实机已能扫描、连接、读 GATT 表并写入
+BF/B0，**但必须安装一个 exefs 补丁**（固件的"客户端未激活"闸门），且设备侧通知未回、
+B1 未验证。下面从「判定（2026-09-21 夜，更正）」起是过程记录：那一轮写的"不需要固件
+补丁"**已被 2026-09-24 的实机结果推翻**，但"libnx 的请求形状与固件一致"这条更正仍然成立
+——卡点在语义/状态层。第一轮那几张表保留在文末，均已标注取代。
 
 ## 素材与工具链（可复现）
 
@@ -382,46 +383,807 @@ general 过滤器固定为任天堂 company ID `0x0553`）。下一步要么按�
 先确认**managed BLE 事件队列是否按会话隔离**：如果不是，它可能本来就是 `btm` 自己的
 事件，而不是我们那次调用的返回。所以现在不能据此断定注册被拒。
 
-## 下一步（2026-09-22 更新）
+## base `btm` 服务：命令形状与 ARUID 门槛（2026-09-22）
 
-形状问题已经排除，**扫描也做通了**，现在只剩"发起连接"这一件事。实机状态（细节与日志见
-`docs/ble-poc.md`）：
+sysmodule 早就能打开 base `btm`（身份探针里的 `btmGetState` 拿回真实状态），但它的 BLE
+命令一条都没调过。它是继 btdrv 直连与 `btm:u` 之后的第三条路：与 applet 用的是同一套
+BLE 接口，却接受 sysmodule 这个调用者，因此不需要动架构。开工前先按本文对 `bluetooth`
+做过的方法，把 `btm`（title `010000000000002A`）的命令号与载荷形状逐条核对了一遍。
+
+### 命令分派与 libnx 对照
+
+base `btm` 的分派函数在 `0x1bc50`：`cmp w4,#0x75` → 8 位字节表 `0x5e6b0` + 分支表
+`0x1bc74`（`ldrb` + `add ..., lsl #2`）。命令 case 只被这张表引用，Ghidra 不会把它们建成
+函数，所以要用 `tools/ble-re/ghidra/DecompileForce.java` 逐个地址反编译（用法见该文件
+顶部注释）。
+
+| 命令 | 名字 | 固件要求的入参 | 出参 | libnx | 结论 |
+| --- | --- | --- | --- | --- | --- |
+| 23 | `AcquireBleScanEvent` | 无 | event + 1 字节 flag | `btmAcquireBleScanEvent` | 一致 |
+| 24 | `GetBleScanParameterGeneral` | `u16` parameter_id | 8 字节（公司号 + 6 字节 pattern） | `btmGetBleScanParameterGeneral` | 一致 |
+| 25 | `GetBleScanParameterSmartDevice` | `u16` parameter_id | 0x14 字节 UUID | 同名 | 一致 |
+| 26 | `StartBleScanForGeneral` | 8 字节参数块 | 无 | 同名 | 一致 |
+| 28 | `GetBleScanResultsForGeneral` | 无 | 缓冲区（条目 = 0x148）+ `u8` total | 同名 | 一致（**条目 0x148**） |
+| 31 | `StartBleScanForSmartDevice` | 0x14 字节 UUID | 无 | 同名 | 一致 |
+| 33 | `GetBleScanResultsForSmartDevice` | 无 | 同上 | 同名 | 一致 |
+| 34 | `AcquireBleConnectionEvent` | 无 | event + 1 字节 flag | 同名 | 一致 |
+| 35 | `BleConnect` | 6 字节地址（**没有 ARUID 字段**） | 无 | `btmBleConnect` | 一致 |
+| 38 | `BleGetConnectionState` | 无 | 缓冲区（条目 = **0xC**）+ `u8` total | 同名 | 一致 |
+| 39 | `BleGetGattClientConditionList` | 无 | 固定 0x74 字节 | 同名 | 一致（libnx 未解码内容） |
+| 46 | `GetGattServices` | `u32` connection_handle | 缓冲区（条目 = **0x24**）+ `u8` total | 同名 | 一致 |
+| 57 | `RegisterAppletResourceUserId` | 0x10（`u32` unk + `u64` ARUID） | 无 | 同名 | 一致 |
+| 59 | `SetAppletResourceUserId` | `u64` ARUID | 无 | 同名 | 一致 |
+
+也就是说：libnx 的 **base `btm` 绑定在 22.5.0 上仍然成立**，"命令号漂移"这条解释在
+btm 上不成立，探针拿到的任何否定结果都来自固件语义，而不是形状。
+
+### ARUID 门槛：`btm:u` 为什么对 sysmodule 回 `Sf/0x60A`
+
+`btm:u` 的 connect（cmd 18，case `0x27b20`）把请求里的 ARUID 和**调用者自己的 ARUID**
+比了一次：
+
+    lVar6 = *请求里的 ARUID
+    lVar6 == 0 || lVar6 == 调用者的 ARUID ? 调接口 +0x80 : 返回 0x60A
+
+这就是 2026-09-21 那轮"填真实 applet ARUID 反而被 `Sf/0x60A` 拒"的原因：sysmodule 不是
+那个 applet，请求里带别人的 ARUID 会被当场挡下。它同时解释了为什么 base `btm` 的命令里
+**根本没有 ARUID 字段**——它用 `RegisterAppletResourceUserId`(57) 把调用者的 ARUID 登记
+到 btm 里，之后的请求就按调用者身份处理。
+
+因此"btm 侧还缺前置条件"这条假设现在有了一个可测的具体形式：**先登记 ARUID，再扫描/
+连接**。这也是 v18 探针（`StickR`）第一步做的事，见 `docs/ble-poc.md`。
+
+### 实机结果（2026-09-22，第四十五次）：登记被受理，btm 仍然什么都不做
+
+base `btm` 这条路实机跑通到"调用全部被受理"这一步：`GetState state=6`、存的扫描参数
+可读、`RegisterAppletResourceUserId(0x89)` 返回 0、`StartBleScanForGeneral` /
+`StartBleScanForSmartDevice` / `BleConnect` 全部 `rc=0`。但扫描**一个事件都没有**
+（`events=0`、`total=0`），连接也**没有任何状态**（`total=0`），
+`GetGattClientConditionList` 是四个空槽。形状与 applet 的 `btm:u` 路径完全一致。
+
+所以"btm 对 sysmodule 做身份限制"这条被排除了：**访问权限不是卡点**。剩下的解释是 btm
+内部的 worker（connect case `0x23fa0` 就是"组一条消息丢给 worker"）没有真正下发，而它
+最可能缺的就是下面那层栈——驱动级探针在扫描前必须 `btdrvInitializeBle` + `btdrvEnableBle`，
+两条 btm 路径都没做这一步。v18 因此加了 B 阶段：先把 btdrv 的 BLE 拉起来，再用同一套
+btm 调用重放（见 `docs/ble-poc.md` 的「v18」一节）。
+
+### 危险的组合（2026-09-22 第四十六次实机，btm 崩溃）
+
+按上面的假设做了 B 阶段（同一会话里 `btdrvInitializeBle` + `btdrvEnableBle`，然后用 btm
+重放扫描与连接），结果是 **`btm` 模块自己崩了**（`hid` 被连累），时间点在退出 NRO 之后：
+
+- B 阶段之后 btm 的每条 BLE 调用都返回 `0x668F`（A 阶段是 `rc=0`），说明把 btdrv 的 BLE
+  抢过来之后 btm 就不再能工作；
+- 崩溃 PC `0x475ec` 是 `svc #0x26`，调用点 `FUN_00039150` 是 `svcBreak(0, msg, 4)`——btm
+  自己的未处理异常/终止路径；
+- 崩溃线程的栈里有设备地址 `EA:A8:AC:22:2C:18`，也就是我们排给 btm 的那条 connect；
+- 同一轮还替前台 applet 登记了 ARUID（`RegisterAppletResourceUserId`），它在 applet 退出
+  时失效。
+
+结论与规则（写进 `docs/ble-poc.md` 的「危险与已知副作用」，探针已按此收窄）：
+
+1. 不要在同一会话里既让 btm 排队 BLE 工作、又去 `btdrv` 的 `InitializeBle`/`EnableBle`；
+2. 不要替 applet 登记 ARUID（那是别人的身份，随时会失效）；
+3. 不要让 btm 留下无法完成的 connect（扫描没命中就别连）；
+4. 这条线复工前先做静态分析：谁有资格 `InitializeBle`、`0x668F` 的确切含义、btm 的 worker
+   在什么条件下走 `0x37d50` 的终止路径。v18 探针现在只保留只读部分（状态、扫描参数、
+   两遍短扫描、`GetGattClientConditionList`），并且只在手动按键时运行。
+
+### `0x668F` 与 btm 的崩溃路径（2026-09-22 静态核对）
+
+上面这套规则现在有代码依据了，两条都读通了。
+
+**Btm/0x33（`0x668F`）= "已经有请求在飞"**，不是通用错误。所有 BLE 接口方法（扫描、连接）
+最后都走同一个"投递工作给 worker"的函数 `FUN_00033890`：
+
+    uVar1 = FUN_0003b6c0(&DAT_000b4778);        // 取投递锁（带在飞计数）
+    if ((uVar1 & 1) == 0) return 0x668f;        // 拿不到 → Btm/0x33
+    if ((DAT_000b4758 & 1) == 0) {              // 没有在飞的请求
+        DAT_000b4768 = param_2;                 // 记下这条消息
+        ...投递到 worker...
+    } else {
+        uVar2 = 0x668f;                         // 已经有请求在飞 → Btm/0x33
+    }
+
+所以第四十六次实机 B 阶段那一串 `0x668F` 的含义是：**btm 的 worker 还在处理 A 阶段那条
+connect**（设备不在广播范围/连不上，这一步永远完不成），新的请求全被"忙"挡回来了。
+
+**崩溃是 btm 自己的状态机断言**。btm 的 worker 是一个轮询状态机 `FUN_00033d70`
+（状态放在 `DAT_000b475c`，0..6），每一步问 `FUN_00033960` 要下一步；一旦返回值不是它
+预期的几个值，就走到终止路径：
+
+    local_1b8 = CONCAT44(local_1b8._4_4_, 0x20a8f);   // 把结果码塞进局部变量
+    FUN_00037f40(&local_1b8);                          // 不返回
+
+而 `FUN_00037f40` → `FUN_00037e30` → `FUN_00037d50` → `FUN_00039150(msg)` 正是
+`svcBreak(0, msg, 4)`。与崩溃报告对得上：崩溃点 `0x475ec` 是 `svc #0x26`，寄存器
+`X[01]` 指向**崩溃线程自己栈上**的局部变量、`X[02]=4`——就是这条把 `&local_1b8` 当消息
+传进去的路径（`0x20A8F` = Btm/0x105 那类内部结果码）。
+
+把两件事连起来：**A 阶段留下的在飞 connect + B 阶段把 btdrv 的 BLE 抢走**，让状态机那一步
+拿到意料之外的结果 → 断言 → `svcBreak`。它死在"退出 NRO 之后"也顺理成章：状态机是轮询的，
+什么时候再轮到自己就什么时候死，而 B 阶段之后又跑过一次（`action queued 4` 那次会话）。
+
+因此新增一条硬规则：**看到 `0x668F` 就说明 btm 还有请求没做完，此时绝不能再去动 BLE
+（尤其是 `btdrvInitializeBle`/`EnableBle`），应该停手并重启主机**，而不是继续发命令。
+
+### `InitializeBle` / `EnableBle` 是全局的（2026-09-22 静态核对）
+
+顺着 btdrv 的命令表查下去（分派 `FUN_0001d4b0` 的字节表 `0x11884e` + 分支表 `0x1d4d4`）：
+
+| 命令 | case | 服务对象虚表 | 实现 | 做什么 |
+| --- | --- | --- | --- | --- |
+| 46 `InitializeBle` | `0x219b0` | `+0x190` → `0x1c790` | `0x12ed0` | 栈没起来就起来并注册一个客户端；已起来就**再注册一个客户端**（所以实机先拿到 `client_if=0x02`、后拿到 `0x03`） |
+| 47 `EnableBle` | `0x21b10` | `+0x198` → `0x1c7a0` | `0x12ff0` | **全局**打开 BLE：必要时启动 BLE 线程、置全局标志，然后调管理器 |
+| 48 `DisableBle` | `0x21c40` | `+0x1a0` → `0x1c7b0` | `0x13150` | 与 47 对称：全局关掉 |
+
+也就是说 `EnableBle` **不是"给我的客户端开 BLE"，而是把整个模块的 BLE 栈打开/启动线程**。
+这解释了第四十六次实机为什么是 B 阶段触发的：btm 正卡在 A 阶段那条永远完不成的 connect 上，
+我们却在下面把 BLE 栈整体打开（还顺带启动了 BLE 线程），btm 的状态机下一步就拿到了意料之外
+的结果 → `svcBreak`。
+
+由此得到两条可执行的规则：
+
+1. **一个开机周期里只走一条 BLE 路径**：要么 btm（任何 btm 请求），要么 btdrv 直连（`←` 探针
+   会 `InitializeBle` + `EnableBle`）。两者混用就是在别人干活时改全局状态。
+2. **跑过任何会碰 BLE 的探针之后先重启**再继续；看到 `0x668F` 立即停手。
+
+### `0x1806` 的完整来源链（2026-09-22 修正：原结论是对的）
+
+上一版这里写过一句"状态 `0x68` 映射成 `0x1806` 与代码不符"，**那句话是错的**：漏看了
+归一化那一步。现在整条链路都读通了：
+
+    cmd 65 → 服务虚表 +0x228 → 0x1c9c0 → 0x13c30 → 管理器 +0x88 = 0x59b0
+    0x59b0: 先按 client_if 查两次表（命中任一 → 0x29E71 = Bluetooth/0x14F），
+            否则调 FUN_00017f00(client_if, addr)
+    FUN_00017f00: 把 {client_if, addr(6), 1} 打包成消息 → FUN_00046030 → FUN_00017e80(原始状态)
+    FUN_00017e80: FUN_000195a0(原始状态) 归一化成 0..0x3F，再查表 DAT_0011863c[index]
+
+两张表都读出来了：
+
+- 归一化 `FUN_000195a0` 里 **`case 0x68:`（还有 `0x6f`、`200`、`0xc9`）`return 0x32;`**；
+- 结果表 `DAT_0011863c[0x32] = 0x00300C71` = **Bluetooth/0x1806**（`[0x37] = 0x29E71` 正是
+  `0x14F`，与"查表命中"那条对上）。
+
+所以实机看到的 `Bluetooth/0x1806` 就是**原始状态 `0x68` 的映射**。顺带说明：同一个码在
+模块里还有别的产出点（GATT 操作包装 `FUN_00018e80` / `FUN_00019010` 在载荷超过 600 字节时
+直接返回 `0x300C71`，若干 HID 分支也一样），所以判读时要看调用路径，不能只看码。
+
+剩下要查的是**原始状态 `0x68` 是谁产出的**。线索：同一模块里 `FUN_00045ac0` 一类的函数在
+参数为空指针时也返回 `0x68`，说明这一族的 `0x68` 更像"参数不对"；而 cmd 65 的请求形状
+（`{u8 client_if; addr[6]; u8 is_direct; u64 aruid}`，16 字节）与 libnx 完全一致，
+`FUN_00017f00` 还把 `is_direct` 固定成 1。下一步要查的是：**地址类型问题**——设备
+`EA:A8:AC:22:2C:18` 是 random static（`addr_type=1`），而这条连接 API 只传 6 字节地址、
+没有类型字段，栈可能按 public 地址处理而报"参数不对"。
+
+### 状态 `0xC8` 才是连接被拒的真正原因（2026-09-22 续查，结论更正）
+
+顺着 `FUN_00017f00` → `FUN_00046030` 往下，链路全部读通了，**"参数不对/地址类型"这条猜测
+被否定**：
+
+    FUN_00017f00: 打包 {client_if, addr(6), 1} → FUN_00046030(msg)
+    FUN_00046030: FUN_00047dd0(opcode = 0x6AA, msg, 8)      ← 就是老笔记里要找的 0x6AA
+    FUN_00047dd0: FUN_00047e10(...) → 把回复载荷（状态）取回来；非 0 就原样返回
+    FUN_00017e80(状态): FUN_000195a0(状态) 归一化 → 查表 DAT_0011863c
+
+**BLE 线程侧 opcode `0x6AA` 的处理函数是 `FUN_0005fc50`**，它只有三个出口：
+
+    param_1 == NULL                      → 回复 0x86AA / 状态 0xD1
+    FUN_0007c0f0(client_if) == NULL      → 回复 0x86AA / 状态 200 (0xC8)   ← 我们的情况
+    找到条目                              → FUN_00075c60(client_if, addr, is_direct, 2) → 状态 0
+
+`0xC8` 正好在归一化函数的同一组里（`case 0x68: case 0x6f: case 200: case 0xc9: return 0x32;`），
+`0x32` → `Bluetooth/0x1806`。所以实机那个 `0x1806` 的准确含义是：
+
+> **`client_if` 在这张连接上下文表里没有条目**——不是策略门禁，也不是地址类型问题。
+
+两张表要分清楚：
+
+| 表 | 位置 | 条目 | 谁写 |
+| --- | --- | --- | --- |
+| 管理器**客户端槽**（4 个） | 管理器 `+4 / +0x244 / +0x484 / +0x6c4`，步长 `0x240` | 首字节 = `client_if` | 注册流程里的 `FUN_00009460(client_if)`（`0x5880` 调用） |
+| **连接上下文表**（5 个） | `PTR_DAT_0015e228` `+0x50 / +0x2c8 / +0x540 / +0x7b8 / +0xa30`，步长 `0x278` | `+8` = 占用标志，`+9` = `client_if`（`0x2c8` 等为 `+0`/`+1`） | BLE 事件分发 `FUN_000788b0` 里的 `0x1F17 → FUN_00078e60`（分配槽位，`client_if` 由 `FUN_000c2fb0(客户端对象)` 给出）；`0x1F1A → FUN_00078ac0` 清空全部；`0x1F18 → FUN_0007c0f0` + 拆解 |
+
+`0x59b0`（cmd 65 的服务端）先在**第一张表**里按 `client_if` 查两次，命中就回
+`0x29E71`(0x14F)；查不到才把请求发到 BLE 线程，交给 `0x6AA`，由**第二张表**决定成败。
+
+另外，`0x6AA` 这条路径**没有任何调用者身份检查**：同一份分发里 0x6A8 / 0x6A9 / 0x6AC /
+0x6AD 都有 `DAT_002c7df0._2_2_ != (uVar5 & 0xffff) → 回复 0xCD` 这类比对，而 0x6AA 只检查
+"BLE 是否已启动"（`DAT_002c7df0` 首字节）。所以"非任天堂客户端不能连"这个假设进一步被削弱：
+**能不能连取决于那 5 个连接上下文槽里有没有属于你这个 `client_if` 的条目**。
+
+### 缺的那一步找到了：`0x6A8` = cmd 62 `RegisterGattClient`
+
+创建连接上下文条目的是 **opcode `0x6A8`**（事件 `0x1F17` → `FUN_00078e60` → 分配槽位、
+把 `client_if` 写进 `+9`）。它的发送方是 `FUN_00045f80`：
+
+    FUN_00045f80(param_1): 需要 param_1+0x18（回调）、发送 FUN_00047e10(0x6A8, param_1, 0x20, &out, 4)
+
+而 `FUN_00045f80` 正是 **cmd 62 `RegisterGattClient`** 走的最后一步：
+
+    cmd 62 → case 0x22f50 → 服务虚表 +0x210 → 0x1c960 → 0x13a80 → 管理器 +0x70 = 0x5880
+    0x5880 → FUN_00017010 → FUN_00045f80(0x6A8) → 分配 client_if 并建上下文
+    0x5880 随后把 client_if 通过事件队列报出来（载荷里的第 5 个字节，也就是 `data[4]`）
+
+也就是说，**cmd 62 不只是"注册一个 GATT 客户端"，它同时建立连接上下文**；之后 cmd 65 的
+`0x6AA` 才能查到条目。于是正确的顺序是：
+
+    InitializeBle(46，成为 BLE 属主并把栈拉起来)
+      → RegisterGattClient(62，分配 client_if + 建上下文)
+      → ConnectGattServer(65，用 62 报出来的那个 client_if)
+
+而之前所有实机尝试都缺了中间那一步，或者用错了 client_if：
+
+- `←` 驱动级探针：只 `InitializeBle`，从不注册 → 用的是 `InitializeBle` 自己那个客户端
+  （`client_if=0x02`），它没有连接上下文 → `0x6AA` 回 `0xC8` → `Bluetooth/0x1806`；
+- 身份探针：注册过，但连接时用的还是从事件里抓的 `client_if`，而且管理器那边已经留下
+  连接记录 → 两个查表命中 → `0x29E71`(`0x14F`)。
+
+所以**"栈拒绝非任天堂客户端连接"这条假设目前没有证据支持**：拒绝是两个纯本地前置条件
+（"这个 client_if 没有连接上下文"、"这个 client_if 已有连接记录"）造成的。
+
+探针已按这个顺序更新（`←` 驱动级探针在扫描后先 `RegisterGattClient`、取新报出的
+`client_if`、再连接，然后才跑原来的对照矩阵）。
+
+### 客户端的槽位是有限的：`0x14F` = "4 个槽全占满"（2026-09-22 第四十七次实机）
+
+按上面的顺序跑了一轮（设备在广播、`target_seen=1`、rssi=-45），结果注册这一步就被挡了：
+
+    btdrv probe: RegisterGattClient(0x180C) rc=0x00029E71      ← Bluetooth/0x14F
+    btdrv probe: register event raw=0000000002000000 client_if=2   （队列在重放旧载荷）
+    btdrv probe: no new client_if, falling back to 0x02
+    btdrv probe: ConnectGattServer(client_if=0x02, registered) rc=0x00300C71   ← 还是 0x1806
+
+`0x29E71` 的出处也确认了：`FUN_00005880`（cmd 62 的服务端）第一步就是
+
+    iVar1 = FUN_0000a900();          // 数管理器那 4 个客户端槽（+4 / +0x244 / +0x484 / +0x6c4，
+                                     // 首字节 != 0xFF 即为占用）
+    if (3 < iVar1) return 0x29E71;   // 4 个都占了 → Bluetooth/0x14F
+
+也就是说：**这台机器上 4 个客户端槽已经满了**（系统自己的 BLE 使用者——btm 等——在开机时
+就占掉了若干，而每一次 `InitializeBle` 又会给自己分配一个：第四十四次实机里同一个开机周期
+内先后拿到 `client_if=0x02` 和 `0x03` 就是证据）。槽位满了 → 注册被拒 → 我们没有带
+连接上下文的客户端 → 连接必然回 `0xC8` → `0x1806`。
+
+因此探针改成**先腾位再注册**：用 `UnregisterGattClient` 释放本会话从 `InitializeBle`
+拿到的那个接口（只动这一个，绝不碰别人的），随后 `RegisterGattClient`，再拿新报出的
+`client_if` 去连接。
+
+### 第四十八次实机：`0x14F` 的真正含义 + btm 才是槽位的主人
+
+先腾位那一步也失败了，而且失败得很有信息量：
+
+    btdrv probe: UnregisterGattClient(0x02) rc=0x00029E71     ← 也是 0x14F
+    btdrv probe: RegisterGattClient(0x180C) rc=0x00029E71
+
+注销路径 `FUN_00005940`（管理器 `+0x78`）的第一件事是**在客户端表里找这个 client_if**：
+
+    uVar2 = FUN_00009650(manager, client_if);     // 比对 4 个槽的首字节
+    if ((uVar2 & 1) == 0) return 0x29E71;         // 找不到 → Bluetooth/0x14F
+
+`FUN_00009650` 只做首字节比对（`+4` / `+0x244` / `+0x484` / `+0x6c4`），而 `2` 不在其中。
+**也就是说我们一直读到的"`client_if=0x02`"根本不是客户端表的接口号**：那个 8 字节事件载荷
+（`00 00 00 00 02 00 00 00`）不是注册回复，把它按 libnx 的 `{result; client_if; status}`
+解出来的"client_if"是误读。注册 `0x14F` 则确实来自 `FUN_00005880` 的
+`if (3 < FUN_0000a900(manager)) return 0x29E71`——4 个槽全被占。
+
+那 4 个槽是谁的？**btm 的。** btm 模块里有一份自己的 btdrv 客户端封装，直接调
+`+0x210`（= btdrv 的 `RegisterGattClient`）：
+
+    FUN_00048cb0(param_1): FUN_00049210(&client); uVar1 = (**(*client + 0x210))(client, param_1);
+
+而且 btm 自己的 IPC 分发里 **case 0x3f 就是"通过 btm 注册 GATT 客户端"**（`+0x210`）。
+所以正常开机后 btdrv 的 4 个客户端槽由 btm 持有（btm 那边 `GetGattClientConditionList`
+也是 4 个槽，正好对应），第三方进程再调 `RegisterGattClient` 必然拿 `0x14F`。
+
+**于是 btdrv 直连这条路的结论明确了**：在没有空闲客户端槽的情况下，第三方进程既拿不到
+自己的 `client_if`，也无法创建连接上下文（`0x6A8` 只能由注册触发），连接必然停在
+`0xC8` → `Bluetooth/0x1806`。这**不是策略门禁**，而是**容量/所有权**：BLE 客户端被
+btm 占满了。
+
+反过来，btm 那条路能通过 `FUN_0007c0f0`（它的连接被受理，`rc=0`），正说明 **btm 持有的
+客户端是有连接上下文的**——要连设备，就得让 btm 替我们连。下一步静态目标因此换成：
+btm 的 worker 在受理连接之后为什么停住（状态机 `FUN_00033d70` 在等什么），以及 btm 的
+`case 0x3f`（在固件里存在、libnx 没有对应封装）能否给调用者分配一个可用的客户端。
+
+### 第四十九次实机：注册成功，但注册事件不在我们读的队列里
+
+这一轮重启后单独跑 `←`，注册**成功了**：
+
+    btdrv probe: UnregisterGattClient(0x02) rc=0x00029E71   ← 2 仍然不在表里
+    btdrv probe: RegisterGattClient(0x180C) rc=0x00000000   ← 成功
+    btdrv probe: register event raw=37000000FF000000 client_if=255   （×8，全是重放）
+    btdrv probe: no new client_if, falling back to 0x02
+
+所以上一轮的 `0x14F` 确实是"同一个开机周期里前面的会话把槽位占满"，**重启后单会话就能注册**。
+但注册报出来的接口号还是没拿到：队列里那 8 个载荷是 `37 00 00 00 FF …`，不是注册事件。
+
+把 `FUN_00005880` 成功后那段反汇编读出来，注册事件的确切载荷是：
+
+    58e0: x8 = 0x0000010000000000      → str x8, [sp,#8]      ；载荷 8 字节
+    58fc: strb w8, [sp,#12]            ；byte4 = client_if
+    5900: bl 0x2ba40(&payload, 8, 4, 0x20)                    ；投递（type 索引 2）
+
+也就是 **`00 00 00 00 <client_if> 01 00 00`——第 6 个字节固定是 `1`，是这条事件的标志位**。
+实机队列里从没出现过这种载荷，说明**注册事件不投到我们轮询的那个 managed 队列**（很可能
+走 `bt` 服务的通道，那条通道是 applet 侧 `btdev` 用的）。这也解释了为什么之前用"载荷变了"
+当判据会误判。
+
+因此探针改成两手准备：
+
+1. 用标志位 `data[5] == 1` 识别注册事件（如果它某天出现在这个队列里）；
+2. 拿不到就**用连接探测把接口号试出来**：对候选 `client_if = 0..3` 各发一次
+   `ConnectGattServer`，`0x14F` = 不在客户端表、`0x1806` = 没有连接上下文、
+   `0` = 这个接口被栈接受了——那就是我们的接口。
+
+### 第五十次实机：四个候选全是 `0x14F`，于是加了两条对照
+
+这一轮注册仍然成功（`rc=0`），但四个候选接口**全部**回 `0x29E71`：
+
+    btdrv probe: probe connect client_if=0x00 rc=0x00029E71
+    btdrv probe: probe connect client_if=0x01 rc=0x00029E71
+    btdrv probe: probe connect client_if=0x02 rc=0x00029E71
+    btdrv probe: probe connect client_if=0x03 rc=0x00029E71
+
+这说明"`0x14F` 只表示接口在表里"这个读法还不够：`0x29E71` 有两个来源——
+（a）`0x59b0` 两次查表命中后直接返回（`FUN_00009a60` 查"该客户端有**挂起的**连接请求"、
+`FUN_00009ba0` 查"该客户端已有**活动**连接"）；
+（b）`FUN_00017f00` 把消息层的状态映射过来——归一化函数里 `case 0x65/0x71/0x72 → 0x37`，
+而 `0x37` 正好是 `0x29E71`，其中 `0x72` 就是发送器 `FUN_00047e10` 的"**没有空闲任务槽**"。
+
+所以四个候选都一样，很可能是 (b)：消息层忙/满，而不是接口问题。探针因此加了两条对照：
+
+1. **`client_if = 0xFF` 的对照**：它永远不是合法接口。若它也回 `0x14F`，说明 `0x14F` 与接口
+   无关（是消息层的事）；若它回 `0x1806` 而 `0..3` 回 `0x14F`，才说明 `0x14F` 是按接口判的。
+2. **打开 `bt` 服务的用户侧事件通道**：libnx 的注释写明 `btGetLeEventInfo` 与
+   `btdrvGetLeHidEventInfo`"用不同的状态"——也就是**两条事件通道**，我们之前只轮询了 btdrv
+   那条。注册事件（`00 00 00 00 <client_if> 01 00 00`）很可能投在 `bt` 那条。探针现在会在
+   注册前后与连接前后都 drain 一次 `bt` 通道，任何带标志位 `byte5 == 1` 的载荷就直接给出
+   我们的 `client_if`。
+
+### 第五十一次实机：`bt` 通道能开，但 `0x14F` 与接口无关
+
+结果很干脆：
+
+    btdrv probe: btInitialize rc=0x00000000          ← sysmodule 能开 bt 服务
+    btdrv probe: btRegisterBleEvent rc=0x00000000
+    btdrv probe before register: bt event raw=37000000FF000000   （×16）
+    btdrv probe after register: bt event raw=37000000FF000000    （×20+，没有 01 标志位）
+    btdrv probe: control connect client_if=0xFF rc=0x00029E71    ← 非法接口也是 0x14F！
+    btdrv probe: probe connect client_if=0x00 rc=0x00029E71
+    btdrv probe: probe connect client_if=0x01 rc=0x00029E71
+    btdrv probe: probe connect client_if=0x02 rc=0x00029E71
+    btdrv probe: probe connect client_if=0x03 rc=0x00029E71
+
+两条结论：
+
+1. **`bt` 服务对 sysmodule 开放**（两条事件通道都能开、都能读），而且 `bt` 通道给出的载荷与
+   btdrv 通道**完全一样**（都是 `37 00 00 00 FF …`），注册事件没有出现在任何一条通道上。
+   那个固定载荷更像"某次操作失败的通报"，不是注册回复。
+2. **`0x14F` 与接口无关**：`client_if=0xFF`（永远不合法）也返回同一个码，说明它是
+   `FUN_00017f00` 那条**消息层状态映射**的结果，对应状态是 `0x65/0x71/0x72` 之一，其中
+   `0x72` = **"BLE 线程没有空闲任务槽"**。也就是说：**连接请求根本没能排进 BLE 线程**。
+
+探针因此再加一条"冷启动对照"：在动任何 BLE 之前先发一次 `client_if=0xFF` 的连接。若它已经
+返回 `0x14F`，说明**消息层在我们动手之前就已经是满的**（系统自身占用），这条路的失败与
+探针行为无关；反之则说明是我们前面的调用把槽位吃掉的。
+
+### 第五十二次实机：消息层是**我们自己**弄满的
+
+冷启动对照给出了明确答案：
+
+    btdrv probe: cold control btdrvInitialize rc=0x00000000
+    btdrv probe: cold control connect client_if=0xFF rc=0x00300C71   ← 0x1806（请求进了线程）
+    ...
+    btdrv probe: control connect client_if=0xFF rc=0x00029E71        ← 0x14F（消息层自己拒了）
+
+也就是说开机后**第一个**请求能正常进 BLE 线程（线程按 `0xC8` 正确拒绝非法接口），而在我们这
+一轮做了 `InitializeBle` / `EnableBle` / 注册 / drain 之后，**任何**请求都变成消息层的
+"没有空闲任务槽"。**`0x14F` 不是系统占用造成的，是我们自己的调用序列吃掉的。**
+
+这条把结论从"资源被系统占满，所以不可能"改写成"**顺序/清理问题，可能可修**"。为了定位是
+哪一步吃掉槽位，探针现在在关键步骤之间各插一次 `0xFF` 对照连接：
+
+    after InitializeBle / after EnableBle / after bt open / after RegisterGattClient
+
+哪一步之后从 `0x1806` 变成 `0x14F`，就是那一步占住了消息层；下一轮按这个结果调整顺序
+（例如把注册挪到最后、或注册后不再做多余调用）再试。
+
+### 第五十三次实机：占住消息层的正是 `EnableBle`
+
+四段对照的结果非常干净：
+
+    after InitializeBle:      control connect client_if=0xFF rc=0x00300C71   ← 0x1806
+    after EnableBle:          control connect client_if=0xFF rc=0x00029E71   ← 变 0x14F
+    after bt open:            control connect client_if=0xFF rc=0x00029E71
+    after RegisterGattClient: control connect client_if=0xFF rc=0x00029E71
+
+所以是 **`btdrvEnableBle`（cmd 47）** 让消息层不再接受连接请求。回看它的实现
+`FUN_00012ff0`：必要时启动 BLE 线程、`FUN_0000d1c0(PTR_DAT_0015d750, 1)` 置一个全局标志、
+再调管理器的 `vtable[0]`——也就是"把整个 BLE 栈打开"。打开之后，连接请求就排不进去了
+（状态 `0x72` = 没有空闲任务槽）。
+
+探针因此把顺序改成：**`InitializeBle` → `RegisterGattClient` → 先连接 → 再 `EnableBle` →
+扫描**（扫描需要 `EnableBle`，连接显然不能排在它后面）。下一轮就看这个顺序下
+`RegisterGattClient` 之后的连接是不是能进线程（不再是 `0x14F`）。
+
+### 第五十四次实机：两个约束互斥
+
+按新顺序跑（注册在 `EnableBle` 之前）：
+
+    RegisterGattClient(0x180C) rc=0x00029E71          ← 注册失败（这一轮没先 EnableBle）
+    after RegisterGattClient: control connect 0xFF rc=0x00300C71
+    probe connect 0x00/0x01/0x02/0x03 rc=0x00300C71   ← 干净的"无上下文"拒绝
+    early ConnectGattServer(client_if=0x02) rc=0x00300C71
+    btdrvEnableBle rc=0x00000000
+    after EnableBle: control connect 0xFF rc=0x00029E71   ← 又变成消息层拒绝
+
+两轮合起来就是：
+
+| 状态 | 注册（建上下文） | 连接请求能否进线程 | 扫描 |
+| --- | --- | --- | --- |
+| 未 `EnableBle` | ❌ `0x14F` | ✅（干净地回 `0x1806`） | — |
+| 已 `EnableBle` | ✅ `rc=0` | ❌ `0x14F`（消息层"无空闲任务槽"） | ✅ |
+
+也就是说：**用现有的调用组合，我们只能拿到"上下文"或"能排队的连接"，不能同时拿到**。
+`EnableBle` 既是注册成功的前提，又是连接排队失败的原因。
+
+下一步换成 btm 这条路（它是唯一持有连接上下文的客户端，连接里 `rc=0` 被受理），并且用
+本轮新打开成功的 `bt` 用户侧事件通道去观察 btm 的连接到底发生了什么——btm 探针现在会在连接
+前后 drain `bt` 通道，并在没有扫描命中时也连一次配置地址（明确记录"跑完要重启"，因为 btm
+会把这条请求一直挂在工作队列里）。
+
+### 第五十五次实机：`bt` 通道抓到了连接事件
+
+自动跑起来之后，连接前后各 drain 一次 `bt` 通道，载荷**变了**：
+
+    btm probe before connect: bt event raw=0000000001000000      （×16，连接前）
+    btm probe (configured): BleConnect(EA:A8:AC:22:2C:18) rc=0x00000000
+    btm probe (configured): AcquireBleConnectionEvent rc=0x00000000
+    btm probe (configured): no connection / GetConnectionState total=0
+    btm probe after connect: bt event raw=1A00000002040000        （×16，连接后）
+
+按 libnx `btdrv.h` 的 `client_connection` 布局解这条载荷：
+
+    {u32 result; u8 status; u8 client_if; u8 pad[2]; u32 conn_id; BtdrvAddress address; u16 reason}
+    1A 00 00 00 | 02 | 04 | 00 00 | FF FF FF FF | EA A8 AC 22 2C 18
+    result=0x1A   status=2 (Disconnected)   client_if=4   conn_id=无(0xFFFFFFFF)   addr=设备
+
+（第 46 次实机在 btdrv 侧看到的 `1A00000002040000FFFFFFFFEAA8AC22...` 就是同一条。）
+
+所以：**btm 确实把连接请求下发到了栈，栈也针对这台设备产生了连接事件，结果是"断开/未建立"
+（status=2、conn_id 无效）**。这比之前"受理后什么都没发生"进了一大步——现在有明确的失败
+事件可读。下一步要查的是 `result=0x1A` 与 `reason` 字段的含义（`reason` 在地址后面两个字节，
+探针已把整条事件按结构体解出来打印），以及为什么连接没有建立：设备侧？地址类型？还是栈
+在连接前需要别的登记。
+
+探针现在把 `bt` 事件按 `client_connection` 结构解码后打印
+（`result/status/client_if/conn_id/addr/reason`），下次日志可以直接读字段而不是手工拆字节。
+
+### 第五十六次实机：失败事件的字段解全了
+
+    btm probe after connect: bt event as connection:
+      result=0x0000001A  status=2(Disconnected)  client_if=4
+      conn_id=0xFFFFFFFF  addr=EA:A8:AC:22:2C:18  reason=0x0000
+
+连接**前**队列里是另一条旧记录（`00 00 00 00 01 00 00 00` → 解出来 result=0/status=1/
+全零地址），连接**后**稳定换成这一条。所以：
+
+- btm 受理了连接（`rc=0`），栈**确实针对这台设备发起了连接尝试**；
+- 结果是 `status=2`（未建立/断开），**没有 `conn_id`、`reason=0`**——这不是"HCI 断开原因"，
+  而是"连接没有成立"的合成事件；
+- `result=0x1A` 是这次尝试的状态码，具体含义待查（同族的 `0x68/0x72` 是消息层状态）。
+
+## 当前总览（2026-09-22 收束，已被「当前状态（2026-09-25）」取代）
+
+这张表的最后一行（btm 连接"未建立"）在 2026-09-24 被推翻：装上补丁并先打开 BLE 栈之后
+连接就成立了。表里"扫描（btm / btm:u）受理但零结果"这一条**至今仍然成立**。
+
+| 环节 | 状态 | 依据 |
+| --- | --- | --- |
+| 扫描（btdrv 驱动级） | ✅ 稳定扫到设备（地址 / rssi / AD 内容） | 第 36 次起多轮 |
+| 扫描（btm / btm:u） | ❌ 受理但零事件零结果 | 第 45、55 次 |
+| btdrv 直连建客户端 | ❌ 4 个客户端槽被 btm 占满；`EnableBle` 前注册被拒（`0x14F`），`EnableBle` 后连接排不进消息层（同样 `0x14F`） | 第 48、53、54 次 |
+| btdrv 直连连接 | ❌ 没有连接上下文 → `0xC8` → `Bluetooth/0x1806` | 第 49~54 次 |
+| btm 连接 | ⚠️ 受理（`rc=0`），栈发起连接尝试，结果是"未建立"（`status=2`，无 conn_id/reason） | 第 55、56 次 |
+| 设备侧 | ✅ 手机一点就连上 | 用户实测 |
+
+**btdrv 直连这条路可以定性为不可行**：客户端槽与 BLE 消息层都被系统自身的 BLE 使用者
+（主要是 btm）占住，第三方进程拿不到"有连接上下文的客户端"，也就永远过不了 `0xC8`。
+
+**btm 那条路是目前唯一走到"栈真的发起连接"的**，剩下唯一的未知是：这次尝试为什么没有成立
+（`result=0x1A`、无 reason）。下一步的两个候选：
+
+1. **配对/自动连接前置**：`btm` 的 `StartBleScanForPaired`（libnx 里对应
+   `btdevEnableBleAutoConnection`）——如果栈要求设备先进入"已配对/已知"列表才会建立连接，
+   这就是缺的那一步；
+2. **诊断用 IPS 补丁**：把栈里那段"合成未建立事件"的检查临时改掉，确认它是不是唯一门禁
+   （只作诊断，不是方案）。
+
+### 第五十七次实机：配对/自动连接前置无效
+
+    btm probe: StartBleScanForPaired(company=0x000A) rc=0x00000000
+    btm probe: StopBleScanForPaired rc=0x00000000
+    btm probe: connection state after paired scan rc=0x00000000 total=0   ← 没有自动连接
+    btm probe (configured): BleConnect(EA:A8:AC:22:2C:18) rc=0x00000000
+    btm probe after connect: result=0x0000001A status=2 client_if=4
+                             conn_id=0xFFFFFFFF addr=EA:A8:AC:22:2C:18 reason=0x0000
+
+与上一轮**逐字段相同**。到这一步，能试的"任天堂式前置"（ARUID 登记、配对/自动连接、扫描、
+两次注册顺序、控制连接定位）都试过了，结论不再变化。
+
+### 当前状态（2026-09-25）：连接 + GATT + 写入已通，通知路径待解
+
+**可用配方（一个按键，两段会话）**
+
+1. **补丁**：exefs IPS，模块 `bluetooth.autog`（build ID `c91c6fc8aa4c…`），
+   **2 处编辑**——`0xcd820`、`0xcf7d4` 两条"控制器层客户端未激活"的 `cbz` 改成 `NOP`；
+2. 按一次 `StickR`（或空闲屏 `B`）：NRO 自动先起**驱动级探针会话**（它把 BLE 栈拉起来），
+   该会话结束后自动起**btm 探针会话**（连接 → GATT 表 → 传输层）。
+
+**已验证**
+
+| 环节 | 状态 |
+| --- | --- |
+| 扫描 | ✅ btdrv 驱动级扫描稳定拿到设备（地址/rssi/AD） |
+| 连接 | ✅ btm 路径受理并建立连接（`GetConnectionState` handle=4、`bt` 事件 `status=0`） |
+| GATT 表 | ✅ 7 个服务，`0x180C`（写 `0x150A` handle 19，通知 `0x150B` handle 16）、`0x180A`、`0xFE59` |
+| 通知订阅 | ⚠️ `RegisterNotification rc=0`，但**至今没收到任何事件** |
+| 写入 | ✅ `BF`（7 字节）与 `B0`（20 字节）写入 `rc=0`；首条 B0 是 `B0 1F …`（序列号 1 + 两通道绝对设置），之后 100ms 一条 |
+| B1 回包 | ❓ 未观察到 |
+
+**这轮学到的边界（都写进了代码注释）**
+
+- **btm 探针绝不能碰 btdrv**：同一次开机里第二次 `InitializeBle`/`EnableBle`、或让本进程
+  `RegisterGattClient`（btm 之后会用我们创建的上下文、`client_if=3`），都会让连接建立不起来。
+  连续 4 轮失败 vs 2 轮成功的对照见 `docs/history.md` 第 28 节；
+- **驱动级直连仍然不可行**：4 个客户端槽被系统占满，`RegisterGattClient` 稳定回 `0x14F`，
+  没有连接上下文就永远是 `Bluetooth/0x1806`。补丁的两处 NOP 管的是"激活标志"，不是"有没有槽位"；
+- 连接判定**必须用事件**（`bt` 通道的 `client_connection`，`status=0` + `conn_id` + 地址），
+  `btmBleGetConnectionState` 在这套配置下会恒为 `total=0`，据此判断会把已建立的连接当成失败
+  （然后反复重连、把它断掉——日志里的 `reason=0x0016` = 本地主动断开就是这么来的）。
+
+**下一步（留给下一次对话）**
+
+1. **先确认通知/事件通路**：探针已增加一次**电量读取**（`0x180A` / `0x1500`，纯读、不会输出），
+   它的应答会走与 B1 相同的事件通道。若读电量也没有事件回来，问题在订阅（特征 `properties`
+   读出是 `0x00`，`RegisterNotification` 是否真的写了 CCCD 待查）；若有事件，说明只是
+   "0 → 0 的置零不算强度变化、设备按协议不必回 B1"；
+2. 若通知通路确认可用，再驱动一次**真正的强度变化**（例如相对 +1）去看 B1；
+3. 传输层稳定后，把它接到 NRO 的玩法（体感/触屏）上，替换现在不成功的 btdev 路径；
+4. 发布口径（用户已定）：**BLE 直连仅在安装该 exefs 补丁时可用**，补丁需要纳入发布产物。
+
+**下一轮的判据（2026-09-25 01:38 那轮留下的具体问题）**：整个传输层窗口里
+`btGetLeEventInfo` 只反复返回同一份记录
+`00 00 00 00 04 00 00 00 0C 00 00 00 E8 03 00 00`，按 libnx 的 `BtdrvBleEventInfo`
+对照它最像 `connection_update`（`{result=0; conn_id=4; conn_interval=12; conn_latency=0;
+supervision_tout=1000}`），而不是 notify——也就是说这段"队列"在重放同一份记录，窗口里
+**没有出现过新记录**，这就是"设备没有发通知"的直接证据。电量读取就是为了敲这一下：
+它的 `rc` 打出来之后，**记录的头会不会变**是本轮唯一要看的判据。若仍然不变，再查订阅
+有没有落到 CCCD：`btmGetGattDescriptors`（btm 侧枚举，不碰 btdrv）能列出描述符，配
+`btLeClientReadDescriptor` 读回 `0x2902`；注意 libnx 的 `BtmGattDescriptor` 只给 uuid 与
+handle、没有 `instance_id`，而读描述符要的是 `BtdrvGattId{instance_id, uuid}`，所以这一步
+能不能直接做还要试。
+
+补丁加上"先打开 BLE 栈"这两步之后，实机达成了最初的目标（日志见 `docs/ble-poc.md`）：
+
+    btm probe (configured): connected handle=4 addr=EA:A8:AC:22:2C:18
+    btm probe (configured): GetGattServices attempt 2 rc=0x00000000 total=7
+      service[2] uuid=0x180C handle=14 end=19   ← DG-LAB 协议服务
+        char[0] uuid=0x150B handle=16            ← 通知
+        char[1] uuid=0x150A handle=19            ← 写
+      service[3] uuid=0x180A                     ← 电量
+      service[6] uuid=0xFE59                     ← DFU
+    btm probe (configured): BleDisconnect rc=0x00000000
+
+**可用配方**（两步，缺一不可；2026-09-25 起是一个按键的序列，"先 `←` 再 `StickR`"的
+两步操作已经退休）：
+
+1. **安装 exefs 补丁**（见下一节）：跳过"控制器层客户端未激活"的检查，否则连接必然
+   停在 `result=0x1A`（原始状态 `0x85`）。
+2. **先让 BLE 栈起来**：只有驱动级探针会 `InitializeBle` + `EnableBle`，所以按一次
+   `StickR`（一键序列的第一段就是它）或先按 `←` 都行。**这一步不能挪进 btm 会话里**：
+   在 btm 会话里再 `InitializeBle`/`EnableBle`、或让本进程 `RegisterGattClient`，连接就
+   建立不起来（4 轮失败 vs 2 轮成功的对照见 `docs/history.md` 第 28 节）。
+
+**正式结论**：BLE 直连要"安装补丁 + 先打开 BLE 栈"才连得上；不装补丁时连不上。项目按此
+口径对外描述（`README.md`、根 `AGENTS.md` §15）。写入侧（BF/B0）已实机可用；**通知侧
+没有**，所以还不能算"能控制设备"。
+
+已知遗留：
+
+- `BtmGattCharacteristic.properties` 读出来是 `0x00`（`0x150A` 应为可写、`0x150B` 应为
+  通知）——UUID 与 handle 都对，说明是 libnx 的 `BtmGattCharacteristic` 布局与固件在
+  properties 字段上有偏差，写数据前要按固件布局重新核对这一个字段；
+- 连接是"按地址直连"，设备没有先被 btm 扫描到（`btm` 的扫描仍然不出结果），
+  目前看这不影响连接；
+- **设备侧通知一条都没回**：`RegisterNotification rc=0`、31 条 B0 全 `rc=0`，事件通道
+  里始终只有同一份 `connection_update` 记录（见上面的「下一轮的判据」），B1 未验证；
+- 补丁还没纳入发布产物；`btm` 探针每次跑完都要重启，一个开机周期只走一条 BLE 路径。
+
+### 早期收束结论（2026-09-22，已被上面的状态取代）
+
+1. **扫描可用**：btdrv 驱动级扫描稳定拿到设备（地址、rssi、AD 内容）。
+2. **btdrv 直连不可行**：4 个 BLE 客户端槽由系统自身的 BLE 使用者（btm）持有；第三方
+   `RegisterGattClient` 在 `EnableBle` 之前被拒（`0x14F`），而 `EnableBle` 之后连接请求
+   又排不进 BLE 消息层（同样映射到 `0x14F`）——**"有上下文"和"能排队"二者不可兼得**。
+   没有上下文，连接必然停在 `0xC8` → `Bluetooth/0x1806`。
+3. **btm 唯一走到"栈真的发起连接"**：`btmBleConnect` 受理（`rc=0`），随后 `bt` 用户侧
+   事件通道给出针对本设备的连接事件，但结果是"未建立"（`status=2`、`conn_id` 无效、
+   `reason=0`、`result=0x1A`），且没有任何可读的失败原因。
+4. 设备侧正常（手机一点就连上）；因此限制在 Switch 侧。
+
+当时判断"要保持搁置"，推进只剩两条路：
+
+- **诊断用 IPS 补丁**：临时改掉栈里"合成未建立事件"的那段检查，确认它是不是唯一门禁；
+  这只回答"能不能"，不构成可发布方案；
+- 等新线索（固件更新、上游 libnx/switchbrew 出现 BLE central 的资料）再评估。
+
+### 诊断补丁：btm 连接的"客户端未激活"闸门（2026-09-22）
+
+顺着 `result=0x1A` 一路查到了链路的最后一跳：
+
+    FUN_000170c0 case 3: local_2b8 = FUN_000195a0(*param_2)     ← 事件里的 result = 归一化后的原始状态
+    归一化表: case 0x85 → 0x1a                                   ← 所以原始状态是 0x85
+    0x85 只有一处来源: FUN_00079270（0x1F00 连接处理器）的"间接"分支
+        cVar2 = FUN_000c3b30(client_if, addr, 0, mode);  // == 0
+        uVar6 = 0x85;  FUN_0007da40(ctx, 0x85, addr, 0xffff, 2, 0);
+    FUN_000c3b30: mode==2 时调 FUN_000cf6f0(client_if, 1, addr, 1)
+    FUN_000cf6f0: 要求 (client_if-1) < 10 且 控制器层客户端槽的"已激活"标志 != 0
+    FUN_000cd7f0: 同一个标志的第一道检查（更早，返回槽指针）
+
+两个检查读的是同一张表：基址 `PTR_DAT_0015e478`，条目步长 `0x50`，标志在 `+0x2399`
+（即 `槽基址 + 0x49`）。btm 的连接用的是 `client_if=4`，那个标志是 0，于是：
+`FUN_000cd7f0` 返回 0 / `FUN_000cf6f0` 返回 0 → `0x85` → 事件里的 `result=0x1A`。
+
+**诊断补丁**就是把这两条 `cbz`（标志为 0 就跳去返回 0）改成 `nop`：
+
+| 地址 | 原指令 | 原字节 | 新字节 | 所在函数 |
+| --- | --- | --- | --- | --- |
+| `0xcd820` | `cbz w8, 0xcd828` | `48 00 00 34` | `d5 03 20 1f` | `FUN_000cd7f0` |
+| `0xcf7d4` | `cbz w9, 0xcf82c` | `c9 02 00 34` | `d5 03 20 1f` | `FUN_000cf6f0` |
+
+生成（模块 build ID 来自正确的 NCA `ca66270be492a16bab1d779645965bc8.nca`，
+NPDM 名 `bluetooth.autog`）：
+
+    python3 tools/ble-re/make_ips.py \
+      --elf /tmp/ble-re/nso-010000000000000b.elf \
+      --module-id c91c6fc8aa4c39222d6ccfe0fff468543105e59b \
+      --edit 0xcd820:48000034:d503201f \
+      --edit 0xcf7d4:c9020034:d503201f \
+      --out build/exefs_patches/DGLAB-NX-BLE/C91C6FC8AA4C39222D6CCFE0FFF468543105E59B000000000000000000000000.ips
+
+安装：整个 `DGLAB-NX-BLE/` 拷到 `SD:/atmosphere/exefs_patches/`，重启。
+撤销：删掉那个目录/文件后重启。
+
+**判读与风险**：
+
+- 如果补丁生效，`btm probe (configured): BleConnect(...)` 之后的行为会变：
+  `bt` 事件的 `result/status` 不再固定是 `0x1A / 2`，或者出现 `conn_id` 有效的条目——
+  那就说明"控制器层客户端未激活"**就是**唯一门禁，接下来要查的是"谁能合法激活它"。
+- 如果事件仍然一样，说明还有别的闸门（或本轮的 client_if 依然不对）。
+- **风险**：闸门被跳过后，连接会带着一个"未激活"的槽指针继续走（`x0 = x8`），
+  那一槽的字段可能是零/旧值，最坏情况是 `bluetooth` 模块自己出问题。这是**诊断**，
+  不是方案；跑完请重启，出问题就把补丁删掉。
+
+#### 第一次试打（2 处 NOP）：结果完全没变 → 先验证补丁有没有生效
+
+补丁按上面的两处 NOP 装到 SD（`atmosphere/exefs_patches/DGLAB-NX-BLE/`）并重启后，btm 探针的
+事件**逐字段不变**（`result=0x1A status=2 client_if=4 conn_id=0xFFFFFFFF addr=设备`）。
+先把"补丁根本没被加载"这种可能排除掉：
+
+- **build ID 校验**：用同一份固件解出的 `btm` NSO 的 module id 是
+  `5a2aa468f272e49ebf0fab8b379cc5b32c1a7409…`，与崩溃报告里 btm 的 `Module Id` **逐字节一致**，
+  说明我们解出的固件与实机是同一构建；bluetooth 模块的 `c91c6fc8aa4c39222d6ccfe0fff468543105e59b`
+  同理可信。
+- **偏移约定**：Atmosphère `ldr_patcher.cpp` 里
+  `NsoPatchesProtectedSize = NsoPatchesProtectedOffset = sizeof(NsoHeader) = 0x100`，
+  即 IPS 偏移 = `0x100 + 目标地址`——与 `make_ips.py` 的约定一致。
+- 文件名大小写不敏感（`psl::IsIpsFileForModule` 用 `isxdigit`，a-f/A-F 都收），所以
+  大写文件名没问题。
+
+于是加一条**可见的标记补丁**来回答"补丁到底有没有生效"：`0x6AA` 处理端 `FUN_0005fc50` 里
+"没有连接上下文"时的回复状态是 `200 (0xC8)`（`0x5fdb4: mov w2, #0xc8`），把它改成 0：
+
+| 地址 | 原指令 | 原字节 | 新字节 | 作用 |
+| --- | --- | --- | --- | --- |
+| `0x5fdb4` | `mov w2, #0xc8` | `02 19 80 52` | `e2 03 1f 2a` | "无上下文"改回 `0`（标记） |
+
+（注意 `--edit` 的旧/新字节是**内存顺序**：`0x5fdb4` 要写 `02198052`，不是指令字的
+`52801902`。）
+
+标记的判读很直接：装了这版补丁后，`←` 驱动级探针里那些"没有上下文"的连接
+（`probe connect client_if=0x0X`）应当从 `rc=0x00300C71` 变成 **`rc=0x00000000`**。
+
+- **变了** → 补丁机制正常，那么上一轮闸门 NOP 也生效了 ⇒ 说明"未建立"来自**另一条**
+  上报 `0x85` 的路径（`FUN_000795d0`，它挂在 BLE 事件处理对象的槽位 3 上，由事件驱动），
+  下一步就查那一条；
+- **没变** → 补丁根本没被加载，问题在交付路径（文件名/放置位置/Atmosphère 版本），
+  与固件分析无关。
+
+#### 第二次试打（3 处编辑，含标记）：**开关跳过后连接成功**
+
+`←` 驱动级探针的连接全部从 `0x00300C71` 变成 **`rc=0x00000000`** ⇒ 补丁确实被加载、
+两处闸门 NOP 也生效。随后的 btm 探针（同一开机周期、后一个会话）结果：
+
+    btm probe (configured): BleConnect(EA:A8:AC:22:2C:18) rc=0x00000000
+    btm probe (configured): connection state event #1
+    btm probe (configured): connected handle=4 addr=EA:A8:AC:22:2C:18    ← 连上了
+    btm probe (configured): GetGattServices rc=0x00000000 total=0        ← 查得太早
+    btm probe (configured): BleDisconnect rc=0x00000000
+    btm probe after connect: result=0 status=0(Connected) client_if=4 conn_id=0x00000004 addr=设备
+
+也就是说：**"控制器层客户端未激活"那道闸门就是当时唯一的门禁**；跳过它之后 Switch 真的与
+设备建立了连接（`GetConnectionState` 给出 handle=4 + 设备地址，用户侧事件 `status=0`、
+`conn_id=4`）。
+
+**但还差第二个前置**：同一版补丁、同一个开机周期里，如果 **只**跑 btm 探针（不先跑 `←`），
+连接又变回 `result=0x1A`（原始状态 `0x85`）。两次运行的差别是 `←` 驱动级探针会
+`btdrvInitializeBle` + `btdrvEnableBle`——**把 BLE 栈打开**。所以目前的经验是：
+
+    先跑 ←（打开 BLE 栈） → 再跑 StickR/B（btm 连接）
+
+探针已把这条提示写进日志（连接失败时提示先跑 `←`），GATT 读取也改成"等
+`btmAcquireBleServiceDiscoveryEvent` + 最多 8 次重试"，因为连接刚建立时服务发现还没跑完。
+
+## 下一步（2026-09-22 更新，结论已被「当前状态（2026-09-25）」取代）
+
+这一段是 2026-09-22 收束时写的，当时连接还没通。**现状看文中的「当前状态
+（2026-09-25）」**：连接在 2026-09-24 就跑通了（补丁 + 先打开 BLE 栈），传输层在
+2026-09-25 接上。这里保留的价值是它列的复工顺序——先静态、再单变量实机、动 BLE 归属的
+实验单独开机周期——这几条一直有效。
+
+形状问题已经排除，**扫描也做通了**，现在只剩"发起连接"这一件事。三条路各自的状态
+（细节与日志见 `docs/ble-poc.md`）：
 
 - **sysmodule → btdrv**：`StartBleScan` + 厂商数据过滤器（AD `0xFF`、公司号 `0x000A`）
   能稳定拿到设备记录（地址、`status=2`、`addr_type=1`、rssi≈-40、AD 内容可解）；
-  `ConnectGattServer`(65) / `TriggerConnection`(23) 在本地检查通过后由**栈本身**拒绝，
-  返回 `Bluetooth/0x1806`（= 栈状态 `0x68` 经状态表映射，见上文「管理器虚表、事件发布点
-  与连接失败点」）。
+  `ConnectGattServer`(65) / `TriggerConnection`(23) 在本地检查通过后返回
+  `Bluetooth/0x1806`。注意：这个码**不是**连接专用的拒绝码，它在本模块里是通用的
+  "参数/状态不对"，具体产出点还没定位（见上文「`0x1806` 不是"连接被拒"的专用码」）。
 - **NRO(applet) → btm:u**：`btdevConnectToGattServer` 返回 `0`（受理，不像 sysmodule 那样
   被 `Sf`/`Btm` 拒），但只触发一次连接状态事件、`GetConnectionState` 恒为 `total=0`；
   它的 smart-device 与 general 扫描都不报结果（连控制台自己存储的参数也一样），
   **扫描事件从不触发**。
+- **sysmodule → base `btm`（新，2026-09-22）**：命令形状已逐条核对、与 libnx 一致（见
+  上文表格），`btm:u` 的 ARUID 门槛也已定位，所以探针的第一步是先
+  `RegisterAppletResourceUserId` 登记 NRO 的 ARUID，再扫描、连接、读 GATT 表。
+  这一轮实机数据还没有，`StickR` 探针（v18）就是为它准备的。
 - 设备侧没问题：手机一点就连上；广播里带 flags、厂商数据（公司号 `0x000A`，其后 4 个零
-  字节）和本地名 `47L121000`，**没有服务 UUID `0x180C`**（所以 btm 按 UUID 过滤的
-  smart-device 扫描看不到它）。
+  字节）和本地名 `47L121000`。**广播里到底有没有服务 UUID `0x180C` 目前有两个互相矛盾
+  的记录**（手机扫描说"有"，2026-09-22 的 dump 说"没有"），v18 探针会把设备记录的 AD
+  结构逐个打出来，用数据定这件事；它决定 btm 的 smart-device（按 UUID 过滤）这条路
+  理论上能不能看到设备。
 
-因此复工只剩两条路线，二选一（或都试）：
+因此复工的路线按优先级是：
 
-1. **btm 的前置条件**：排查 applet 侧还缺什么——`btdevEnableBleAutoConnection`（auto
-   connection 开关）、`btdevGetBleScanParameter2`（控制台存储的 smart-device UUID）、
-   以及系统流程是否需要先把设备登记进 btm 的列表（例如经由 `ns`/`btm` 的配对流程）。
-   判据：让 `btm` 的扫描自己报出设备（`total>0` + `dev[0]`），随后连接应当成立。
-2. **栈的准入**：若确认栈对"非任天堂客户端发起的 LE 连接"有门禁，则给这套结论收尾
-   （证据链完整：扫描可用、请求形状正确、设备可连，连接被栈拒），BLE 模式按"架构上不可行"
-   搁置，等固件/资料有新线索再评估。
+1. **先做静态（现在的第一步）**：查清 btm 与 btdrv 的 BLE 归属规则——谁有资格
+   `InitializeBle`/`EnableBle`、`0x668F` 的确切含义、btm 的 worker 在什么条件下走到
+   `0x37d50` 的终止路径（`svcBreak(0,msg,4)`），以及 `RegisterAppletResourceUserId` 登记
+   的身份活多久。没有这一层，任何"btm + btdrv 混用"的实机实验都可能再次把 btm 弄崩。
+2. **再设计安全的实机实验**：只读探针（`StickR`）确认扫描面；任何要动 BLE 归属的实验必须
+   单独会话、单独开机周期，并且一次只动一个变量。
+3. **btm 的其余前置条件**：若扫描通了而连接不通，再查 auto-connection
+   （`btm:u` 的 `StartBleScanForPaired`）、设备是否必须先登记进 btm 的列表
+   （`btmAddDeviceInfo` / 配对流程），以及 `btmBleGetGattClientConditionList` 里到底有什么。
+4. **栈的准入（收尾用）**：若 base `btm` 这条路也走不通，且 `0x1806` 的产出点能定位到
+   "非任天堂客户端"的检查上，就按"架构上不可行"收尾：扫描可用、请求形状正确、设备可连、
+  连接被栈拒。诊断用的 IPS 补丁只用来确认"某个检查是不是唯一门禁"，不是方案。
 
 重开工需要的入口都在仓库里：`tools/ble-re/`（`nso2elf.py`、`peek.py`、`find_xref.py`、
-`abi_sizes.py`、`make_ips.py`、`ghidra/`）、本页上面的「命令 → 请求形状」表与
-「管理器虚表、事件发布点与连接失败点」、`docs/ble-poc.md` 的探针说明（`←` 驱动级扫描、
-空闲屏 `Y` applet 侧连接探针）。用到的地址与命令 case 都可用
+`abi_sizes.py`、`make_ips.py`、`ghidra/`）、本页上面的「命令 → 请求形状」表、
+「base `btm` 服务」一节、`docs/ble-poc.md` 的探针说明（`←` 驱动级扫描、空闲屏 `Y`
+applet 侧连接探针、`StickR` base-btm 探针）。用到的地址与命令 case 都可用
 `analyzeHeadless ... -postScript DecompileAt.java <地址>` 复现（命令 case 地址由
-`0x11884e` 的字节表 + `0x1d4d4` 的分支表算出）。
+`0x11884e` 的字节表 + `0x1d4d4` 的分支表算出）；只被跳转表引用、没有函数入口的 case
+用 `tools/ble-re/ghidra/DecompileForce.java`。
 
 ### 对上游的价值（libnx / switchbrew）
 
-> **待重写**：第 1 条（cmd 62 变成 0x40 字节）和第 4 条（ABI 与 `btdrv_types.h` 不一致）
-> 已被上面的更正推翻，不能按原样提交。第 2 条（cmd 40 关会话）与第 3 条（`btm:u` 是
-> applet 专用）仍然成立。提交动作暂缓（见 `tools/ble-re/upstream.md` 顶部说明）。
+> **下面那 4 条已经重写过**：第 1 条（cmd 62 变成 0x40 字节）和第 4 条（ABI 与
+> `btdrv_types.h` 不一致）已被上面的更正推翻，不能按原样提交；第 2 条（cmd 40 关会话）
+> 与第 3 条（`btm:u` 是 applet 专用）仍然成立。重写后的草稿是
+> `tools/ble-re/upstream.md`（3 条，顶部写明哪两条作废），提交动作暂缓。
 
 这次的结果对 libnx 是**新信息**：`btdrv.h` 的版本注记只到 12.x，`btmu.c` 最后一次改动是
 2020-12-29，整个仓库没有 20.0.0+（`bluetooth` → `bluetooth.autog`）的记录。已经有实机证据、

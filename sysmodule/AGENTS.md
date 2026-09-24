@@ -8,8 +8,9 @@
 
 - **WebSocket 模式**：与手机 DG-LAB App 的 WebSocket 会话（Switch 是服务端、App 扫码连入）、
   Socket 协议、把事件源的波形数据转发给 App（见 `docs/dglab-socket.md`）；
-- **BLE 模式**：直接连接 DG-LAB 设备（Coyote 协议）——**未实现，该模式已搁置**，
-  见 `docs/ble-poc.md`；
+- **BLE 模式**：直接连接 DG-LAB 设备（Coyote 协议）——**未实现**：连接与 GATT 表已实机
+  跑通（依赖 exefs 补丁），传输层写入可用，但设备侧通知未回、B1 未验证。见
+  `docs/ble-poc.md` 与 `docs/ble-re.md`；
 - DG-LAB 设备发现、连接、断开；
 - 设备状态管理；
 - Effect / Wave / Command 等协议层功能；
@@ -242,13 +243,15 @@ Sysmodule 的构建必须区分：
         └── flags/
             └── boot2.flag
 
-该目录位于仓库根目录的 `release/` 下（见根 `AGENTS.md` 的“发布产物布局”），
+该目录位于仓库根目录的 `build/` 下（见根 `AGENTS.md` 的“发布产物布局”），
 Title ID 目录名由 `DGLAB-NX-Core.json` 推导。
 
 其中：
 
 - `exefs.nsp` 是构建产生的 Sysmodule NSP；
-- `toolbox.json` 用于 Sysmodule Toolbox/Overlay；
+- `toolbox.json` 用于 Sysmodule Toolbox/Overlay，其中 `version` 是模块的**发行版本**，
+  来源仓库根 `VERSION`（`Makefile` 读同一个文件，禁止另写一份）；它不是 IPC 接口版本
+  （那个只由 `GET_VERSION` 报给客户端，见 `docs/ipc.md` 的“版本”）；
 - `flags/boot2.flag` 用于 Atmosphère 启动阶段加载 Sysmodule。
 
 ### Sysmodule 模块名称
@@ -273,8 +276,9 @@ NPDM 配置文件名必须与 `TARGET` 一致：libnx 模板只自动匹配 `<TA
 3. `toolbox.json` 存在；
 4. `toolbox.json` 中的 `name` 与模块名称一致；
 5. `toolbox.json` 中的 `tid` 与目录 Title ID 一致；
-6. `flags/boot2.flag` 存在；
-7. 输出目录结构正确。
+6. `toolbox.json` 中的 `version` 与仓库根 `VERSION` 一致；
+7. `flags/boot2.flag` 存在；
+8. 输出目录结构正确。
 
 如果任何检查失败，构建必须失败，而不是生成一个可能无法安装的目录。
 

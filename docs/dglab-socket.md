@@ -2,7 +2,8 @@
 
 本文对应 **WebSocket 模式**（已实现）：sysmodule 与手机 DG-LAB App 建立 WebSocket 会话
 ——Switch 当服务端，App 扫码连入（Switch 不主动外连）；手机负责与设备之间的 BLE，并把
-波形数据转发给设备。BLE 模式（sysmodule 直接连接设备）未实现、已搁置，见 `docs/ble-poc.md`。
+波形数据转发给设备。BLE 模式（sysmodule 直接连接设备）未实现（连接与写入已实机跑通、
+通知路径未通，且依赖补丁），见 `docs/ble-poc.md` 与 `docs/ble-re.md`。
 
 本文记录 Switch 侧通过局域网控制手机的 DG-LAB App 所需的协议事实。
 

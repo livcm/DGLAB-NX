@@ -8,7 +8,7 @@ DG-LAB BLE 或 DG-LAB WebSocket 协议的实现，并通过统一的后台服务
 项目核心不是某一个特定游戏，而是：
 
     DG-LAB 设备 / DG-LAB APP
-             ↑ BLE（未实现） / WebSocket（已实现）
+             ↑ BLE（需 exefs 补丁） / WebSocket（已实现）
     DG-LAB Sysmodule
             ↑ IPC
      ┌──────┼───────────┐
@@ -25,7 +25,7 @@ NRO、Overlay 和 Game Mod 负责具体的用户交互或游戏事件，并通�
 
 | 模式 | 连接方式 | 状态 |
 | --- | --- | --- |
-| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | **未实现**，该模式已搁置（只读逆向已完成：不需要固件补丁，卡点是语义/状态），见 `docs/ble-re.md` 与 `docs/ble-poc.md` |
+| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | **扫描 + 连接 + GATT 表已实机跑通，但仅在安装了 exefs 补丁的机器上可用**（补丁跳过固件对"客户端控制器层激活"的检查，内容与安装方式见 `docs/ble-re.md`）。传输层已接上 Coyote 协议层（BF/B0 写入 `rc=0`），**但设备侧通知未回、B1 未验证**，波形还不能出。实现须知见 `sysmodule/AGENTS.md` |
 | WebSocket | sysmodule 与手机 DG-LAB App 建立 WebSocket 会话：Switch 当服务端，App 扫码连入（Switch 不主动外连）；手机负责与设备之间的 BLE，并把波形数据转发给设备 | **已实现**（Socket V3），见 `docs/dglab-socket.md` |
 
 两种模式下的设备侧连接都只能由 sysmodule 建立并持有，其它组件一律走 IPC（见 §3）。
@@ -227,9 +227,9 @@ headers/examples → 明确修改范围 → 采用最小必要修改。
 
 ## 8.1 发布产物布局
 
-所有编译产物统一生成到仓库根目录的 `release/`，用根目录的 `make` 一次构建：
+所有编译产物统一生成到仓库根目录的 `build/`，用根目录的 `make` 一次构建：
 
-    release/
+    build/
     ├── <TITLE_ID>/        Atmosphère sysmodule 目录
     │   ├── exefs.nsp
     │   ├── toolbox.json
@@ -243,15 +243,15 @@ headers/examples → 明确修改范围 → 采用最小必要修改。
 
 - 根目录 `make` 构建全部组件并生成上述布局；`make clean` 清除这些产物；
 - 各组件用 `make -C <component> package` 只生成自己那一部分；
-- `release/DGLAB-NX/` 的内容与 SD 卡上的目录一一对应：`lang/` 的源头是仓库根目录的
+- `build/DGLAB-NX/` 的内容与 SD 卡上的目录一一对应：`lang/` 的源头是仓库根目录的
   `lang/`，随 `nro` 一起发布，必须和 `DGLAB-NX.nro` 一起安装，否则 NRO 启动时会报错
   退出（见 `nro/AGENTS.md`）；
 - `<TITLE_ID>` 目录名必须由 `sysmodule/DGLAB-NX-Core.json` 推导，禁止在 Makefile、
   脚本或文档里另写一份；
 - 发布由 GitHub Actions 的 tag 触发：tag 必须等于仓库根 `VERSION`（形如 `v<VERSION>`），
-  不一致时 CI 在编译前失败；CI 的组装脚本同样从 `release/` 推导 `<TITLE_ID>`，不得另写一份。
+  不一致时 CI 在编译前失败；CI 的组装脚本同样从 `build/` 推导 `<TITLE_ID>`，不得另写一份。
   流程与产物见 `.github/workflows/release.yml` 与 `README.md` 的「发布」；
-- `release/` 属于构建产物，不提交到 Git。
+- `build/` 属于构建产物，不提交到 Git。
 
 如果当前没有自动化测试，应至少进行：
 
@@ -447,7 +447,7 @@ Agent 在研究外部资料、阅读源码或实际开发过程中，可能发�
 
 ### 未完成
 
-1. BLE 模式（sysmodule 直连设备）: 2026-09-21 发现，不需要固件补丁，卡点在语义/状态；判定与重开顺序见 `docs/ble-re.md`。
+1. BLE 模式（sysmodule 直连设备）: 扫描 + 连接 + GATT 表已实机跑通，**但依赖一个 exefs 补丁**（固件把"客户端在控制器层的激活"留给系统自身流程，第三方会被 `result=0x1A` 挡下；补丁跳过该检查）。传输层已接上 Coyote 协议层（一键 `StickR` 序列：驱动级探针打开 BLE 栈 → btm 探针连接 → BF/B0 写入全 `rc=0`），**卡在通知路径**：设备一条通知都没回，B1 未验证。实现或继续研究前先读 `docs/ble-re.md` 的「当前状态（2026-09-25）」与「诊断补丁」两节，并遵守那里的安全规则（一个开机周期只走一条 BLE 路径、btm 探针不碰 btdrv、不要冒用 applet ARUID、不要给 btm 留无法完成的连接）。下一步待做：敲定通知/事件通路（先看电量读取后事件记录变不变，再查 CCCD 订阅），把补丁纳入发布产物，最后才是波形输出。
 2. Game Mod / Overlay：由于游戏与 NRO 前端不能同时运行，因此需要由 Overlay 来监控和管理 Sysmodule 和 Game Mod 的运行状态，两者同时开发；
 3. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
 
