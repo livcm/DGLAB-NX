@@ -169,7 +169,7 @@ UI 风格可以模仿 HOS，但实现应与 HOS 系统 UI 解耦。
   `nro/include/dglab/ui/strings.h` 加枚举 + `nro/source/ui/strings.c` 的 `kKeys[]` 加 key
   + `lang/en.json` 与 `lang/zh-Hans.json` 各加一条；`tests/lang` 会检查三方对得上；
 - `lang/` 在仓库根目录（与 `nro/` 同级），`make -C nro package` 复制到
-  `release/DGLAB-NX/lang/`。它是**运行期**读的：必须和 `DGLAB-NX.nro` 一起装到
+  `build/DGLAB-NX/lang/`。它是**运行期**读的：必须和 `DGLAB-NX.nro` 一起装到
   `SD:/switch/DGLAB-NX/`，否则 NRO 启动即打印错误退出（有任意一个语言文件可用就继续
   启动，缺的 key 回落到已加载的语言）；
 - console 输出（BLE PoC 控制台、启动失败提示）保持 ASCII 英文：libnx 的 console 用的是

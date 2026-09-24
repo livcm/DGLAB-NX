@@ -74,9 +74,9 @@ APP_AUTHOR	:=	livcm
 ICON		:=	DGLAB-NX.jpg
 
 # Release layout (see AGENTS.md): the NRO is copied next to the sysmodule
-# package under release/ at the repository root, in a directory of its own that
+# package under build/ at the repository root, in a directory of its own that
 # mirrors what goes on the SD card: the .nro and the lang/ it reads at run time.
-RELEASE_DIR	:=	$(CURDIR)/../release
+RELEASE_DIR	:=	$(CURDIR)/../build
 RELEASE_APP_DIR	:=	$(RELEASE_DIR)/$(TARGET)
 RELEASE_NRO	:=	$(RELEASE_APP_DIR)/$(TARGET).nro
 LANG_DIR	:=	$(CURDIR)/../lang

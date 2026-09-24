@@ -1781,7 +1781,7 @@ static void showNotice(PadState* pad, const char* headline, ...)
     printf("\n\n");
     printf("The socket server lives in the sysmodule, so the front end has nothing\n");
     printf("to show without it. Install it and reboot the console:\n\n");
-    printf("    release/00FF072107210721/  ->  SD:/atmosphere/contents/00FF072107210721/\n");
+    printf("    build/00FF072107210721/  ->  SD:/atmosphere/contents/00FF072107210721/\n");
     printf("\nThen start this homebrew again.\n");
     printf("\nPress + to exit.\n");
     consoleUpdate(NULL);

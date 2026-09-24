@@ -321,7 +321,7 @@ make -C tests/canvas              # 绘制层未动，必须一条用例都不�
 
 ### 语言文件（`lang/*.json`）
 
-仓库里的 `lang/` 与 `nro/` 同级，构建时复制到 `release/DGLAB-NX/lang/`，安装时和
+仓库里的 `lang/` 与 `nro/` 同级，构建时复制到 `build/DGLAB-NX/lang/`，安装时和
 `DGLAB-NX.nro` 一起进 `SD:/switch/DGLAB-NX/`（见根 `AGENTS.md` 的发布产物布局）。
 
 文件格式：

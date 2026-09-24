@@ -1,13 +1,13 @@
 #---------------------------------------------------------------------------------
 # DGLAB-NX top level build.
 #
-#   make            build every component into release/
+#   make            build every component into build/
 #   make release    same as make
 #   make clean      remove build outputs
 #
 # Release layout (see AGENTS.md):
 #
-#   release/
+#   build/
 #   ├── <TITLE_ID>/        Atmosphère sysmodule: exefs.nsp, toolbox.json, flags/boot2.flag
 #   ├── DGLAB-NX.nro       homebrew front end
 #   └── DGLAB-NX-Ovl.ovl   Tesla / Ultrahand overlay (not implemented yet)
@@ -16,11 +16,12 @@
 # directory name from sysmodule/DGLAB-NX-Core.json, which stays the single source of
 # truth for it.
 #
-# Neither is the front end's version: VERSION holds it, and it is handed to
-# nro/Makefile as APP_VERSION, which writes it into the NACP and the About page.
+# Neither is the release version: VERSION holds it, and it is handed to
+# nro/Makefile (which writes it into the NACP and the About page) and to
+# sysmodule/Makefile (which writes it into the packaged toolbox.json).
 #---------------------------------------------------------------------------------
 
-RELEASE_DIR := $(CURDIR)/release
+RELEASE_DIR := $(CURDIR)/build
 APP_VERSION := $(shell cat $(CURDIR)/VERSION 2>/dev/null)
 
 .PHONY: all release sysmodule nro overlay clean
@@ -31,7 +32,7 @@ release: sysmodule nro overlay
 	@echo "release layout ready in $(RELEASE_DIR)  [DGLAB-NX $(APP_VERSION)]"
 
 sysmodule:
-	@$(MAKE) -C sysmodule package
+	@$(MAKE) -C sysmodule package APP_VERSION='$(APP_VERSION)'
 
 nro:
 	@$(MAKE) -C nro package APP_VERSION='$(APP_VERSION)'

@@ -32,9 +32,10 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 
 `GET_VERSION` 返回的号来自 `common/include/dglab/ipc.h` 的
 `DGLAB_IPC_PROTOCOL_VERSION`（打包值 `0x000200u`），当前是 `0.2.0`。它是 **IPC 接口
-版本**，与应用的发行版本号是两回事——后者属于 NRO 的 NACP 与 About 页，单一来源是
-仓库根 `VERSION`（见 `nro/AGENTS.md` 的"元信息与版本"）。接口发生不兼容变更时递增
-次版本号。
+版本**，`GET_VERSION` 是它唯一的出口（不进任何配置文件）。发行版本号是另一回事：
+它属于 NRO 的 NACP 与 About 页，也写进 sysmodule 安装目录的 `toolbox.json` 的
+`version` 字段，单一来源是仓库根 `VERSION`（见 `nro/AGENTS.md` 的"元信息与版本"、
+`sysmodule/AGENTS.md` 的"构建与发布"）。接口发生不兼容变更时递增次版本号。
 
 | 版本 | 变化 |
 | --- | --- |

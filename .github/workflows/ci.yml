@@ -6,7 +6,7 @@
 #                                                "what gets built and tested"
 #                                                has exactly one definition
 #
-# The release layout is assembled here as well (release/ -> dist/), because the
+# The release layout is assembled here as well (build/ -> dist/), because the
 # SD card layout only ever changes in the same place as the build.
 #
 # See README.md ("发布") and AGENTS.md §8.1.
@@ -168,34 +168,34 @@ jobs:
           # package` produced: sysmodule/DGLAB-NX-Core.json stays the only
           # place it is written down (AGENTS.md §8.1).
           tid_dir=""
-          for dir in release/*/; do
+          for dir in build/*/; do
             if [ -f "$dir/exefs.nsp" ]; then
               tid_dir=$(basename "$dir")
               break
             fi
           done
           if [ -z "$tid_dir" ]; then
-            echo "::error::no sysmodule package (exefs.nsp) under release/"
-            ls -R release || true
+            echo "::error::no sysmodule package (exefs.nsp) under build/"
+            ls -R build || true
             exit 1
           fi
           echo "title id directory: $tid_dir"
           echo "TID_DIR=$tid_dir" >> "$GITHUB_ENV"
 
-          # dist/ is the SD card root: release/<TITLE_ID>/ goes under
+          # dist/ is the SD card root: build/<TITLE_ID>/ goes under
           # atmosphere/contents/, the front end under switch/, exactly as
           # README.md's install section describes.
           rm -rf dist
           mkdir -p "dist/atmosphere/contents/$tid_dir" dist/switch/DGLAB-NX
-          cp -R "release/$tid_dir/." "dist/atmosphere/contents/$tid_dir/"
-          cp -R release/DGLAB-NX/. dist/switch/DGLAB-NX/
+          cp -R "build/$tid_dir/." "dist/atmosphere/contents/$tid_dir/"
+          cp -R build/DGLAB-NX/. dist/switch/DGLAB-NX/
 
           # The overlay is not implemented yet (overlay/AGENTS.md), so this
           # branch does nothing today and picks it up automatically once the
           # component starts producing DGLAB-NX-Ovl.ovl.
-          if [ -f release/DGLAB-NX-Ovl.ovl ]; then
+          if [ -f build/DGLAB-NX-Ovl.ovl ]; then
             mkdir -p dist/switch/.overlays
-            cp release/DGLAB-NX-Ovl.ovl dist/switch/.overlays/
+            cp build/DGLAB-NX-Ovl.ovl dist/switch/.overlays/
           else
             echo "note: overlay not implemented yet, no .ovl in the package"
           fi
@@ -235,7 +235,18 @@ jobs:
             echo "::error::VERSION $version not found in DGLAB-NX.nro"
             exit 1
           }
-          echo "layout ok: $TID_DIR, DGLAB-NX $version"
+          # The sysmodule package carries the same release version, because the
+          # module manager reads it out of toolbox.json. `make -C sysmodule
+          # package` derived it from VERSION, so this only compares the artifact
+          # against that one source (no second derivation here).
+          toolbox_version=$(sed -nE \
+            's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+            "dist/atmosphere/contents/$TID_DIR/toolbox.json" | head -n1)
+          if [ "$toolbox_version" != "$version" ]; then
+            echo "::error::toolbox.json version '$toolbox_version' != VERSION $version"
+            exit 1
+          fi
+          echo "layout ok: $TID_DIR, DGLAB-NX $version, sysmodule $toolbox_version"
 
       - name: Upload the SD card layout
         uses: actions/upload-artifact@v7
