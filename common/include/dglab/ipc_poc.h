@@ -59,12 +59,13 @@ enum {
     DglabPocAction_ReadBattery      = 4, ///< Read the battery characteristic.
     DglabPocAction_RestartSession   = 5, ///< Tear the session down and start over.
     DglabPocAction_ToggleAutoWrite  = 6, ///< Toggle the 100ms B0 keepalive while connected.
-    // Scan variants. Which service UUID the Coyote 3.0 advertises is still not
-    // settled: early firmware advertised 0x1812 (HID), the phone showed 0x180C
-    // after a device firmware update, and the 2026-09-22 advertisement dump did
-    // not show a service UUID at all. The scan filter therefore decides whether
-    // the device can be found, and the probe dumps the advertisement structures
-    // instead of trusting either reading. See docs/ble-poc.md.
+    // Scan variants. The device's advertisement carries no service UUID at all:
+    // the 2026-09-25 scan record holds exactly three entries - flags (0x01),
+    // manufacturer data (0xFF, company 0x000A + four zero bytes) and the local
+    // name "47L121000" (0x09) - so a UUID-filtered scan can never find it and
+    // the manufacturer-data filter is the only one that works. The probe still
+    // decodes the advertisement array on every scan so this stays checkable.
+    // See docs/ble-poc.md.
     DglabPocAction_Rescan              = 7,  ///< Scan again with the default filter order.
     DglabPocAction_ScanWithProtocolUuid = 8, ///< Scan filtered by 0x180C only.
     DglabPocAction_ScanWithAdvertisedUuid = 9, ///< Scan filtered by 0x1812 only.

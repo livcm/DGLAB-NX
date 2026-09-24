@@ -313,6 +313,27 @@ static void pocLog(const char* fmt, ...)
     mutexUnlock(&g_poc.mutex);
 }
 
+// One line per 16 bytes, as four little-endian words. The firmware's GATT
+// structures carry fields libnx does not decode (every characteristic's
+// property byte reads back 0x00), so the raw bytes are what has to be looked at
+// - but a 0x24-byte hex soup per entry would eat the 16 KB log ring that the
+// transport lines need.
+static void pocLogWords(const char* label, const u8* data, u32 size, u32 from)
+{
+    for (u32 offset = from; offset < size; offset += 16u) {
+        u8 chunk[16] = { 0 };
+        u32 word[4] = { 0, 0, 0, 0 };
+        u32 avail = (size - offset) < 16u ? (size - offset) : 16u;
+
+        memcpy(chunk, data + offset, avail);
+        for (u32 w = 0; w < 4u; w++)
+            memcpy(&word[w], chunk + w * 4u, 4u);
+
+        pocLog("%s +%03X %08X %08X %08X %08X", label, (unsigned)offset,
+            (unsigned)word[0], (unsigned)word[1], (unsigned)word[2], (unsigned)word[3]);
+    }
+}
+
 static void pocSetState(u32 state)
 {
     mutexLock(&g_poc.mutex);
@@ -410,6 +431,7 @@ static bool pocHandleAction(PocWorker* w, u32 action);
 static u32 pocDrainBleEvents(const char* label, u32 duration_ms, u8* out_client_if);
 // Defined next to the btm probe, used by the driver-level probe's device dump.
 static void pocLogAdStructures(const char* label, const u8* data, size_t size);
+static void pocLogAdArray(const char* label, const BtdrvBleAdvertisement* list, u32 count);
 
 static Result pocWriteCharacteristic(BtdevGattCharacteristic* characteristic, const u8* data,
     size_t size)
@@ -1105,7 +1127,13 @@ typedef struct {
     u32 writes;
     u32 notifications;
     u32 b1_count;
-    u32 events_logged;
+    // The queue replays "the current record" until something else arrives, so
+    // the pump keeps the last one it saw and dumps only changes. The comparison
+    // covers the whole 0x50-byte prefix: a client_notify record begins with the
+    // same {result, conn_id} as the connection_update record that sits in this
+    // state, so the first eight bytes cannot tell them apart.
+    u32 events_seen;
+    u8 last_event[0x50];
 } PocBtmTransport;
 
 // The session holds two 128-entry waveform channels, so it lives in .bss.
@@ -1120,6 +1148,21 @@ static BtmGattService g_btm_battery_service;
 static BtmGattCharacteristic g_btm_battery_char;
 static bool g_btm_battery_ready;
 static bool g_btm_battery_read_sent;
+
+// The client characteristic configuration descriptor (0x2902) under 0x150B:
+// btm's descriptor struct does not decode the instance id libnx's GATT calls
+// want, so it is taken from +0x1C (where it sits in the characteristic struct)
+// and the guess is backed by the raw dump. Reading the CCCD back after
+// RegisterNotification is what says whether the subscription reached the device.
+static BtdrvGattId g_btm_cccd;
+static bool g_btm_cccd_ready;
+
+// Managed-queue peek (see pocBtmManagedPeek): another 0x400-byte payload, so it
+// lives in .bss like g_ble_event.
+#define POC_BTM_EVENT_DUMP_MAX 6u
+static BtdrvBleEventInfo g_managed_event;
+static u8 g_managed_last[0x50];
+static u32 g_managed_seen;
 
 static void pocBtmLinkWrite(void* context, const u8* data, size_t size)
 {
@@ -1188,6 +1231,20 @@ static bool pocBtmTransportStart(u32 handle)
     pocLog("btm transport: RegisterNotification(0x150B) rc=0x%08X", (u32)rc);
     g_btm_transport.notify_registered = R_SUCCEEDED(rc);
 
+    // RegisterNotification only says "accepted". If it really subscribed, the
+    // CCCD under 0x150B reads back as 0x0001; if it did not, the device has no
+    // reason to ever notify and the whole B1 wait is pointless. The answer
+    // arrives through the same event channel as everything else.
+    if (g_btm_cccd_ready) {
+        Result cccd_rc = btLeClientReadDescriptor(handle, true, &g_btm_transport.service,
+            &g_btm_transport.notify_char, &g_btm_cccd, BtdrvGattAuthReqType_None);
+
+        pocLog("btm transport: ReadDescriptor(CCCD 0x2902 id=%u) rc=0x%08X",
+            (unsigned)g_btm_cccd.instance_id, (u32)cccd_rc);
+    } else {
+        pocLog("btm transport: no CCCD entry from btm, subscription cannot be read back");
+    }
+
     g_btm_transport.connected = true;
     g_btm_transport.last_tick_ms = pocNowMs();
     g_btm_transport.start_ms = g_btm_transport.last_tick_ms;
@@ -1225,7 +1282,10 @@ static void pocBtmTransportPump(u32 duration_ms)
             if (R_FAILED(rc))
                 break;
 
-            for (u32 b = 0; b < 8u; b++) {
+            // The whole prefix decides whether this is an event at all: a
+            // record whose first eight bytes are zero can still carry something
+            // further in (the notify payload sits at +0x4A).
+            for (u32 b = 0; b < sizeof(g_btm_transport.last_event); b++) {
                 if (g_ble_event.data[b] != 0)
                     zero = false;
             }
@@ -1233,22 +1293,37 @@ static void pocBtmTransportPump(u32 duration_ms)
             if (zero)
                 break;
 
-            // The first few events are logged whole: if the firmware's notify
-            // layout differs from libnx's (the properties byte already did), the
-            // offsets below are what has to change.
-            // Counted separately: notifications only increments for payloads
-            // that look like one, so using it here logged *every* event (908 of
-            // them in the 2026-09-25 01:38 run).
-            if (g_btm_transport.events_logged < 3u) {
-                g_btm_transport.events_logged++;
-                pocLog("btm transport: event head %02X%02X%02X%02X %02X%02X%02X%02X "
-                       "%02X%02X%02X%02X %02X%02X%02X%02X",
-                    g_ble_event.data[0], g_ble_event.data[1], g_ble_event.data[2],
-                    g_ble_event.data[3], g_ble_event.data[4], g_ble_event.data[5],
-                    g_ble_event.data[6], g_ble_event.data[7], g_ble_event.data[8],
-                    g_ble_event.data[9], g_ble_event.data[10], g_ble_event.data[11],
-                    g_ble_event.data[12], g_ble_event.data[13], g_ble_event.data[14],
-                    g_ble_event.data[15]);
+            // Only what changed is worth a line (the queue hands the same record
+            // back until something else arrives), but what changed is worth all
+            // of it: the 2026-09-25 01:38 run deduplicated on eight bytes and
+            // dumped the first three records only, which is exactly the part a
+            // client_notify shares with the connection_update record sitting in
+            // this state - a notification arriving later could not have shown up.
+            if (memcmp(g_btm_transport.last_event, g_ble_event.data,
+                    sizeof(g_btm_transport.last_event)) != 0) {
+                memcpy(g_btm_transport.last_event, g_ble_event.data,
+                    sizeof(g_btm_transport.last_event));
+                g_btm_transport.events_seen++;
+
+                if (g_btm_transport.events_seen <= POC_BTM_EVENT_DUMP_MAX) {
+                    char raw_label[32];
+                    u32 size_field = (u32)g_ble_event.data[0x48] |
+                        ((u32)g_ble_event.data[0x49] << 8);
+                    u32 conn_field = (u32)g_ble_event.data[4] |
+                        ((u32)g_ble_event.data[5] << 8) | ((u32)g_ble_event.data[6] << 16) |
+                        ((u32)g_ble_event.data[7] << 24);
+
+                    snprintf(raw_label, sizeof(raw_label), "btm transport: ev#%u",
+                        (unsigned)g_btm_transport.events_seen);
+                    pocLogWords(raw_label, g_ble_event.data, 0x50u, 0u);
+                    pocLog("%s meta size@0x48=%u conn@0x04=%u byte@0x08=%u word@0x0C=%u",
+                        raw_label, (unsigned)size_field, (unsigned)conn_field,
+                        (unsigned)g_ble_event.data[8],
+                        (unsigned)((u32)g_ble_event.data[0x0C] |
+                            ((u32)g_ble_event.data[0x0D] << 8) |
+                            ((u32)g_ble_event.data[0x0E] << 16) |
+                            ((u32)g_ble_event.data[0x0F] << 24)));
+                }
             }
 
             // The type the firmware reports is not usable, so the notification
@@ -1258,22 +1333,8 @@ static void pocBtmTransportPump(u32 duration_ms)
             notify = g_ble_event.data + 0x4A;
 
             if (size == 0u || size > 0x20u) {
-                // Most of the queue traffic here is other event kinds; logging
-                // each one filled the log ring and pushed the B0/B1 lines out
-                // (598 of them in the 2026-09-25 run). Only a change is logged.
-                static u8 last_event_head[8];
-                static u32 other_events;
-
-                other_events++;
-
-                if (memcmp(last_event_head, g_ble_event.data, sizeof(last_event_head)) != 0) {
-                    memcpy(last_event_head, g_ble_event.data, sizeof(last_event_head));
-                    pocLog("btm transport: event #%u head %02X%02X%02X%02X %02X%02X%02X%02X",
-                        other_events, g_ble_event.data[0], g_ble_event.data[1],
-                        g_ble_event.data[2], g_ble_event.data[3], g_ble_event.data[4],
-                        g_ble_event.data[5], g_ble_event.data[6], g_ble_event.data[7]);
-                }
-
+                // Not a notify by libnx's layout: the dump above already shows
+                // what it is, so this path stays quiet.
                 continue;
             }
 
@@ -1355,6 +1416,59 @@ static void pocBtmTransportPump(u32 duration_ms)
     }
 }
 
+// Last thing before the disconnect: does btdrv's *managed* queue carry the same
+// records the `bt` channel shows? This probe has stayed away from btdrv on
+// purpose (docs/history.md §28) - what broke the connect was a second
+// InitializeBle/EnableBle and a RegisterGattClient from this process, not
+// opening the service - so the peek runs after the transport window, when the
+// measurement is already in the log, and it only reads.
+static void pocBtmManagedPeek(void)
+{
+    Result rc = btdrvInitialize();
+
+    pocLog("btm transport: managed peek, btdrvInitialize rc=0x%08X", (u32)rc);
+    if (R_FAILED(rc))
+        return;
+
+    for (u32 i = 0; i < 8u; i++) {
+        BtdrvBleEventType type = (BtdrvBleEventType)0;
+        bool nonzero = false;
+
+        memset(&g_managed_event, 0, sizeof(g_managed_event));
+        rc = btdrvGetBleManagedEventInfo(&g_managed_event, sizeof(g_managed_event), &type);
+        if (R_FAILED(rc)) {
+            pocLog("btm transport: managed peek read rc=0x%08X", (u32)rc);
+            break;
+        }
+
+        for (u32 b = 0; b < sizeof(g_managed_last); b++) {
+            if (g_managed_event.data[b] != 0)
+                nonzero = true;
+        }
+
+        if (!nonzero)
+            break;
+
+        if (memcmp(g_managed_last, g_managed_event.data, sizeof(g_managed_last)) == 0)
+            continue;
+
+        memcpy(g_managed_last, g_managed_event.data, sizeof(g_managed_last));
+        g_managed_seen++;
+
+        if (g_managed_seen <= 4u) {
+            char raw_label[48];
+
+            snprintf(raw_label, sizeof(raw_label), "btm transport: managed#%u type=%u",
+                (unsigned)g_managed_seen, (unsigned)type);
+            pocLogWords(raw_label, g_managed_event.data, 0x50u, 0u);
+        }
+    }
+
+    pocLog("btm transport: managed peek done, %u distinct record(s)",
+        (unsigned)g_managed_seen);
+    btdrvExit();
+}
+
 static void pocBtmTransportStop(void)
 {
     if (!g_btm_transport.connected)
@@ -1369,6 +1483,8 @@ static void pocBtmTransportStop(void)
         pocLog("btm transport: DeregisterNotification rc=0x%08X", (u32)rc);
         g_btm_transport.notify_registered = false;
     }
+
+    pocBtmManagedPeek();
 
     pocLog("btm transport: done, writes=%u notify=%u b1=%u", g_btm_transport.writes,
         g_btm_transport.notifications, g_btm_transport.b1_count);
@@ -1668,7 +1784,6 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     bool have_previous = false;
     u8 client_if = 0xFF;
     bool have_address = false;
-    bool tried_connect = false;
     u32 total_scan_results = 0;
 
     // Version marker: if a log has no line below this one, the build that ran
@@ -2132,12 +2247,13 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                     }
 
                     // The docs disagree about whether the advertisement carries
-                    // the service UUID 0x180C (docs/ble-poc.md), so the record is
-                    // also walked as AD structures. Only for the configured
-                    // device: the other devices in the room are not the point.
+                    // the service UUID 0x180C (docs/ble-poc.md), so the scan
+                    // record's advertisement array is decoded here. Only for the
+                    // configured device: the other devices in the room are not
+                    // the point.
                     if (g_poc.use_target_address &&
                         memcmp(info.scan_result.address.address, g_poc.target_address, 6) == 0) {
-                        pocLogAdStructures("btdrv probe", info.data, sizeof(info.data));
+                        pocLogAdArray("btdrv probe", info.scan_result.ad_list, 10u);
                     }
                 }
             }
@@ -2417,6 +2533,34 @@ static void pocLogAdStructures(const char* label, const u8* data, size_t size)
     }
 
     pocLog("%s no AD structure chain in the first 0x40 bytes", label);
+}
+
+// A scan record carries the advertisement as a fixed array of ten entries
+// (`BtdrvBleAdvertisement`: size / type / data), not as one packed chain. The
+// chain walker above therefore reported "no AD structure chain" for a record
+// that has three entries in it (2026-09-25 runs: flags, manufacturer data with
+// company 0x000A, and the local name). Decoding the array is what settles
+// whether this device advertises a service UUID at all.
+static void pocLogAdArray(const char* label, const BtdrvBleAdvertisement* list, u32 count)
+{
+    u32 entries = 0;
+
+    for (u32 i = 0; i < count; i++) {
+        if (list[i].size == 0u || list[i].size > (1u + sizeof(list[i].data)))
+            break;
+
+        entries++;
+    }
+
+    pocLog("%s advertisement: %u entry(ies)", label, (unsigned)entries);
+
+    for (u32 i = 0; i < entries; i++) {
+        char value[3u * sizeof(list[i].data) + 1u];
+
+        pocHex(value, sizeof(value), list[i].data, (size_t)list[i].size - 1u);
+        pocLog("%s   ad[%u] type=0x%02X len=%u %s", label, i, list[i].type,
+            (unsigned)list[i].size, value);
+    }
 }
 
 // One btm scan pass. smart_device picks the smart-device scan, which is the
@@ -2774,6 +2918,45 @@ static bool pocBtmConnectTry(const char* label, const BtdrvAddress* addr, u32* o
     return true;
 }
 
+// libnx has no decoded descriptor entry for btm, so each one is printed with its
+// raw bytes and the 0x2902 (client characteristic configuration) candidate is
+// kept for the read-back in pocBtmTransportStart. The instance id is taken from
+// +0x1C - where it sits in both the service and characteristic structs - and the
+// dump is what shows whether the guess holds.
+static void pocBtmLogDescriptors(const char* label, u32 handle, u16 char_handle)
+{
+    BtmGattDescriptor descs[8];
+    u8 total = 0;
+    Result rc;
+
+    memset(descs, 0, sizeof(descs));
+    rc = btmGetGattDescriptors(handle, char_handle, descs, 8u, &total);
+    pocLog("%s: GetGattDescriptors(char %u) rc=0x%08X total=%u", label,
+        (unsigned)char_handle, (u32)rc, (unsigned)total);
+
+    for (u32 i = 0; i < total && i < 8u; i++) {
+        const u8* raw = (const u8*)&descs[i];
+        u16 candidate_id = (u16)(raw[0x1C] | (raw[0x1D] << 8));
+        char text[64];
+        char raw_label[64];
+
+        pocUuidText(text, sizeof(text), &descs[i].uuid);
+        pocLog("%s:     desc[%u] uuid=%s handle=%u id?=%u", label, i, text,
+            descs[i].handle, (unsigned)candidate_id);
+
+        snprintf(raw_label, sizeof(raw_label), "%s:     desc[%u] raw", label, i);
+        pocLogWords(raw_label, raw, sizeof(BtmGattDescriptor), 0x14u);
+
+        if (descs[i].uuid.size == 2 && descs[i].uuid.uuid[0] == 0x02u &&
+            descs[i].uuid.uuid[1] == 0x29u) {
+            memset(&g_btm_cccd, 0, sizeof(g_btm_cccd));
+            g_btm_cccd.instance_id = (u8)candidate_id;
+            g_btm_cccd.uuid = descs[i].uuid;
+            g_btm_cccd_ready = true;
+        }
+    }
+}
+
 // Prints the GATT table of a connection and sets the same milestones the btdev
 // session uses, so the NRO's status line reads the same way.
 static void pocBtmLogGatt(const char* label, u32 handle)
@@ -2832,8 +3015,12 @@ static void pocBtmLogGatt(const char* label, u32 handle)
             g_btm_services[i].uuid.uuid[0] == (u8)(DGLAB_COYOTE_V3_UUID16_SERVICE & 0xFF) &&
             g_btm_services[i].uuid.uuid[1] == (u8)(DGLAB_COYOTE_V3_UUID16_SERVICE >> 8)) {
             u8 chars = 0;
+            char raw_label[64];
 
             pocSetMilestone(DGLAB_POC_MILESTONE_SERVICE_FOUND);
+
+            snprintf(raw_label, sizeof(raw_label), "%s:   service[%u] raw", label, i);
+            pocLogWords(raw_label, (const u8*)&g_btm_services[i], sizeof(BtmGattService), 0u);
 
             memset(g_btm_characteristics, 0, sizeof(g_btm_characteristics));
             rc = btmGetGattCharacteristics(handle, g_btm_services[i].handle,
@@ -2846,6 +3033,13 @@ static void pocBtmLogGatt(const char* label, u32 handle)
                 pocLog("%s:     char[%u] uuid=%s handle=%u props=0x%02X", label, c, text,
                     g_btm_characteristics[c].handle,
                     g_btm_characteristics[c].properties);
+
+                // The protocol characteristics are the ones the transport uses,
+                // so their whole struct is dumped: handle at +0x18, instance_id
+                // at +0x1C, properties at +0x1E in libnx's layout.
+                snprintf(raw_label, sizeof(raw_label), "%s:     char[%u] raw", label, c);
+                pocLogWords(raw_label, (const u8*)&g_btm_characteristics[c],
+                    sizeof(BtmGattCharacteristic), 0x14u);
 
                 // Remember the two characteristics the transport writes to and
                 // listens on, so the connection can be driven afterwards.
@@ -2863,6 +3057,10 @@ static void pocBtmLogGatt(const char* label, u32 handle)
                         (u8)(DGLAB_COYOTE_V3_UUID16_CHAR_NOTIFY >> 8)) {
                     g_btm_proto_service = g_btm_services[i];
                     g_btm_proto_notify = g_btm_characteristics[c];
+
+                    // The CCCD lives under this characteristic; what is written
+                    // there is what RegisterNotification has to leave behind.
+                    pocBtmLogDescriptors(label, handle, g_btm_characteristics[c].handle);
                 }
             }
         } else if (g_btm_services[i].uuid.size == 2 &&
@@ -2882,9 +3080,18 @@ static void pocBtmLogGatt(const char* label, u32 handle)
                 (unsigned)chars);
 
             for (u32 c = 0; c < chars && c < POC_BTM_CHARACTERISTIC_MAX; c++) {
+                char raw_label[64];
+
                 pocUuidText(text, sizeof(text), &g_btm_characteristics[c].uuid);
                 pocLog("%s:   battery char[%u] uuid=%s handle=%u props=0x%02X", label, c, text,
                     g_btm_characteristics[c].handle, g_btm_characteristics[c].properties);
+
+                // Same tail dump as the protocol characteristics: all eight
+                // property bytes coming back 0x00 is what sent the transport
+                // looking for the field that actually carries them.
+                snprintf(raw_label, sizeof(raw_label), "%s:   battery char[%u] raw", label, c);
+                pocLogWords(raw_label, (const u8*)&g_btm_characteristics[c],
+                    sizeof(BtmGattCharacteristic), 0x14u);
 
                 if (g_btm_characteristics[c].uuid.size == 2 &&
                     g_btm_characteristics[c].uuid.uuid[0] ==
