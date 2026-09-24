@@ -1222,6 +1222,61 @@ btm 会话的完整链路（原文见 SD `logs/dglab-ble-poc.log`，1241 行）�
 传输层的当前结论是**写路径可用、通知路径待解**；完整状态与下一步见
 `docs/ble-re.md` 的「当前状态（2026-09-25）」。
 
+### 第四十八次实机（2026-09-25 01:57）：电量读取的答复也没有出现
+
+上一轮之后探针加了三样东西：事件记录**整条** dump（不再只比前 8 字节、只打前 3 条）、
+一次电量读取（`0x180A` / `0x1500`）、以及 CCCD 的回读路径。这一轮（日志 273 行，
+上一轮 1241 行——日志刷屏的 bug 修掉了）跑完：
+
+    btm probe (configured):   service[3] uuid=0x180A handle=20 end=32 primary=1
+    btm probe (configured):   battery GetGattCharacteristics rc=0x00000000 total=5
+    btm probe (configured):   battery char[0] uuid=0x1501 handle=22 props=0x00
+    btm probe (configured):   battery char[1] uuid=0x1502 handle=24 props=0x00
+    btm probe (configured):   battery char[2] uuid=0x2A25 handle=26 props=0x00
+    btm probe (configured):   battery char[3] uuid=0x1500 handle=28 props=0x00
+    btm probe (configured):   battery char[4] uuid=0x2A59 handle=31 props=0x00
+    btm transport: RegisterNotification(0x150B) rc=0x00000000
+    btm transport: write 7 byte(s) BF000000000000 rc=0x00000000
+    btm transport: event head 00000000 04000000 00000000 00000000   ← 本轮事件记录的头
+    btm transport: write 20 byte(s) B01F000000000000000000000000000000000000 rc=0x00000000
+    btm transport: no B1 yet, sending the zero request again
+    btm transport: ReadCharacteristic(battery 0x1500) rc=0x00000000
+    btm transport: DeregisterNotification rc=0x00000000
+    btm transport: done, writes=30 notify=0 b1=0
+
+读电量被受理（`rc=0`），**但读数之后事件通道里没有出现任何新记录**，仍然
+`notify=0 / b1=0`。所以"设备一条通知都没发"现在有两种解释，两者都还没有被排除：
+
+1. 订阅没落到 CCCD 上（`RegisterNotification` 只是被受理），设备没有理由通知；
+2. 通知/读应答根本不落到 `bt` 服务的这个事件状态里，而是落到 btdrv 的 managed 队列。
+
+顺带确认的两件事：
+
+- **特征属性字节整体不可信**：`0x180C` 的两个特征和 `0x180A` 的五个特征，
+  `properties` 全部读出 `0x00`。所以"写出去了"只能靠设备回包证明，不能靠 `rc=0`；
+- `bt` 状态里那份记录的头是 `00 00 00 00 04 00 00 00`（`result=0`、`conn_id=4`），
+  上一轮同样的位置出现过 `0C 00 00 00 E8 03 00 00`（间隔 12 / 超时 1000）。同样的头、
+  不同的尾巴——这也正是上一轮"只比前 8 字节"会漏掉东西的原因（本轮已按整条记录比对）。
+
+这一轮的驱动级部分把广播完整解出来了（`BtdrvBleAdvertisement` 是**定长数组**、不是一条
+紧凑链，前几轮的 AD 解析器找错了地方）。目标设备的记录是：
+
+    ad[0] type=0x01 len=2  06                                  ← flags
+    ad[1] type=0xFF len=7  0A0000000000                        ← 厂商数据，公司号 0x000A
+    ad[2] type=0x09 len=10 34374C313231303030                    ← 本地名 "47L121000"
+
+**广播里没有服务 UUID**（既没有 `0x1812` 也没有 `0x180C`），那条"手机实测 0x180C"与
+09-22 dump 的矛盾就此了结：按 UUID 过滤的 smart-device 扫描永远找不到这台设备，
+只有厂商数据（公司号 `0x000A`）过滤的 general 扫描能看到它。
+
+**下一轮要看的**（探针已按这三条改好，构建在 SD 上）：
+
+1. 事件记录**整条** dump：读电量、写 B0 之后有没有任何一条新记录（`btm transport: ev#N`）；
+2. `btm transport: ReadDescriptor(CCCD 0x2902 id=…) rc=…` 与它回来的值——订阅到底写没写；
+3. 传输窗口结束时的 `btm transport: managed#N` —— btdrv 的 managed 队列里有没有同一批
+   记录（这是回答"通知是不是走另一个状态"的地方；它放在窗口之后，只读、不碰
+   `InitializeBle`/`EnableBle`/`RegisterGattClient`）。
+
 ### 早期状态：搁置（2026-09-22 收束，已被上面的结果取代）
 
 **结论（完整证据链见 `docs/ble-re.md` 的「当前总览」与「收束结论」）**：

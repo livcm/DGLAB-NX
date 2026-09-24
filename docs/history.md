@@ -2158,3 +2158,49 @@ btm 探针在读完 GATT 表后新增一段：订阅 `0x150B` → `OnConnected`�
 它是不是 `0x0001`；注意 libnx 的 `BtmGattDescriptor` 只给了 uuid 与 handle、没有
 `instance_id`，而 `btLeClientReadDescriptor` 要的是 `BtdrvGattId{instance_id, uuid}`，
 所以这一步能否直接做还要试。这两步都留在下一轮，不再动这一轮的构建。
+
+## 29. 追加（2026-09-25 01:57）：电量读取也没换来一条事件，广播里确认没有服务 UUID
+
+上一节留下的三个问题（事件记录到底会不会变、订阅有没有落到 CCCD、通知是不是走另一个
+队列）在这一轮变成了探针里的三样东西，然后跑了一轮：
+
+1. **事件记录按整条比对 + 整条 dump**。上一版只比前 8 字节、只打前 3 条——而
+   `client_notify` 的前 8 字节（`result` 在 +0、`conn_id` 在 +4）和躺在同一个状态里的
+   `connection_update` 记录**完全一样**，所以通知哪怕来了也看不见。现在每出现一条新记录就
+   把 0x50 字节按 4 字一行 dump 出来（最多 6 条），并附一行 `size@0x48 / conn@0x04`。
+   顺带把"零记录"的判断从一个 8 字节前缀改成整个 0x50 前缀——载荷在 +0x4A，只看前 8
+   字节会把"只有载荷非零"的记录当成空。
+2. **电量读取**（`0x180A` / `0x1500`）：`rc=0`，但**读数之后没有任何新记录**。
+3. **CCCD 回读**：GATT 表走完后用 `btmGetGattDescriptors(handle, 0x150B)` 列描述符并记住
+   `0x2902`，连接后 `btLeClientReadDescriptor` 读回它的值。libnx 的 `BtmGattDescriptor`
+   没有 `instance_id`（读描述符要 `BtdrvGattId{instance_id, uuid}`），所以按 +0x1C 猜——
+   和特征结构里 `instance_id` 的位置一致——并把原始字节打出来，猜错也能看出来。
+4. **managed 队列的对照读**：传输窗口结束后开一次 btdrv 服务、读
+   `btdrvGetBleManagedEventInfo`，看同一批事件在不在那份状态里。这一读放在窗口之后（测量
+   已经进日志），而且只读——4 轮失败 vs 2 轮成功的教训是 `InitializeBle`/`EnableBle`/
+   `RegisterGattClient`，不是"打开 btdrv 服务"。
+
+结果（日志 273 行，上一轮 1241 行：日志刷屏的 bug 确实修掉了）：
+
+- 电量读取被受理，通知仍然一条都没有（`writes=30 notify=0 b1=0`）；
+- 事件通道里那份记录的头是 `00 00 00 00 04 00 00 00`（`result=0`、`conn_id=4`），
+  上一轮同样的位置出现过 `0C 00 00 00 E8 03 00 00`（间隔 12 / 超时 1000）——头一样、
+  尾巴不同，这正是上一轮"只比前 8 字节"会漏掉的东西；
+- `0x180A` 的五个特征（`0x1501`/`0x1502`/`0x2A25`/`0x1500`/`0x2A59`）与 `0x180C` 的两个
+  特征，`properties` **全部**读出 `0x00`。所以"写出去了"只能靠设备回包证明，`rc=0` 不算数。
+
+**广播的问题在这轮定论了**：`BtdrvBleAdvertisement` 是**定长数组**（每个条目
+`size/type/data`，0x1F 字节），不是一条紧凑的 AD 链——之前的解析器按"紧凑链"从头扫，
+所以在明明有三条 AD 的记录上报告"没有 AD 结构"。目标设备的记录是：
+
+    ad[0] type=0x01 len=2  06                              ← flags
+    ad[1] type=0xFF len=7  0A0000000000                    ← 厂商数据，公司号 0x000A
+    ad[2] type=0x09 len=10 34374C313231303030                ← 本地名 "47L121000"
+
+**没有服务 UUID**（`0x1812`、`0x180C` 都没有），"手机实测 0x180C"与 09-22 dump 的矛盾
+到此结束：按 UUID 过滤的 smart-device 扫描永远找不到这台设备，只有厂商数据过滤的
+general 扫描能看到它。
+
+下一轮就看三条日志：`btm transport: ev#N`（有没有新记录）、
+`btm transport: ReadDescriptor(CCCD 0x2902 id=…) rc=…`（订阅写没写）、
+`btm transport: managed#N`（通知是不是走 btdrv 那份状态）。

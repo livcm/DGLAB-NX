@@ -928,9 +928,10 @@ btm 的 worker 在受理连接之后为什么停住（状态机 `FUN_00033d70` �
 | 扫描 | ✅ btdrv 驱动级扫描稳定拿到设备（地址/rssi/AD） |
 | 连接 | ✅ btm 路径受理并建立连接（`GetConnectionState` handle=4、`bt` 事件 `status=0`） |
 | GATT 表 | ✅ 7 个服务，`0x180C`（写 `0x150A` handle 19，通知 `0x150B` handle 16）、`0x180A`、`0xFE59` |
-| 通知订阅 | ⚠️ `RegisterNotification rc=0`，但**至今没收到任何事件** |
+| 通知订阅 | ⚠️ `RegisterNotification rc=0`，但**至今没收到任何事件**：01:57 那轮连电量读取（`0x1500`，`rc=0`）都没有换来一条新记录 |
 | 写入 | ✅ `BF`（7 字节）与 `B0`（20 字节）写入 `rc=0`；首条 B0 是 `B0 1F …`（序列号 1 + 两通道绝对设置），之后 100ms 一条 |
 | B1 回包 | ❓ 未观察到 |
+| 广播内容 | ✅ 定长 AD 数组：flags + 厂商数据（公司号 `0x000A`）+ 本地名 `47L121000`；**没有服务 UUID** |
 
 **这轮学到的边界（都写进了代码注释）**
 
@@ -953,17 +954,27 @@ btm 的 worker 在受理连接之后为什么停住（状态机 `FUN_00033d70` �
 3. 传输层稳定后，把它接到 NRO 的玩法（体感/触屏）上，替换现在不成功的 btdev 路径；
 4. 发布口径（用户已定）：**BLE 直连仅在安装该 exefs 补丁时可用**，补丁需要纳入发布产物。
 
-**下一轮的判据（2026-09-25 01:38 那轮留下的具体问题）**：整个传输层窗口里
-`btGetLeEventInfo` 只反复返回同一份记录
-`00 00 00 00 04 00 00 00 0C 00 00 00 E8 03 00 00`，按 libnx 的 `BtdrvBleEventInfo`
-对照它最像 `connection_update`（`{result=0; conn_id=4; conn_interval=12; conn_latency=0;
-supervision_tout=1000}`），而不是 notify——也就是说这段"队列"在重放同一份记录，窗口里
-**没有出现过新记录**，这就是"设备没有发通知"的直接证据。电量读取就是为了敲这一下：
-它的 `rc` 打出来之后，**记录的头会不会变**是本轮唯一要看的判据。若仍然不变，再查订阅
-有没有落到 CCCD：`btmGetGattDescriptors`（btm 侧枚举，不碰 btdrv）能列出描述符，配
-`btLeClientReadDescriptor` 读回 `0x2902`；注意 libnx 的 `BtmGattDescriptor` 只给 uuid 与
-handle、没有 `instance_id`，而读描述符要的是 `BtdrvGattId{instance_id, uuid}`，所以这一步
-能不能直接做还要试。
+**第二轮（2026-09-25 01:57）的结果与下一轮的判据**：探针已经改成按**整条记录**（0x50 字节）
+比对并 dump 每一条变化，加了一次电量读取（`0x180A`/`0x1500`，`rc=0`）和 CCCD 回读。
+这一轮仍然 `notify=0 / b1=0`，**读电量之后没有任何新记录**，所以"设备没发通知"现在有两种
+解释，都还没被排除：
+
+1. **订阅没落到 CCCD 上**——`RegisterNotification` 只回"受理"，而特征属性字节整体不可信
+   （`0x180C` 与 `0x180A` 的七个特征 `properties` 全读出 `0x00`）；
+2. **通知/读应答不落到 `bt` 服务的这个事件状态**，而是落到 btdrv 的 managed 队列
+   （`btGetLeEventInfo` 与 `btdrvGetBleManagedEventInfo` 读的是两份不同的状态）。
+
+下一轮就看三条日志：`btm transport: ev#N`（有没有新记录）、
+`btm transport: ReadDescriptor(CCCD 0x2902 id=…) rc=…` 以及它回来的值、
+`btm transport: managed#N`（窗口结束时的 managed 队列里有没有同一批记录）。
+managed 那一读放在传输窗口之后、只读，不碰 `InitializeBle`/`EnableBle`/`RegisterGattClient`。
+注意 libnx 的 `BtmGattDescriptor` 只给 uuid 与 handle、没有 `instance_id`，探针是按
+`+0x1C` 猜的（和特征结构里 `instance_id` 的位置一致），日志里带原始字节可以对。
+
+**顺带定论的一件事**：广播里**没有服务 UUID**。设备记录的 AD 是定长数组
+（`BtdrvBleAdvertisement`，不是紧凑链）：`0x01` flags、`0xFF` 厂商数据（公司号 `0x000A`）
+和 `0x09` 本地名 `47L121000`。所以按 UUID 过滤的 smart-device 扫描不可能找到它，
+"手机实测 0x180C"那种说法在这台设备/这个固件上不成立。
 
 补丁加上"先打开 BLE 栈"这两步之后，实机达成了最初的目标（日志见 `docs/ble-poc.md`）：
 
@@ -1150,10 +1161,9 @@ NPDM 名 `bluetooth.autog`）：
   `RegisterAppletResourceUserId` 登记 NRO 的 ARUID，再扫描、连接、读 GATT 表。
   这一轮实机数据还没有，`StickR` 探针（v18）就是为它准备的。
 - 设备侧没问题：手机一点就连上；广播里带 flags、厂商数据（公司号 `0x000A`，其后 4 个零
-  字节）和本地名 `47L121000`。**广播里到底有没有服务 UUID `0x180C` 目前有两个互相矛盾
-  的记录**（手机扫描说"有"，2026-09-22 的 dump 说"没有"），v18 探针会把设备记录的 AD
-  结构逐个打出来，用数据定这件事；它决定 btm 的 smart-device（按 UUID 过滤）这条路
-  理论上能不能看到设备。
+  字节）和本地名 `47L121000`。**广播里到底有没有服务 UUID `0x180C` 已经定论（2026-09-25）：
+  没有**——AD 是定长数组，只有那三条，所以按 UUID 过滤的 smart-device 扫描看不到设备，
+  只有厂商数据过滤的 general 扫描能看到。
 
 因此复工的路线按优先级是：
 
