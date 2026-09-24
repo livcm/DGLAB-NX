@@ -33,6 +33,15 @@ key or extracted NCA belongs in git.
        ... -process module.elf -noanalysis -postScript \
          ExportDecompiled.java /tmp/ble-re/module.c
 
+   `ExportDecompiled.java` only writes functions the analyzer created. IPC command
+   cases are reached through a byte/branch table, so they exist as code but not as
+   functions; `DecompileForce.java` disassembles and creates a function at each
+   address first, which is how the `btm` command shapes were read:
+
+       analyzeHeadless <projdir> <project> -process module.elf -noanalysis \
+         -scriptPath tools/ble-re/ghidra \
+         -postScript DecompileForce.java 0x1efd0 0x1f420
+
 6. `make_ips.py` — build (or inspect) an Atmosphère `exefs_patches` IPS32 patch
    for a system module, guarded by the module's original bytes:
 
@@ -48,16 +57,18 @@ key or extracted NCA belongs in git.
 7. `abi_sizes.py` — print the size of libnx's btdrv/btm structs by compiling a
    probe with the installed devkitA64 and reading the symbol sizes, so the
    firmware's "copy N bytes" can be compared against the libnx side instead of
-   against memory. On HOS 22.5.0 several of them do not match
-   (`BtdrvGattAttributeUuid` 0x14 vs the firmware's 0x40-byte registration block,
-   `SetSysBluetoothDevicesSettings` 0x200 vs 0x2BE), which is why the BLE work
-   needs per-command struct derivation rather than a numbering fixup.
+   against memory. Used to check the sizes the firmware's command cases depend on
+   (`BtdrvBleScanResult` 0x148, `BtdrvBleConnectionInfo` 0xC, `BtmGattService`
+   0x24), which all match libnx on 22.5.0.
 
 8. `upstream.md` — the findings from this work that are new to libnx
    (`btdrv.h`'s version notes stop at 12.x and `btmu.c` was last touched in
-   2020-12), written as ready-to-submit drafts: the 0x40-byte payload of command
-   62, command 40 closing the caller's session, `btm:u` being applet-only, and the
-   ABI/type mismatch table. Each item says what is proven and what is not.
+   2020-12), written as ready-to-submit drafts: command 40 closing the caller's
+   session, `btm:u` being applet-only with the ARUID comparison that enforces it,
+   and the "read the command case, not the vtable" note. Each item says what is
+   proven and what is not. The older drafts (0x40-byte command 62 payload, ABI
+   mismatch table) were retracted on 2026-09-22; see the note at the top of the
+   file.
 
 ## Validation
 

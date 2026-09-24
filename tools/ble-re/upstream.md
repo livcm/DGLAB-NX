@@ -1,69 +1,60 @@
 # 回馈给 libnx / switchbrew 的候选（草稿）
 
-> **2026-09-21 夜：提交暂缓，第 1、4 条已作废。** 它们建立在"`0x159a28` 是命令表"这个
-> 错误前提上——那张表其实是 btdrv **服务对象的虚表**，真正的命令分派在 `FUN_0001d4b0`
-> 的 259 个 case 里，而 libnx 的请求形状与固件一致（见 `docs/ble-re.md` 的「判定
-> （2026-09-21 夜，更正）」）。第 2 条（cmd 40 会让固件关掉调用者会话）与第 3 条
-> （`btm:u` 是 applet 专用）仍然有实机证据，等整条研究做完再一起提交。
+> **2026-09-22 重写。** 第一版里的第 1 条（cmd 62 载荷变成 0x40 字节）与第 4 条
+> （"20.0.0+ 的 btdrv ABI 与 `btdrv_types.h` 不再一致 / 类型被换掉"）**已作废**：它们
+> 建立在"`0x159a28` 是命令表"这个错误前提上。那张表是 btdrv **服务对象的虚表**，真正的
+> 命令分派在 `FUN_0001d4b0` 的 259 个 case 里；逐条读完的结果是 libnx 的请求形状与固件
+> **一致**（见 `docs/ble-re.md` 的「判定（2026-09-21 夜，更正）」与「命令 → 请求形状」表）。
+> 同一套方法后来用在 `btm` 上，结论同样是"形状一致"。所以现在能提的只有下面三条，
+> 提交动作仍由人决定。
 
-这些是这次逆向里**已经有实机证据**的发现，libnx 目前完全没有 20.0.0+（`bluetooth` 改名
-`bluetooth.autog`）的相关记录：`btdrv.h` 的版本注记只到 12.x，`btmu.c` 最后一次改动是
-2020-12-29。下面每一条都写了"能断言什么 / 不能断言什么"，避免把半成品结论推上去。
+libnx 里没有 20.0.0+（`bluetooth` 改名 `bluetooth.autog`）的相关记录：`btdrv.h` 的版本
+注记停在 12.x，`btmu.c` 最后一次改动是 2020-12-29。下面每一条都写了"能断言什么 / 不能
+断言什么"，避免把半成品结论推上去。
 
-## 1. btdrv：cmd 62 的载荷在 20.0.0+ 变成 0x40 字节（`RegisterGattClient`）
-
-能断言：
-
-- HOS 22.5.0（AMS 1.11.2，Switch 1）上，用 libnx 现在的 0x14 字节
-  （`BtdrvGattAttributeUuid`）发 cmd 62，固件回
-  `ClientRegistration result=0x00000037 / client_if=0xFF`（无效接口号），重复多次稳定复现；
-- 把整块换成 **0x40 字节内联载荷**（块首放 libnx 原来的 `{u32 size=0x10; u8 uuid[16]}`，其余补
-  零）后，固件回 `ClientRegistration result=0x00000000 / client_if=0x02`；
-- 固件侧同一命令的适配层是"从请求里拷 0x40 字节结构、再交给管理器方法"，与 0x40 吻合；
-- 改成指针缓冲（`SfBufferAttr_HipcPointer|In|FixedSize`）反而不行：返回
-  `0xF601`（`KernelError_ConnectionClosed`），说明这条要内联数据。
-
-不能断言：0x40 字节块的字段含义（目前只验证了"块首是原来的 0x14 字节结构"可用）；成功还
-需要什么会话前置条件（另一次测试里，同样的 0x40 形状在做了若干其它调用之后返回
-`0x29E71` = `Bluetooth/0x14F`）。
-
-## 2. btdrv：cmd 40（`GetChannelMap`）会让固件关掉调用者的会话
+## 1. btdrv：cmd 40（`GetChannelMap`）会让固件关掉调用者的会话
 
 能断言：
 
-- 用 libnx 现在的形状（`SfBufferAttr_HipcMapAlias|Out|FixedSize`，0x88 字节）调用后，
-  **同一会话之后的每一次调用都返回 `0xF601` = `KernelError_ConnectionClosed`**；调用前同一
-  会话上的一切都正常。两次独立实机复现；
+- HOS 22.5.0（AMS 1.11.2，Switch 1）上，按 libnx 现在的形状
+  （`SfBufferAttr_HipcMapAlias|Out|FixedSize`，0x88 字节）调用 cmd 40 之后，**同一会话
+  之后的每一次调用都返回 `0x0000F601` = `MAKERESULT(Module_Kernel,
+  KernelError_ConnectionClosed)`**；调用之前同一会话上的一切都正常。两次独立实机复现；
 - 换成指针缓冲（`HipcPointer|Out|FixedSize`）同样返回 `F601`。
 
-不能断言：是缓冲属性还是缓冲大小不对（22.5.0 上这条命令到底要什么形状还没定）。
+不能断言：是缓冲属性还是缓冲大小的问题（22.5.0 上这条命令到底要什么形状还没定）；
+也不能断言这是有意为之还是固件缺陷。
 
-## 3. btm:u：请求带 ARUID，只有拥有该 ARUID 的 applet 能用
+## 2. btm:u：请求带 ARUID，只有该 ARUID 的持有者能用
 
 能断言：
 
-- libnx 的 `btmu*` 封装用 `appletGetAppletResourceUserId()` 填请求；在 **sysmodule** 里那个值
-  没有意义。此时 `btmuStartBleScanForSmartDevice` 返回 0，但**永远收不到扫描事件/结果**
+- libnx 的 `btmu*` 封装用 `appletGetAppletResourceUserId()` 填请求，在 **sysmodule** 里
+  那个值没有意义：`btmuStartBleScanForSmartDevice` 返回 0，但永远收不到扫描事件/结果
   （`btmuGetBleScanResultsForSmartDevice` 恒为 0）；
-- 用同样的载荷、但填**真实的 applet ARUID**（由前台 NRO 提供）时，请求在服务框架层就被拒：
-  `0x0000060A` = `Sf/3`（module 10 = `Sf`，description 3）；
-- 连接同理：sysmodule 调 `btmuBleConnect` 得到 `0x0005568F` = `Btm/0x2AB`。
+- 用同样的载荷、但填**真实的 applet ARUID**（由前台 NRO 提供）时，请求在服务框架层就被
+  拒：`0x0000060A` = `Sf/3`；
+- 固件侧的原因已经定位到代码：`btm` 模块 cmd 18（`BleConnect`）的 case `0x27b20` 取
+  调用者自己的 ARUID（`param_3->vtable[1](param_3, &aruid)`）与请求里的 ARUID 比较，
+  `0` 或相等才继续，否则返回 `0x60A`。base `btm` 服务的同类命令（cmd 35 `BleConnect`）
+  请求里根本没有 ARUID 字段，它用 `RegisterAppletResourceUserId`(57) 登记。
 
-建议的表述：btm:u 的扫描/连接是 applet 专用接口；后台 sysmodule 想拿通用 BLE central 必须走
-btdrv（本仓库的做法见 `docs/ble-re.md`）。
+建议的表述：`btm:u` 是 applet 专用接口，请求里的 ARUID 必须等于调用者自己的 ARUID；
+后台进程要拿通用 BLE central 只能走 `btdrv` 或 base `btm`（本仓库两条都在试，
+见 `docs/ble-re.md`）。
 
-## 4. 通用注记：20.0.0+ 的 btdrv ABI 与 `btdrv_types.h` 不再一致
+## 3. 通用注记：20.0.0+ 的命令形状要按 case 读，不能按虚表
 
-适配层"要拷多少字节"和 libnx 的类型尺寸对照（`tools/ble-re/abi_sizes.py` 量的 libnx 侧）：
+能断言：
 
-| 命令 | libnx 类型/大小 | 固件要拷 | 结论 |
-| --- | --- | --- | --- |
-| 62 `RegisterGattClient` | `BtdrvGattAttributeUuid` 0x14 | 0x40 | 不一致（见 §1） |
-| 23 `TriggerConnection` | `{addr; u16}` 8 | 0x2BE | 不一致 |
-| 57/53 过滤器/广播数据 | `BtdrvBleAdvertiseFilter` 0x3E / `...PacketData` 0xCC | 0xCC | 类型落到别的命令号上 |
-| 61 `EnableBleScanFilter` | `bool` | 0x40 | 不一致 |
-| 24 `AddPairedDeviceInfo` | `SetSysBluetoothDevicesSettings` 0x200 | 0x2BE | 不一致 |
+- 服务对象的虚表（btdrv `0x159a28`、btm 的两张表 `0x76580` / `0x765f8`）不是命令表：
+  命令分派由 CMIF 头（`SFCI`）+ 每个命令自己的 case 完成（btdrv `FUN_0001d4b0`、
+  base `btm` `0x1bc50`），case 里按 IDL 解参数再调虚方法；
+- 用这个方法核对过：btdrv 的扫描链与 GATT 注册、base `btm` 的 13 条 BLE 命令，**载荷与
+  出参都与 libnx 一致**（含条目尺寸 0x148 / 0xC / 0x24 / 0x74）；
+- 这些 case 只被"字节表 + 分支表"引用，反汇编器不会把它们建成函数；按地址强制反编译的
+  脚本放在 `tools/ble-re/ghidra/DecompileForce.java`。
 
-也就是说这不是"整体挪几个命令号"能修的：20.0.0+ 把这一层重新生成过，**类型也被换掉**。
-可行的贡献方式是先在文档/issue 里给出"哪些命令的形状变了 + 怎么验证"的方法（从每个命令的
-适配层读出'拷多少字节、交给哪个方法'），等结构字段逐个对出来再提 PR。
+不能断言：有没有命令在 20.0.0+ 被**新增/删除**（本次只核对了 BLE 这一段用到的命令）。
+这条更像给 switchbrew 的 `BTM_services` / `Bluetooth_driver_services` 页面加注记，
+不是 libnx 的代码问题。
