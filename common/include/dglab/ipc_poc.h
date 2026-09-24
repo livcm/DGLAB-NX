@@ -59,9 +59,12 @@ enum {
     DglabPocAction_ReadBattery      = 4, ///< Read the battery characteristic.
     DglabPocAction_RestartSession   = 5, ///< Tear the session down and start over.
     DglabPocAction_ToggleAutoWrite  = 6, ///< Toggle the 100ms B0 keepalive while connected.
-    // Scan variants. The BLE advertisement of the Coyote 3.0 carries the HID
-    // service UUID 0x1812, not the DG-LAB service 0x180C, so the scan filter
-    // decides whether the device can be found at all.
+    // Scan variants. Which service UUID the Coyote 3.0 advertises is still not
+    // settled: early firmware advertised 0x1812 (HID), the phone showed 0x180C
+    // after a device firmware update, and the 2026-09-22 advertisement dump did
+    // not show a service UUID at all. The scan filter therefore decides whether
+    // the device can be found, and the probe dumps the advertisement structures
+    // instead of trusting either reading. See docs/ble-poc.md.
     DglabPocAction_Rescan              = 7,  ///< Scan again with the default filter order.
     DglabPocAction_ScanWithProtocolUuid = 8, ///< Scan filtered by 0x180C only.
     DglabPocAction_ScanWithAdvertisedUuid = 9, ///< Scan filtered by 0x1812 only.
@@ -79,6 +82,12 @@ enum {
     // Each press scans for the next company ID that phones and earbuds actually
     // advertise. Only a hit is a verdict; a miss is not.
     DglabPocAction_ScanWithCommonCompany = 13,
+    // The base `btm` service (not `btm:u`): the sysmodule can open it - the
+    // identity probe has read btm's state through it - but none of its BLE
+    // commands have ever been called. It exposes the same scan/connect surface
+    // the applet uses through btm:u, from a service that accepts this process,
+    // which is the last architecture-preserving route to a connection.
+    DglabPocAction_ProbeBtmBle = 14,
 };
 
 // Direct connect: skip the scan entirely and connect to this address. Useful

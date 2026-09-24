@@ -51,6 +51,11 @@ static FILE* g_log_file;
 static u8 g_target_address[6];
 static bool g_target_address_valid;
 
+// Steps of the one-key probe sequence: 0 = idle, 1 = the driver-level probe is
+// running (or starting), 2 = the btm probe is running. The next session is
+// started when the previous one has finished.
+static u32 g_probe_sequence;
+
 static const char* pocStateName(u32 state)
 {
     switch (state) {
@@ -324,6 +329,9 @@ static bool pocActionIsScan(u32 action)
         // The driver-level probe owns btdrv for the length of the run, so it
         // starts a session with probes skipped, exactly like the scan variants.
         case DglabPocAction_ProbeBtdrvScan:
+        // Same for the base-btm probe: it has to be the first Bluetooth access
+        // of its session for its answer to mean anything.
+        case DglabPocAction_ProbeBtmBle:
             return true;
         default:
             return false;
@@ -431,6 +439,21 @@ void dglabBlePocViewRun(Service* dglab)
 
         bool run_active = R_SUCCEEDED(status_rc) && pocStateIsActive(status.state);
 
+        // One key, two sessions. The driver-level probe has to run in its own
+        // session first (it is what brings the BLE stack up; doing that inside
+        // the btm session makes the connect fail, docs/ble-re.md), and the btm
+        // probe runs in the next one. The sequence is stepped here so the user
+        // presses the key once.
+        if (!run_active && g_probe_sequence == 1u) {
+            logPushLine("one-key probe: driver-level probe done, starting the btm probe");
+            pocSendStart(dglab, true);
+            pocSendAction(dglab, DglabPocAction_ProbeBtmBle);
+            g_probe_sequence = 2u;
+        } else if (!run_active && g_probe_sequence == 2u) {
+            logPushLine("one-key probe: done - reboot before the next experiment");
+            g_probe_sequence = 0u;
+        }
+
         if (down & HidNpadButton_Plus)
             break;
 
@@ -444,8 +467,20 @@ void dglabBlePocViewRun(Service* dglab)
 
         if (down & HidNpadButton_X)
             action = DglabPocAction_WriteZeroB0;
-        else if (down & HidNpadButton_B)
-            action = DglabPocAction_ReadBattery;
+        else if (down & HidNpadButton_B) {
+            // While a run is active B is the battery read; on the idle screen it
+            // starts the same two-session sequence StickR does (two keys for one
+            // sequence on purpose: Stick R is easy to confuse with the SR button
+            // or the D-pad - docs/ble-re.md).
+            if (run_active) {
+                action = DglabPocAction_ReadBattery;
+            } else {
+                pocSendStart(dglab, true);
+                pocSendAction(dglab, DglabPocAction_ProbeBtdrvScan);
+                g_probe_sequence = 1u;
+                logPushLine("one-key probe: step 1/2, driver-level probe (brings the BLE stack up)");
+            }
+        }
         else if (down & HidNpadButton_Y) {
             // While a run is active Y is the disconnect action; on the idle
             // screen it starts the applet-side connect probe instead, which has
@@ -487,11 +522,19 @@ void dglabBlePocViewRun(Service* dglab)
             action = DglabPocAction_ProbeBtdrvScan;
         else if (down & HidNpadButton_Right)
             action = DglabPocAction_ProbeBtdrvIdentity;
-        // Same action on the right stick button: the first hardware attempt
-        // pressed that instead of the D-pad, and the identity probe is the one
-        // step the static analysis is blocked on (docs/ble-re.md).
-        else if (down & HidNpadButton_StickR)
-            action = DglabPocAction_ProbeBtdrvIdentity;
+        // The right stick button used to duplicate the identity probe (the first
+        // hardware attempt pressed it instead of the D-pad). It now runs the
+        // base-btm probe: that is the one path the sysmodule has never tried, and
+        // it needs its own key because it must start a clean session of its own
+        // (see docs/ble-re.md).
+        else if (down & HidNpadButton_StickR) {
+            // Two sessions, one key: driver-level probe first, then the btm
+            // probe (see the sequence step above).
+            pocSendStart(dglab, true);
+            pocSendAction(dglab, DglabPocAction_ProbeBtdrvScan);
+            g_probe_sequence = 1u;
+            logPushLine("one-key probe: step 1/2, driver-level probe (brings the BLE stack up)");
+        }
         else if (down & HidNpadButton_StickL)
             action = DglabPocAction_ScanWithCommonCompany;
 
@@ -530,13 +573,18 @@ void dglabBlePocViewRun(Service* dglab)
             printf("target: none, scanning (see %s)\n", ADDRESS_FILE_PATH);
         }
 
+        // The line this round is about goes first, and says what to press: the
+        // base-btm probe is the open question (docs/ble-re.md), and reading the
+        // list top-down is what a user does.
+        printf(">>> PRESS RIGHT STICK (StickR) or B while idle: base btm probe <<<\n");
+        printf("    (btm scan + connect + GATT; leaves btm busy, reboot afterwards)\n");
         printf("A start  X zero-B0  B battery  R aruid0  L auto  Y disconn  - stop  + exit\n");
         printf("Y on the idle screen: applet-side connect probe (btm:u, this applet's ARUID)\n");
         printf("ZL rescan(0x1812->0x180C)  ZR scan 0x180C  Up scan 0x1812  Down general filter\n");
         // Spell out "D-pad" everywhere: pressing the L shoulder instead of D-pad
         // Left cost one hardware round (it only toggles the auto-write above).
         printf("D-pad Left  btdrv scan probe (sets scan parameters, polls the queue)\n");
-        printf("D-pad Right / StickR  identity probe (automatic in the first session after boot)\n");
+        printf("D-pad Right  identity probe (manual; it is not automatic any more)\n");
         printf("scan keys start a session with the probes skipped (clean scan)\n");
         printf("StickL control scan (common manufacturer IDs; a hit proves scanning works)\n");
 

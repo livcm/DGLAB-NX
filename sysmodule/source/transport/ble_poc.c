@@ -4,15 +4,20 @@
 // stack, and it runs in the sysmodule: the NRO never touches BLE itself.
 //
 // Transport choice:
-//   btdrv's own BLE event queue was the first attempt, but on HOS 22.5.0 it
-//   only ever produced empty payloads (documented in docs/ble-poc.md). libnx's
-//   btdev wrapper (bt + btm:u) works from this background process and hides the
-//   event/type plumbing, so the PoC uses btdev for everything.
+//   Three routes have been tried, all documented in docs/ble-poc.md:
+//   btdrv directly (scans fine, the connect comes back Bluetooth/0x1806), the
+//   btdev wrapper (bt + btm:u, applet-only: a foreign ARUID is answered with
+//   Sf/0x60A), and - v18 - the base `btm` service, which this process may open
+//   and which carries the same BLE surface without the applet restriction
+//   (pocRunBtmBleProbe). btdev still drives the normal scan/connect session.
 //
 // Scan filter:
-//   The Coyote 3.0 advertises the HID service UUID 0x1812. The DG-LAB service
-//   0x180C only exists after connecting, so a scan filtered by 0x180C finds
-//   nothing. The scan therefore tries 0x1812 first and falls back to 0x180C.
+//   Which service UUID the Coyote 3.0 advertises is still not settled (0x1812
+//   in early firmware, 0x180C per the phone after a device firmware update, no
+//   service UUID at all in the 2026-09-22 dump), so the default scan tries the
+//   advertised UUID first and falls back through the protocol UUID to btm's
+//   manufacturer-data filter. The probe dumps the AD structures instead of
+//   trusting either reading.
 //
 // Packet construction uses dglab/protocol/coyote_v3.h; this file only moves
 // bytes and reports what happened through the log ring the NRO reads.
@@ -20,6 +25,7 @@
 #include <dglab/transport/ble_poc.h>
 
 #include <dglab/protocol/coyote_v3.h>
+#include <dglab/protocol/coyote_v3_session.h>
 
 #include <switch/runtime/btdev.h>
 
@@ -103,6 +109,7 @@ typedef struct {
     bool restart_scan;
     bool probe_btdrv;
     bool probe_identity;
+    bool probe_btm;
     u32 control_scan_index; // Which company ID the control scan uses next.
     u32 scan_attempts;
 
@@ -151,13 +158,18 @@ static PocShared g_poc;
 // of whichever thread starts it.
 static u8 g_poc_thread_stack[POC_THREAD_STACK_SIZE] __attribute__((aligned(0x1000)));
 
-// The identity probe is the one measurement the static analysis is blocked on
-// (docs/ble-re.md), and it has to happen before anything else touches BLE: the
-// BLE manager remembers the session that initialized it, and after that session
-// ends every BLE-side command answers 0xF601 (KernelError_ConnectionClosed).
-// So it runs automatically on the first session after a boot - and only then,
-// which leaves later sessions free of it for observing the scan path. Pressing
-// the Right / StickR key still runs it on demand.
+// Which probes may run on their own has changed twice on 2026-09-22:
+//
+//  - the identity probe used to run in the first session after a boot. That
+//    question ("do libnx's btdrv command numbers match this firmware") is
+//    settled, so it is manual-only now: press Right.
+//  - the base-btm probe then took over the first session, so nobody had to find
+//    the right key. It is manual-only again: the 2026-09-22 btm round ended in a
+//    btm abort (the crash report is in the user's downloads), and a probe that
+//    can leave btm holding unfinished work must not run unattended at boot.
+//
+// The flag below remembers that the identity probe still has not run since the
+// boot, so the first quiet session still gets it - that one is read-only.
 static bool g_identity_probe_pending = true;
 
 // The managed BLE event payload is 0x400 bytes. It lives in .bss instead of on
@@ -169,6 +181,18 @@ static BtdrvBleEventInfo g_ble_event;
 // 0x148 bytes each, so two of them stay out of the worker's frame on purpose.
 static BtdrvBleScanResult g_btmu_scan_results[2];
 static BtdrvBleConnectionInfo g_btmu_connections[2];
+
+// The base `btm` probe scans its own way (see pocRunBtmBleProbe): ten scan
+// records, four connection entries and the GATT services of one connection.
+// BtdrvBleScanResult is 0x148 bytes and BtmGattService 0x24, so all of it lives
+// in .bss and never in a worker frame (sysmodule/AGENTS.md, "线程与栈").
+#define POC_BTM_SCAN_MAX 10u
+#define POC_BTM_SERVICE_MAX 12u
+#define POC_BTM_CHARACTERISTIC_MAX 8u
+static BtdrvBleScanResult g_btm_scan_results[POC_BTM_SCAN_MAX];
+static BtdrvBleConnectionInfo g_btm_connections[4];
+static BtmGattService g_btm_services[POC_BTM_SERVICE_MAX];
+static BtmGattCharacteristic g_btm_characteristics[POC_BTM_CHARACTERISTIC_MAX];
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -221,6 +245,25 @@ static void pocHex(char* out, size_t out_size, const u8* data, size_t size)
 
     for (size_t i = 0; i < size && used + 3 < out_size; i++)
         used += (size_t)snprintf(out + used, out_size - used, "%02X", data[i]);
+}
+
+// 16-bit UUIDs print as their value, everything else as bytes. 0x180C / 0x150A /
+// 0x150B are 16-bit values, and those are what the BLE work is looking for.
+static void pocUuidText(char* out, size_t out_size, const BtdrvGattAttributeUuid* uuid)
+{
+    if (out_size == 0)
+        return;
+
+    if (uuid->size == 2) {
+        snprintf(out, out_size, "0x%04X",
+            (unsigned)(uuid->uuid[0] | (uuid->uuid[1] << 8)));
+    } else if (uuid->size == 4) {
+        snprintf(out, out_size, "0x%08X",
+            (unsigned)(uuid->uuid[0] | (uuid->uuid[1] << 8) | (uuid->uuid[2] << 16) |
+                (uuid->uuid[3] << 24)));
+    } else {
+        pocHex(out, out_size, uuid->uuid, sizeof(uuid->uuid));
+    }
 }
 
 static const char* pocStateName(u32 state)
@@ -365,6 +408,8 @@ static bool pocAcquireEvent(Event* event, bool* active, const char* name,
 static bool pocTakeAction(PocWorker* w, u32* out_action);
 static bool pocHandleAction(PocWorker* w, u32 action);
 static u32 pocDrainBleEvents(const char* label, u32 duration_ms, u8* out_client_if);
+// Defined next to the btm probe, used by the driver-level probe's device dump.
+static void pocLogAdStructures(const char* label, const u8* data, size_t size);
 
 static Result pocWriteCharacteristic(BtdevGattCharacteristic* characteristic, const u8* data,
     size_t size)
@@ -959,12 +1004,628 @@ static bool pocSubscribe(PocWorker* w)
 // sets explicit scan parameters, tries an unfiltered scan and a scan filtered on
 // the advertised service UUID, and polls the event queue directly instead of
 // relying on the event handle firing.
-// The connect call answers Bluetooth/0x1806 in every state tried so far (clean
-// client_if, device just scanned, scan stopped), and the firmware maps that
-// Result from a "null/invalid argument" status inside its message layer
-// (docs/ble-re.md). So try the variants side by side, before and after a scan:
-// direct vs background connect, and the address-based TriggerConnection with
-// and without a timeout.
+// The connect call answered Bluetooth/0x1806 in every state tried so far (clean
+// client_if, device just scanned, scan stopped). That Result is the mapping of
+// the message layer's status 0xC8 = "this client_if has no connection context"
+// (docs/ble-re.md), which is what pocRegisterGattClientAndConnect above now
+// addresses. The matrix is kept as the control: the same variants, with the
+// interface the manager handed out, so the two can be compared in one log.
+// Control connect: 0xFF is never a valid interface, so this can only be refused.
+// The refusal code tells the two states apart (docs/ble-re.md):
+//   Bluetooth/0x1806 - the request reached the BLE thread and came back
+//                      ("this interface has no connection context");
+//   Bluetooth/0x14F  - the message layer itself answered, which is what its
+//                      "no free task slot" status (0x72) maps to.
+// Called between the steps that touch BLE, so the step that exhausts the
+// message layer shows up as the 0x1806 -> 0x14F transition.
+static void pocControlConnect(const char* label)
+{
+    BtdrvAddress addr;
+    Result rc;
+
+    if (!g_poc.use_target_address) {
+        pocLog("%s: control connect skipped, no configured address", label);
+        return;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    memcpy(addr.address, g_poc.target_address, sizeof(addr.address));
+
+    rc = btdrvConnectGattServer(0xFFu, addr, true, 0);
+    pocLog("%s: control connect client_if=0xFF rc=0x%08X", label, (u32)rc);
+}
+
+// The user-side BLE event channel (`bt` service).
+//
+// libnx's btGetLeEventInfo is "identical to btdrvGetLeHidEventInfo except
+// different state is used" - there are two event channels, and the btdrv one we
+// poll is not the one the applet side (btdev) reads. The registration event
+// never showed up on the btdrv side (docs/ble-re.md), so the probe also opens
+// `bt` and drains that channel around the registration and the connect.
+static bool g_bt_open;
+static Event g_bt_event;
+static bool g_bt_event_open;
+
+static void pocBtEventsOpen(void)
+{
+    Result rc;
+
+    if (g_bt_open)
+        return;
+
+    rc = btInitialize();
+    g_bt_open = R_SUCCEEDED(rc);
+    pocLog("btdrv probe: btInitialize rc=0x%08X", (u32)rc);
+
+    if (!g_bt_open)
+        return;
+
+    memset(&g_bt_event, 0, sizeof(g_bt_event));
+    rc = btRegisterBleEvent(&g_bt_event);
+    g_bt_event_open = R_SUCCEEDED(rc);
+    pocLog("btdrv probe: btRegisterBleEvent rc=0x%08X", (u32)rc);
+}
+
+static void pocBtEventsClose(void)
+{
+    if (g_bt_event_open) {
+        eventClose(&g_bt_event);
+        g_bt_event_open = false;
+    }
+
+    if (g_bt_open) {
+        btExit();
+        g_bt_open = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// btm transport: the connection btm hands out, driven through the bt service
+// ---------------------------------------------------------------------------
+//
+// btm owns the connection and the GATT table (btmGetGattServices); the actual
+// GATT client traffic goes through the `bt` service, which is the pairing
+// Nintendo designed for it: btLeClientWriteCharacteristic for B0/BF and
+// btLeClientRegisterNotification + btGetLeEventInfo for the B1 answers.
+//
+// The protocol layer (dglab/protocol/coyote_v3_session.h) does the packet
+// construction; this file only moves bytes, as sysmodule/AGENTS.md requires.
+
+typedef struct {
+    bool connected;
+    u32 handle;
+    BtdrvGattId service;      // 0x180C
+    BtdrvGattId write_char;   // 0x150A
+    BtdrvGattId notify_char;  // 0x150B
+    bool notify_registered;
+    DglabCoyoteV3Session session;
+    u32 last_tick_ms;
+    u32 last_rearm_ms;
+    u32 start_ms;
+    u32 writes;
+    u32 notifications;
+    u32 b1_count;
+    u32 events_logged;
+} PocBtmTransport;
+
+// The session holds two 128-entry waveform channels, so it lives in .bss.
+static PocBtmTransport g_btm_transport;
+
+// Discovered during the GATT table walk so the transport can use it.
+static BtmGattService g_btm_proto_service;
+static BtmGattCharacteristic g_btm_proto_write;
+static BtmGattCharacteristic g_btm_proto_notify;
+static bool g_btm_proto_ready;
+static BtmGattService g_btm_battery_service;
+static BtmGattCharacteristic g_btm_battery_char;
+static bool g_btm_battery_ready;
+static bool g_btm_battery_read_sent;
+
+static void pocBtmLinkWrite(void* context, const u8* data, size_t size)
+{
+    PocBtmTransport* transport = context;
+    Result rc;
+    char hex[3u * 24u + 1u];
+
+    if (!transport->connected)
+        return;
+
+    rc = btLeClientWriteCharacteristic(transport->handle, true, &transport->service,
+        &transport->write_char, data, size, BtdrvGattAuthReqType_None, false);
+
+    if (R_FAILED(rc)) {
+        // The characteristic's property byte came back as 0x00, so the write
+        // type is a guess: fall back to write-with-response once and report it.
+        Result retry = btLeClientWriteCharacteristic(transport->handle, true,
+            &transport->service, &transport->write_char, data, size,
+            BtdrvGattAuthReqType_None, true);
+
+        pocLog("btm transport: write without response failed (0x%08X), with response rc=0x%08X",
+            (u32)rc, (u32)retry);
+        rc = retry;
+    }
+
+    pocHex(hex, sizeof(hex), data, size < 24u ? size : 24u);
+
+    // Every write would flood the ring; the first few and every tenth after that
+    // are enough to read the cadence and the packet contents.
+    if (transport->writes < 3u || (transport->writes % 10u) == 0u)
+        pocLog("btm transport: write %u byte(s) %s rc=0x%08X", (unsigned)size, hex, (u32)rc);
+
+    if (R_SUCCEEDED(rc))
+        transport->writes++;
+}
+
+static bool pocBtmTransportStart(u32 handle)
+{
+    DglabCoyoteV3Link link = { pocBtmLinkWrite, &g_btm_transport };
+    DglabCoyoteV3SessionConfig config;
+    Result rc;
+
+    memset(&g_btm_transport, 0, sizeof(g_btm_transport));
+
+    g_btm_transport.handle = handle;
+    g_btm_transport.service.instance_id = (u8)g_btm_proto_service.instance_id;
+    g_btm_transport.service.uuid = g_btm_proto_service.uuid;
+    g_btm_transport.write_char.instance_id = (u8)g_btm_proto_write.instance_id;
+    g_btm_transport.write_char.uuid = g_btm_proto_write.uuid;
+    g_btm_transport.notify_char.instance_id = (u8)g_btm_proto_notify.instance_id;
+    g_btm_transport.notify_char.uuid = g_btm_proto_notify.uuid;
+
+    // BF test values: both soft limits are written as 0, which caps every
+    // channel at strength 0 - the device cannot output anything while this
+    // transport is being verified, whatever a B0 packet asks for. The official
+    // app rewrites BF on every connect, so this does not leave the device in a
+    // state the user cannot get out of. The real implementation takes these from
+    // the app's own configuration.
+    memset(&config, 0, sizeof(config));
+    config.bf.soft_limit_a = 0;
+    config.bf.soft_limit_b = 0;
+    dglabCoyoteV3SessionInit(&g_btm_transport.session, &link, &config);
+
+    rc = btLeClientRegisterNotification(handle, true, &g_btm_transport.service,
+        &g_btm_transport.notify_char);
+    pocLog("btm transport: RegisterNotification(0x150B) rc=0x%08X", (u32)rc);
+    g_btm_transport.notify_registered = R_SUCCEEDED(rc);
+
+    g_btm_transport.connected = true;
+    g_btm_transport.last_tick_ms = pocNowMs();
+    g_btm_transport.start_ms = g_btm_transport.last_tick_ms;
+    g_btm_battery_read_sent = false;
+
+    // OnConnected writes the BF packet (soft limits) before any B0.
+    dglabCoyoteV3SessionOnConnected(&g_btm_transport.session);
+
+    // Drive both channels to an absolute zero before anything else: it makes the
+    // device's output state explicit (nothing can pulse after this) and the
+    // resulting B0 carries a non-zero sequence number, so the device answers
+    // with a B1 - which is what proves the notification path works.
+    dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelA);
+    dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelB);
+
+    return true;
+}
+
+// Drains the user-side channel and ticks the session for duration_ms.
+static void pocBtmTransportPump(u32 duration_ms)
+{
+    u32 deadline = pocNowMs() + duration_ms;
+
+    while ((s32)(deadline - pocNowMs()) > 0 && !pocStopRequested()) {
+        for (u32 i = 0; i < 8u; i++) {
+            BtdrvBleEventType type = (BtdrvBleEventType)0;
+            const u8* notify;
+            u16 size;
+            Result rc;
+            bool zero = true;
+
+            memset(&g_ble_event, 0, sizeof(g_ble_event));
+            rc = btGetLeEventInfo(&g_ble_event, sizeof(g_ble_event), &type);
+
+            if (R_FAILED(rc))
+                break;
+
+            for (u32 b = 0; b < 8u; b++) {
+                if (g_ble_event.data[b] != 0)
+                    zero = false;
+            }
+
+            if (zero)
+                break;
+
+            // The first few events are logged whole: if the firmware's notify
+            // layout differs from libnx's (the properties byte already did), the
+            // offsets below are what has to change.
+            // Counted separately: notifications only increments for payloads
+            // that look like one, so using it here logged *every* event (908 of
+            // them in the 2026-09-25 01:38 run).
+            if (g_btm_transport.events_logged < 3u) {
+                g_btm_transport.events_logged++;
+                pocLog("btm transport: event head %02X%02X%02X%02X %02X%02X%02X%02X "
+                       "%02X%02X%02X%02X %02X%02X%02X%02X",
+                    g_ble_event.data[0], g_ble_event.data[1], g_ble_event.data[2],
+                    g_ble_event.data[3], g_ble_event.data[4], g_ble_event.data[5],
+                    g_ble_event.data[6], g_ble_event.data[7], g_ble_event.data[8],
+                    g_ble_event.data[9], g_ble_event.data[10], g_ble_event.data[11],
+                    g_ble_event.data[12], g_ble_event.data[13], g_ble_event.data[14],
+                    g_ble_event.data[15]);
+            }
+
+            // The type the firmware reports is not usable, so the notification
+            // is recognised by its shape: the payload sits at +0x4A and its
+            // length at +0x48 (libnx's client_notify layout).
+            size = (u16)(g_ble_event.data[0x48] | (g_ble_event.data[0x49] << 8));
+            notify = g_ble_event.data + 0x4A;
+
+            if (size == 0u || size > 0x20u) {
+                // Most of the queue traffic here is other event kinds; logging
+                // each one filled the log ring and pushed the B0/B1 lines out
+                // (598 of them in the 2026-09-25 run). Only a change is logged.
+                static u8 last_event_head[8];
+                static u32 other_events;
+
+                other_events++;
+
+                if (memcmp(last_event_head, g_ble_event.data, sizeof(last_event_head)) != 0) {
+                    memcpy(last_event_head, g_ble_event.data, sizeof(last_event_head));
+                    pocLog("btm transport: event #%u head %02X%02X%02X%02X %02X%02X%02X%02X",
+                        other_events, g_ble_event.data[0], g_ble_event.data[1],
+                        g_ble_event.data[2], g_ble_event.data[3], g_ble_event.data[4],
+                        g_ble_event.data[5], g_ble_event.data[6], g_ble_event.data[7]);
+                }
+
+                continue;
+            }
+
+            g_btm_transport.notifications++;
+
+            {
+                char hex[3u * 0x20u + 1u];
+
+                pocHex(hex, sizeof(hex), notify, size);
+                pocLog("btm transport: notify #%u size=%u %s",
+                    g_btm_transport.notifications, (unsigned)size, hex);
+            }
+
+            if (notify[0] == DGLAB_COYOTE_V3_HEADER_B1) {
+                DglabCoyoteV3B1 b1;
+
+                g_btm_transport.b1_count++;
+
+                if (dglabCoyoteV3DecodeB1(notify, size, &b1)) {
+                    pocLog("btm transport: B1 sequence=%u strength A=%u B=%u", b1.sequence,
+                        b1.strength_a, b1.strength_b);
+                }
+            }
+
+            dglabCoyoteV3SessionOnNotification(&g_btm_transport.session, notify, size);
+        }
+
+        {
+            u32 now = pocNowMs();
+            u32 elapsed = now - g_btm_transport.last_tick_ms;
+
+            if (elapsed > 0u) {
+                g_btm_transport.last_tick_ms = now;
+                dglabCoyoteV3SessionTick(&g_btm_transport.session, elapsed);
+            }
+
+            // The strength zero is the one command this test wants to see
+            // answered. The reference algorithm waits for the B1 forever; while
+            // nothing has come back, release the gate every 1.5s and let the
+            // next packet carry the request again, so a lost packet (or a
+            // subscription that had not settled yet) cannot stall the run.
+            if (g_btm_transport.b1_count == 0u &&
+                dglabCoyoteV3StrengthStateIsWaiting(&g_btm_transport.session.strength) &&
+                (s32)(now - g_btm_transport.last_rearm_ms) >= 1500) {
+                DglabCoyoteV3B1 synthetic;
+
+                g_btm_transport.last_rearm_ms = now;
+                synthetic.sequence = g_btm_transport.session.strength.inflight_sequence;
+                synthetic.strength_a = 0;
+                synthetic.strength_b = 0;
+                dglabCoyoteV3StrengthStateOnB1(&g_btm_transport.session.strength, &synthetic);
+                pocLog("btm transport: no B1 yet, sending the zero request again");
+            }
+
+            // One battery read per connection: the answer has to arrive through
+            // the same event channel the B1 would use, so it says whether the
+            // notification/event path works at all (and it cannot drive output).
+            if (!g_btm_battery_read_sent && g_btm_battery_ready &&
+                (s32)(now - g_btm_transport.start_ms) >= 1000) {
+                BtdrvGattId service_id;
+                BtdrvGattId char_id;
+                Result rc;
+
+                g_btm_battery_read_sent = true;
+                memset(&service_id, 0, sizeof(service_id));
+                service_id.instance_id = (u8)g_btm_battery_service.instance_id;
+                service_id.uuid = g_btm_battery_service.uuid;
+                memset(&char_id, 0, sizeof(char_id));
+                char_id.instance_id = (u8)g_btm_battery_char.instance_id;
+                char_id.uuid = g_btm_battery_char.uuid;
+
+                rc = btLeClientReadCharacteristic(g_btm_transport.handle, true, &service_id,
+                    &char_id, BtdrvGattAuthReqType_None);
+                pocLog("btm transport: ReadCharacteristic(battery 0x1500) rc=0x%08X", (u32)rc);
+            }
+        }
+
+        svcSleepThread(10000000ull); // 10ms
+    }
+}
+
+static void pocBtmTransportStop(void)
+{
+    if (!g_btm_transport.connected)
+        return;
+
+    dglabCoyoteV3SessionOnDisconnected(&g_btm_transport.session);
+
+    if (g_btm_transport.notify_registered) {
+        Result rc = btLeClientDeregisterNotification(g_btm_transport.handle, true,
+            &g_btm_transport.service, &g_btm_transport.notify_char);
+
+        pocLog("btm transport: DeregisterNotification rc=0x%08X", (u32)rc);
+        g_btm_transport.notify_registered = false;
+    }
+
+    pocLog("btm transport: done, writes=%u notify=%u b1=%u", g_btm_transport.writes,
+        g_btm_transport.notifications, g_btm_transport.b1_count);
+    g_btm_transport.connected = false;
+}
+
+// Drains the user-side channel and prints every payload it holds. A payload with
+// byte 5 == 1 is the registration event, with the client_if in byte 4.
+static u8 pocBtEventsDrain(const char* label, u32 rounds, u8* out_client_if)
+{
+    u8 found = 0xFFu;
+    // The queue hands the same record back on every read; only a payload that
+    // differs from the last one that was logged is worth a line (the identical
+    // repeats filled the log ring on 2026-09-25).
+    static u8 last_head[16];
+    static bool have_last_head;
+
+    if (!g_bt_open)
+        return found;
+
+    for (u32 i = 0; i < rounds && !pocStopRequested(); i++) {
+        BtdrvBleEventType type = (BtdrvBleEventType)0;
+        Result rc;
+        bool zero = true;
+
+        // The managed event payload is 0x400 bytes, so it lives in .bss (the
+        // stack test fails any frame over 1 KB).
+        memset(&g_ble_event, 0, sizeof(g_ble_event));
+        rc = btGetLeEventInfo(&g_ble_event, sizeof(g_ble_event), &type);
+
+        for (u32 b = 0; b < 8u; b++) {
+            if (g_ble_event.data[b] != 0)
+                zero = false;
+        }
+
+        if (R_FAILED(rc) || zero)
+            continue;
+
+        if (have_last_head && memcmp(last_head, g_ble_event.data, sizeof(last_head)) == 0)
+            continue;
+
+        memcpy(last_head, g_ble_event.data, sizeof(last_head));
+        have_last_head = true;
+
+        // Two rows, not one: the interesting events carry more than the first
+        // eight bytes (the client connection style event puts the device address
+        // at +0x0C), and the earlier one-line dump hid exactly that.
+        pocLog("%s: bt event type=%u head %02X%02X%02X%02X %02X%02X%02X%02X "
+               "%02X%02X%02X%02X %02X%02X%02X%02X", label, (u32)type,
+            g_ble_event.data[0], g_ble_event.data[1], g_ble_event.data[2],
+            g_ble_event.data[3], g_ble_event.data[4], g_ble_event.data[5],
+            g_ble_event.data[6], g_ble_event.data[7], g_ble_event.data[8],
+            g_ble_event.data[9], g_ble_event.data[10], g_ble_event.data[11],
+            g_ble_event.data[12], g_ble_event.data[13], g_ble_event.data[14],
+            g_ble_event.data[15]);
+
+        if (g_poc.use_target_address) {
+            for (u32 off = 0; off + 6u <= sizeof(g_ble_event.data); off++) {
+                if (memcmp(g_ble_event.data + off, g_poc.target_address, 6) == 0) {
+                    pocLog("%s: bt event carries the target address at +0x%X", label, off);
+                    break;
+                }
+            }
+        }
+
+        // Same bytes read as libnx's client_connection event, so the log says
+        // what it is instead of leaving it to be decoded by hand:
+        //   {u32 result; u8 status; u8 client_if; u8 pad[2]; u32 conn_id;
+        //    BtdrvAddress address; u16 reason}
+        // status 0 = connected, 2 = disconnected (libnx's btdrv.h).
+        pocLog("%s: bt event as connection: result=0x%08X status=%u client_if=%u "
+               "conn_id=0x%08X addr=%02X:%02X:%02X:%02X:%02X:%02X reason=0x%04X",
+            label, g_ble_event.client_connection.result,
+            g_ble_event.client_connection.status,
+            g_ble_event.client_connection.client_if,
+            g_ble_event.client_connection.conn_id,
+            g_ble_event.client_connection.address.address[0],
+            g_ble_event.client_connection.address.address[1],
+            g_ble_event.client_connection.address.address[2],
+            g_ble_event.client_connection.address.address[3],
+            g_ble_event.client_connection.address.address[4],
+            g_ble_event.client_connection.address.address[5],
+            g_ble_event.client_connection.reason);
+
+        if (g_ble_event.data[5] == 1u && g_ble_event.data[4] != 0xFFu) {
+            found = g_ble_event.data[4];
+            pocLog("%s: bt registration event -> client_if=0x%02X", label, found);
+
+            if (out_client_if != NULL)
+                *out_client_if = found;
+        }
+    }
+
+    return found;
+}
+
+// Polls btdrv's managed queue for a connection record that says the link to this
+// address is up (status 0). This is the honest signal: with the marker edit
+// removed a refused connect answers Bluetooth/0x1806 again, while a link the
+// stack really made shows up here as
+//   {u32 result; u8 status(0 = connected); u8 client_if; u16 pad; u32 conn_id;
+//    BtdrvAddress address; u16 reason}
+// (libnx's client_connection layout). Returns the connection id or 0xFFFFFFFF.
+static u32 pocDrainBleConnectionEvent(const BtdrvAddress* addr, u32 timeout_ms)
+{
+    u32 deadline = pocNowMs() + timeout_ms;
+    u32 conn_id = 0xFFFFFFFFu;
+
+    while ((s32)(deadline - pocNowMs()) > 0 && !pocStopRequested()) {
+        BtdrvBleEventType type = (BtdrvBleEventType)0;
+        Result rc;
+        bool zero = true;
+
+        memset(&g_ble_event, 0, sizeof(g_ble_event));
+        rc = btdrvGetBleManagedEventInfo(&g_ble_event, sizeof(g_ble_event), &type);
+
+        if (R_FAILED(rc))
+            break;
+
+        for (u32 b = 0; b < 8u; b++) {
+            if (g_ble_event.data[b] != 0)
+                zero = false;
+        }
+
+        if (zero)
+            continue;
+
+        if (g_ble_event.client_connection.status == 0u &&
+            g_ble_event.client_connection.conn_id != 0xFFFFFFFFu &&
+            memcmp(g_ble_event.client_connection.address.address, addr->address, 6) == 0) {
+            conn_id = g_ble_event.client_connection.conn_id;
+            pocLog("btdrv probe: connected! conn_id=%u client_if=%u", conn_id,
+                g_ble_event.client_connection.client_if);
+            break;
+        }
+    }
+
+    return conn_id;
+}
+
+// Finds the interface our own registration created by trying the candidates.
+//
+// The registration event is posted to a queue this process does not read (it
+// never showed up in the managed-event queue, docs/ble-re.md), so the interface
+// number has to be discovered. A connect on an interface that is not registered
+// comes back as Bluetooth/0x14F, one without a connection context as
+// Bluetooth/0x1806; an interface that returns 0 is one the stack accepted.
+static u8 pocFindClientIfByConnect(const BtdrvAddress* addr)
+{
+    u8 found = 0xFFu;
+    Result rc;
+
+    // Control first: 0xFF is never a valid interface. If this also answers
+    // Bluetooth/0x14F then 0x14F is not about the interface but about the
+    // message layer (its sender answers 0x72 = "no free task slot" when the BLE
+    // thread has none, and 0x72 maps to the same Result). If it answers
+    // Bluetooth/0x1806 while 0..3 answer 0x14F, then 0x14F really is per
+    // interface and the candidates are in the manager's table.
+    rc = btdrvConnectGattServer(0xFFu, *addr, true, 0);
+    pocLog("btdrv probe: control connect client_if=0xFF rc=0x%08X", (u32)rc);
+
+    for (u8 candidate = 0; candidate < 4u && !pocStopRequested(); candidate++) {
+        rc = btdrvConnectGattServer(candidate, *addr, true, 0);
+
+        pocLog("btdrv probe: probe connect client_if=0x%02X rc=0x%08X", candidate, (u32)rc);
+
+        // The result code alone is not enough - a client without a connection
+        // context is answered with an error, but only a connection record for
+        // this address proves that the link actually came up.
+        if (pocDrainBleConnectionEvent(addr, 2000u) != 0xFFFFFFFFu) {
+            found = candidate;
+            break;
+        }
+
+        if (rc == 0)
+            found = candidate;
+    }
+
+    if (found != 0xFFu)
+        pocLog("btdrv probe: client_if=0x%02X accepted the connect", found);
+
+    return found;
+}
+
+// Registers a GATT client and connects with the interface that registration
+// reported.
+//
+// This is the step the probe was missing. cmd 62 has no output, so the client_if
+// arrives as a managed event (the queue replays old payloads, so a payload that
+// differs from the replayed baseline is the new one), and - the part that
+// explains the connect failure - registering is also what creates the stack-side
+// connection context: the internal opcode 0x6A8 (this command) fills one of the
+// five context slots that FUN_0007c0f0 looks in, and opcode 0x6AA (the connect)
+// answers status 0xC8 = Bluetooth/0x1806 when it is missing (docs/ble-re.md).
+static u8 pocRegisterGattClientStep(u8 previous_if)
+{
+    BtdrvGattAttributeUuid uuid = pocUuid16(DGLAB_COYOTE_V3_UUID16_SERVICE);
+    u8 client_if = 0xFFu;
+    u8 baseline[16];
+    Result rc;
+
+    memset(baseline, 0, sizeof(baseline));
+    memcpy(baseline, g_ble_event.data, sizeof(baseline));
+
+    // The registration can be refused with Bluetooth/0x14F, which FUN_00005880
+    // returns when all four client slots are occupied (FUN_0000a900 counts them
+    // - docs/ble-re.md). Free the interface this session's InitializeBle handed
+    // out so the table has room again. Only that one is touched: it is the value
+    // this process was given, never an interface read from somebody else's work.
+    if (previous_if != 0xFFu) {
+        rc = btdrvUnregisterGattClient(previous_if);
+        pocLog("btdrv probe: UnregisterGattClient(0x%02X) rc=0x%08X", previous_if, (u32)rc);
+        pocDrainBleEvents("btdrv probe after UnregisterGattClient", 500u, NULL);
+    }
+
+    rc = btdrvRegisterGattClient(&uuid);
+    pocLog("btdrv probe: RegisterGattClient(0x%04X) rc=0x%08X",
+        DGLAB_COYOTE_V3_UUID16_SERVICE, (u32)rc);
+
+    for (u32 i = 0; i < 8u && !pocStopRequested(); i++) {
+        BtdrvBleEventType type = (BtdrvBleEventType)0;
+
+        memset(&g_ble_event, 0, sizeof(g_ble_event));
+        rc = btdrvGetBleManagedEventInfo(&g_ble_event, sizeof(g_ble_event), &type);
+        if (R_FAILED(rc)) {
+            pocLog("btdrv probe: register drain rc=0x%08X", (u32)rc);
+            break;
+        }
+
+        pocLog("btdrv probe: register event raw=%02X%02X%02X%02X%02X%02X%02X%02X "
+               "client_if=%u",
+            g_ble_event.data[0], g_ble_event.data[1], g_ble_event.data[2],
+            g_ble_event.data[3], g_ble_event.data[4], g_ble_event.data[5],
+            g_ble_event.data[6], g_ble_event.data[7], g_ble_event.data[4]);
+
+        // The registration event the manager posts is 8 bytes long: the assigned
+        // interface sits in byte 4 and byte 5 is 1. That marker comes straight
+        // from the firmware (FUN_00005880 stores 0x0000010000000000 and then
+        // overwrites byte 4 with the client_if); other events land in the same
+        // queue without it, which is why "the payload changed" was not enough to
+        // tell them apart (2026-09-22 round: a successful registration still
+        // showed no new interface).
+        if (g_ble_event.data[5] == 1u) {
+            client_if = g_ble_event.data[4];
+            pocLog("btdrv probe: registration event -> client_if=0x%02X", client_if);
+            break;
+        }
+    }
+
+    if (client_if == 0xFFu) {
+        pocLog("btdrv probe: no registration event, using 0x%02X", previous_if);
+        client_if = previous_if;
+    }
+
+    return client_if;
+}
+
 static void pocConnectMatrix(const char* label, u8 client_if, const BtdrvAddress* addr)
 {
     Result rc;
@@ -1001,6 +1662,7 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     static const u16 kWindow[4] = { 0x0030u, 0x0030u, 0x0030u, 0x0030u };
     static u8 previous_event[sizeof(((BtdrvBleEventInfo*)0)->data)];
     BtdrvAddress scanned_address;
+    u8 registered_if = 0xFFu;
     Event event;
     Result rc;
     bool have_previous = false;
@@ -1015,6 +1677,27 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
 
     memset(&scanned_address, 0, sizeof(scanned_address));
     memset(previous_event, 0, sizeof(previous_event));
+
+    // Cold control: one connect before anything in this session has touched BLE.
+    // If it already answers Bluetooth/0x14F (the message layer's "no free task
+    // slot" maps to that Result), the refusals come from the system's own BLE
+    // usage rather than from anything this run did. 0xFF is never a valid
+    // interface, so nothing can be disturbed by it.
+    if (g_poc.use_target_address) {
+        BtdrvAddress cold;
+
+        memset(&cold, 0, sizeof(cold));
+        memcpy(cold.address, g_poc.target_address, sizeof(cold.address));
+
+        rc = btdrvInitialize();
+        pocLog("btdrv probe: cold control btdrvInitialize rc=0x%08X", (u32)rc);
+
+        if (R_SUCCEEDED(rc)) {
+            rc = btdrvConnectGattServer(0xFFu, cold, true, 0);
+            pocLog("btdrv probe: cold control connect client_if=0xFF rc=0x%08X", (u32)rc);
+            btdrvExit();
+        }
+    }
 
     pocStopScan(w);
 
@@ -1057,8 +1740,61 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     btdrvIsBluetoothEnabled(&enabled);
     pocLog("btdrv probe: adapter enabled=%u", enabled ? 1u : 0u);
 
+    pocControlConnect("after InitializeBle");
+
+    // Register our own GATT client now, while the BLE stack is fresh: registering
+    // is what creates the stack-side connection context (internal opcode 0x6A8),
+    // and a connect without it is answered with status 0xC8 = Bluetooth/0x1806
+    // (docs/ble-re.md). The client_if from the event queue is not trustworthy -
+    // UnregisterGattClient(0x02) proved that value is not in the manager's table
+    // - so the interface this registration reports is the one to use.
+    pocBtEventsOpen();
+    pocBtEventsDrain("btdrv probe before register", 16u, NULL);
+    pocControlConnect("after bt open");
+
+    registered_if = pocRegisterGattClientStep(client_if);
+
+    pocControlConnect("after RegisterGattClient");
+
+    // The registration event is expected on the user-side channel, not on the
+    // btdrv one; if it is there, it settles the interface number.
+    {
+        u8 from_bt = 0xFFu;
+
+        if (pocBtEventsDrain("btdrv probe after register", 32u, &from_bt) != 0xFFu)
+            registered_if = from_bt;
+    }
+
+    if (registered_if != 0xFFu && g_poc.use_target_address) {
+        BtdrvAddress configured;
+
+        memset(&configured, 0, sizeof(configured));
+        memcpy(configured.address, g_poc.target_address, sizeof(configured.address));
+
+        // The registration event did not show up, so try to find the interface it
+        // created by connecting with each candidate.
+        if (registered_if == client_if) {
+            u8 probed = pocFindClientIfByConnect(&configured);
+
+            if (probed != 0xFFu)
+                registered_if = probed;
+        }
+
+        rc = btdrvConnectGattServer(registered_if, configured, true, 0);
+        pocLog("btdrv probe: early ConnectGattServer(client_if=0x%02X) rc=0x%08X",
+            registered_if, (u32)rc);
+        pocDrainBleEvents("btdrv probe after early connect", 1500u, NULL);
+        pocBtEventsDrain("btdrv probe after early connect", 32u, NULL);
+    }
+
+    // EnableBle comes AFTER the registration and the first connect, because the
+    // 2026-09-22 round showed it is the call that exhausts the message layer:
+    // a control connect answers Bluetooth/0x1806 before it and Bluetooth/0x14F
+    // (the message layer's "no free task slot") right after it. The scans below
+    // need it, the connect apparently must not have it first.
     rc = btdrvEnableBle();
     pocLog("btdrv probe: btdrvEnableBle rc=0x%08X", (u32)rc);
+    pocControlConnect("after EnableBle");
 
     // Start from a known filter state: a filter left enabled by an earlier run
     // is one of the ways a scan can come back with nothing at all.
@@ -1394,6 +2130,15 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                             p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
                             p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
                     }
+
+                    // The docs disagree about whether the advertisement carries
+                    // the service UUID 0x180C (docs/ble-poc.md), so the record is
+                    // also walked as AD structures. Only for the configured
+                    // device: the other devices in the room are not the point.
+                    if (g_poc.use_target_address &&
+                        memcmp(info.scan_result.address.address, g_poc.target_address, 6) == 0) {
+                        pocLogAdStructures("btdrv probe", info.data, sizeof(info.data));
+                    }
                 }
             }
 
@@ -1418,6 +2163,8 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     btdrvClearBleScanFilters();
     pocLog("btdrv probe: done, %u scan result(s) in total", total_scan_results);
 
+    pocBtEventsClose();
+
     // The connect method (manager +0x88 = 0x59b0) answers Bluetooth/0x14F when
     // either of its two client_if lookups finds an entry, before it ever talks
     // to the stack. So the interesting question is whether a *clean* session -
@@ -1433,6 +2180,18 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     if (!have_address) {
         pocLog("btdrv probe: no address to connect to (client_if=0x%02X)", client_if);
     } else {
+        // Connect with the interface our own registration reported (if the
+        // registration went through at all), now that the device has been seen
+        // in a scan.
+        if (registered_if != 0xFFu) {
+            rc = btdrvConnectGattServer(registered_if, scanned_address, true, 0);
+            pocLog("btdrv probe: ConnectGattServer(client_if=0x%02X, registered) rc=0x%08X",
+                registered_if, (u32)rc);
+            pocDrainBleEvents("btdrv probe after registered connect", 1500u, NULL);
+        } else {
+            pocLog("btdrv probe: no registered client_if, connect skipped");
+        }
+
         pocConnectMatrix("btdrv probe after window", client_if, &scanned_address);
     }
 
@@ -1552,6 +2311,831 @@ static u32 pocDrainBleEvents(const char* label, u32 duration_ms, u8* out_client_
 
     pocLog("%s: drained %u event(s), %u empty read(s)", label, events, empties);
     return events;
+}
+
+// The base `btm` service: the one route the sysmodule has never tried.
+//
+// Every earlier attempt went through btdrv directly (scans fine, the stack
+// refuses the connect with status 0x68 / Bluetooth/0x1806) or through btm:u,
+// which is applet-only (Sf/0x60A when a real applet ARUID is passed). The base
+// `btm` service is a third thing: the identity probe has read btmGetState
+// through it since the first hardware round, so this process is accepted, and
+// it carries the whole BLE surface the applet path uses - scans, connect,
+// connection state, GATT - from a service that is not restricted to applets.
+//
+// This is why the probe runs from a session started with
+// DGLAB_POC_START_FLAG_SKIP_PROBES and before any bt/btm:u/btdrv call of its
+// own: the BLE manager binds its state to the session that initialized it
+// (docs/ble-poc.md), so everything below has to be the first BLE access of the
+// run for its result to mean anything.
+//
+// HAZARD - read this before adding anything here.
+//
+// The 2026-09-22 round ended with the *btm* module aborting (svcBreak through
+// its own terminate path; the crash report is in the user's downloads) right
+// after the NRO exited, taking hid down with it. That round was the one that
+// also brought btdrv's BLE up in the same session while btm had work queued:
+// every btm call afterwards answered 0x668F, and btm's worker was still holding
+// the connect request for this device when it died. The same round registered
+// the applet's ARUID, which stops being valid when the applet exits.
+//
+// So this probe stays on btm's own read-only surface: state, stored scan
+// parameters, two short scans, the client-condition dump. No ARUID adoption, no
+// btdrv BLE bring-up, no connect unless a scan actually reported the device, and
+// no radio/pairing/audio/gamepad commands. Anything beyond that needs the
+// btm/btdrv ownership rules worked out statically first - see docs/ble-re.md.
+//
+// Status (2026-09-22, docs/ble-re.md "当前总览"): the btdrv-direct route is
+// blocked by resource ownership (btm holds the four client slots; EnableBle is
+// required to register but is also what makes the message layer refuse connect
+// requests), and btm's route is accepted but the stack's connect attempt comes
+// back as "not established" (status=2, no conn_id, no reason). The probe now
+// runs only when the user asks for it (StickR or idle-B): it leaves btm holding
+// a request, so it must not run unattended after every boot.
+
+// Walks the advertisement structures (length / type / value) of a scan record.
+//
+// Which offset the AD structures start at is not the same in every record on
+// this firmware: the libnx BtdrvBleScanResult layout puts the address at +1,
+// while the 2026-09-22 logs had the device at +0x0C. So instead of trusting one
+// offset, every plausible start is tried and the first one that parses as a
+// chain of at least three AD structures - one of them a known type - is
+// printed. That is what settles "does the advertisement carry the service UUID
+// 0x180C" with data instead of with a note in the docs.
+static void pocLogAdStructures(const char* label, const u8* data, size_t size)
+{
+    for (size_t start = 0; start <= 0x40u && start + 6u <= size; start++) {
+        size_t offset = start;
+        u32 entries = 0;
+        bool known = false;
+        bool ok = true;
+
+        while (offset + 1u < size) {
+            u8 len = data[offset];
+
+            if (len == 0)
+                break;
+
+            if (len > 0x1Fu || offset + 2u + len > size) {
+                ok = false;
+                break;
+            }
+
+            switch (data[offset + 1u]) {
+                case 0x01: case 0x02: case 0x03: case 0x06: case 0x07: case 0x08:
+                case 0x09: case 0x0A: case 0x0D: case 0x0E: case 0x0F: case 0x10:
+                case 0xFF:
+                    known = true;
+                    break;
+                default:
+                    break;
+            }
+
+            entries++;
+            offset += 2u + len;
+        }
+
+        if (!ok || entries < 3u || !known)
+            continue;
+
+        pocLog("%s AD structures at +0x%02X", label, (unsigned)start);
+
+        for (offset = start; offset + 1u < size;) {
+            char value[3u * 0x1Fu + 1u];
+            u8 len = data[offset];
+
+            if (len == 0)
+                break;
+
+            pocHex(value, sizeof(value), data + offset + 2u, len);
+            pocLog("%s   type=0x%02X len=%u %s", label, data[offset + 1u], (unsigned)len,
+                value);
+            offset += 2u + len;
+        }
+
+        return;
+    }
+
+    pocLog("%s no AD structure chain in the first 0x40 bytes", label);
+}
+
+// One btm scan pass. smart_device picks the smart-device scan, which is the
+// UUID-filtered one Nintendo's own flow uses; otherwise the manufacturer-data
+// filter is used. Returns true when the interesting device was reported.
+//
+// btm signals new results through its scan event, so every poll waits on that
+// event first and only then reads the result list - polling without draining the
+// event is what an empty result set looks like (2026-09-22, applet probe).
+//
+// `suffix` goes into every log line so two passes of the same kind stay apart in
+// the log ("" for the first, " (BLE up)" for the second).
+static bool pocBtmScanPass(const char* suffix, bool smart_device, Event* scan_event,
+    bool have_event, BtdrvAddress* out)
+{
+    BtdrvGattAttributeUuid uuid = pocUuid16(POC_UUID16_ADVERTISED_SERVICE);
+    char label[64];
+    Result rc;
+    bool found = false;
+    u32 devices = 0;
+    u32 events = 0;
+
+    snprintf(label, sizeof(label), "btm %s scan%s", smart_device ? "smart" : "general", suffix);
+
+    // btm answers 0x668F ("no free task slot") while the BLE thread is still
+    // settling right after the stack was turned on, so the start is retried.
+    rc = 0;
+
+    for (u32 attempt = 0; attempt < 3u && !pocStopRequested() && rc != 0; attempt++) {
+        if (attempt > 0u)
+            svcSleepThread(1000000000ull); // 1s
+
+        if (smart_device) {
+            rc = btmStartBleScanForSmartDevice(&uuid);
+            pocLog("%s: StartBleScanForSmartDevice(0x%04X) rc=0x%08X (attempt %u)", label,
+                POC_UUID16_ADVERTISED_SERVICE, (u32)rc, attempt);
+        } else {
+            BtdrvBleAdvertisePacketParameter param;
+
+            memset(&param, 0, sizeof(param));
+            param.company_id = POC_ADVERTISED_COMPANY_ID;
+            rc = btmStartBleScanForGeneral(param);
+            pocLog("%s: StartBleScanForGeneral(company=0x%04X) rc=0x%08X (attempt %u)", label,
+                POC_ADVERTISED_COMPANY_ID, (u32)rc, attempt);
+        }
+    }
+
+    if (R_FAILED(rc))
+        return false;
+
+    for (u32 poll = 0; poll < 12u && !pocStopRequested() && !found; poll++) {
+        u8 total = 0;
+
+        if (have_event && R_SUCCEEDED(eventWait(scan_event, 500000000ull))) { // 500ms
+            events++;
+            pocLog("%s: scan event #%u after poll %u", label, events, poll);
+        }
+
+        memset(g_btm_scan_results, 0, sizeof(g_btm_scan_results));
+
+        if (smart_device)
+            rc = btmGetBleScanResultsForSmartDevice(g_btm_scan_results, POC_BTM_SCAN_MAX, &total);
+        else
+            rc = btmGetBleScanResultsForGeneral(g_btm_scan_results, POC_BTM_SCAN_MAX, &total);
+
+        if (poll < 2u || (R_SUCCEEDED(rc) && total > 0u))
+            pocLog("%s: poll %u rc=0x%08X total=%u", label, poll, (u32)rc, (unsigned)total);
+
+        if (R_SUCCEEDED(rc) && total > 0u) {
+            for (u32 k = 0; k < total && k < POC_BTM_SCAN_MAX; k++) {
+                const u8* record = (const u8*)&g_btm_scan_results[k];
+                BtdrvAddress reported;
+                bool nonzero = false;
+                bool match;
+
+                memset(&reported, 0, sizeof(reported));
+                memcpy(reported.address, record + 1u, sizeof(reported.address));
+
+                for (u32 i = 0; i < sizeof(reported.address); i++) {
+                    if (reported.address[i] != 0)
+                        nonzero = true;
+                }
+
+                if (!nonzero)
+                    continue;
+
+                devices++;
+                match = g_poc.use_target_address &&
+                    memcmp(reported.address, g_poc.target_address, sizeof(reported.address)) == 0;
+
+                // Two address readings: libnx's BtdrvBleScanResult puts the
+                // address at +1, while the 2026-09-22 btdrv logs had the device
+                // at +0x0C. Print both instead of picking one.
+                pocLog("%s: dev[%u] ^0x01=%02X:%02X:%02X:%02X:%02X:%02X "
+                       "^0x0C=%02X:%02X:%02X:%02X:%02X:%02X",
+                    label, k,
+                    reported.address[0], reported.address[1], reported.address[2],
+                    reported.address[3], reported.address[4], reported.address[5],
+                    record[0x0Cu], record[0x0Du], record[0x0Eu],
+                    record[0x0Fu], record[0x10u], record[0x11u]);
+
+                // A device is only interesting for the connect when it is the
+                // configured one; without a configured address the first device
+                // btm reports is used, so a console without the config file can
+                // still be exercised.
+                if (!g_poc.use_target_address || match) {
+                    pocLog("%s:   %s record head %02X%02X%02X%02X%02X%02X%02X%02X "
+                           "%02X%02X%02X%02X%02X%02X%02X%02X",
+                        label, g_poc.use_target_address ? "target" : "first",
+                        record[0], record[1], record[2], record[3], record[4], record[5],
+                        record[6], record[7], record[8], record[9], record[10], record[11],
+                        record[12], record[13], record[14], record[15]);
+                    pocLogAdStructures(label, record, sizeof(g_btm_scan_results[k]));
+
+                    memcpy(out->address, reported.address, sizeof(out->address));
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if (!found)
+            svcSleepThread(500000000ull); // 500ms
+    }
+
+    if (smart_device)
+        rc = btmStopBleScanForSmartDevice();
+    else
+        rc = btmStopBleScanForGeneral();
+
+    pocLog("%s: stop rc=0x%08X devices=%u events=%u found=%u", label, (u32)rc, devices, events,
+        found ? 1u : 0u);
+    return found;
+}
+
+// Dumps the connection state btm keeps. Read-only, and only when a connect was
+// refused: the list is what says whether btm has any client registered for this
+// process at all.
+static void pocBtmLogConnectionState(const char* label)
+{
+    u8 total = 0;
+    Result rc;
+
+    memset(g_btm_connections, 0, sizeof(g_btm_connections));
+    rc = btmBleGetConnectionState(g_btm_connections, 4u, &total);
+    pocLog("%s: GetConnectionState rc=0x%08X total=%u", label, (u32)rc, (unsigned)total);
+
+    for (u32 k = 0; k < total && k < 4u; k++) {
+        pocLog("%s:   state[%u] handle=%u addr=%02X:%02X:%02X:%02X:%02X:%02X", label, k,
+            g_btm_connections[k].connection_handle,
+            g_btm_connections[k].addr.address[0], g_btm_connections[k].addr.address[1],
+            g_btm_connections[k].addr.address[2], g_btm_connections[k].addr.address[3],
+            g_btm_connections[k].addr.address[4], g_btm_connections[k].addr.address[5]);
+    }
+}
+
+// btm's GATT client bookkeeping, raw. libnx does not decode the 0x74 bytes; the
+// interesting part is whether the entry btm keeps for this caller is empty.
+//
+// Printed in 0x28-byte chunks: the whole 0x74 bytes on one line is 232 hex
+// characters and the log ring truncates around 160, which is how the 2026-09-22
+// dump ended up cut in half.
+static void pocBtmLogClientCondition(const char* label)
+{
+    BtmGattClientConditionList list;
+    Result rc;
+
+    memset(&list, 0, sizeof(list));
+    rc = btmBleGetGattClientConditionList(&list);
+    pocLog("%s: GetGattClientConditionList rc=0x%08X", label, (u32)rc);
+
+    for (size_t offset = 0; offset < sizeof(list.unk_x0); offset += 0x28u) {
+        size_t chunk = sizeof(list.unk_x0) - offset;
+        char hex[3u * 0x28u + 1u];
+
+        if (chunk > 0x28u)
+            chunk = 0x28u;
+
+        pocHex(hex, sizeof(hex), list.unk_x0 + offset, chunk);
+        pocLog("%s:   %02X %s", label, (unsigned)offset, hex);
+    }
+}
+
+static bool pocBtmConnectTry(const char* label, const BtdrvAddress* addr, u32* out_handle);
+
+// Looks for a fresh "connected" event on the bt channel for this device.
+//
+// btmBleGetConnectionState stays at total=0 in this setup, so the connection
+// state that the stack actually reports has to come from the user-side events:
+// a client_connection record with status 0 (connected), a valid conn_id and our
+// address. Older records (a previous session's disconnect, for example) have
+// status 2 and are ignored. Returns the connection id, or 0xFFFFFFFF.
+static u32 pocBtFindConnectionEvent(const BtdrvAddress* addr, u32 timeout_ms)
+{
+    u32 deadline = pocNowMs() + timeout_ms;
+    u32 conn_id = 0xFFFFFFFFu;
+    // The queue replays the same record over and over; logging every repeat
+    // filled the log ring (5760 identical lines in the 2026-09-25 run). Only a
+    // change is worth a line.
+    static u32 last_status = 0xFFu;
+    static u32 last_conn_id = 0xFFFFFFFFu;
+    static u32 last_reason = 0xFFFFu;
+
+    while ((s32)(deadline - pocNowMs()) > 0 && !pocStopRequested()) {
+        for (u32 i = 0; i < 16u; i++) {
+            BtdrvBleEventType type = (BtdrvBleEventType)0;
+            Result rc;
+            bool zero = true;
+
+            memset(&g_ble_event, 0, sizeof(g_ble_event));
+            rc = btGetLeEventInfo(&g_ble_event, sizeof(g_ble_event), &type);
+
+            if (R_FAILED(rc))
+                break;
+
+            for (u32 b = 0; b < 8u; b++) {
+                if (g_ble_event.data[b] != 0)
+                    zero = false;
+            }
+
+            if (zero)
+                break;
+
+            if (g_ble_event.client_connection.conn_id == 0xFFFFFFFFu ||
+                memcmp(g_ble_event.client_connection.address.address, addr->address, 6) != 0)
+                continue;
+
+            if (g_ble_event.client_connection.status != last_status ||
+                g_ble_event.client_connection.conn_id != last_conn_id ||
+                g_ble_event.client_connection.reason != last_reason) {
+                last_status = g_ble_event.client_connection.status;
+                last_conn_id = g_ble_event.client_connection.conn_id;
+                last_reason = g_ble_event.client_connection.reason;
+
+                pocLog("%s: bt connection event status=%u conn_id=%u reason=0x%04X", "btm probe",
+                    last_status, last_conn_id, last_reason);
+            }
+
+            if (g_ble_event.client_connection.status == 0u) {
+                conn_id = g_ble_event.client_connection.conn_id;
+                break;
+            }
+        }
+
+        if (conn_id != 0xFFFFFFFFu)
+            break;
+
+        svcSleepThread(50000000ull); // 50ms
+    }
+
+    return conn_id;
+}
+
+// Connect with a few retries: btm/the stack answer 0x668F ("no free task slot")
+// for a moment after the BLE stack was turned on, and a refused attempt leaves
+// nothing behind, so retrying is safe.
+static bool pocBtmConnectRetry(const char* label, const BtdrvAddress* addr, u32* out_handle)
+{
+    for (u32 attempt = 0; attempt < 3u && !pocStopRequested(); attempt++) {
+        if (attempt > 0u) {
+            pocLog("%s: retrying the connect in 2s (attempt %u)", label, attempt);
+            svcSleepThread(2000000000ull); // 2s
+        }
+
+        if (pocBtmConnectTry(label, addr, out_handle))
+            return true;
+    }
+
+    return false;
+}
+
+// One connect attempt through btm: queue the connect, then wait on the connection
+// event and poll the connection list. Returns true and writes the handle when a
+// connection showed up.
+static bool pocBtmConnectTry(const char* label, const BtdrvAddress* addr, u32* out_handle)
+{
+    Event conn_event;
+    bool have_event = false;
+    u32 handle = 0xFFFFFFFFu;
+    Result rc;
+
+    memset(&conn_event, 0, sizeof(conn_event));
+
+    rc = btmBleConnect(*addr);
+    pocLog("%s: BleConnect(%02X:%02X:%02X:%02X:%02X:%02X) rc=0x%08X", label,
+        addr->address[0], addr->address[1], addr->address[2], addr->address[3],
+        addr->address[4], addr->address[5], (u32)rc);
+
+    if (R_FAILED(rc))
+        return false;
+
+    rc = btmAcquireBleConnectionEvent(&conn_event);
+    have_event = R_SUCCEEDED(rc);
+    pocLog("%s: AcquireBleConnectionEvent rc=0x%08X", label, (u32)rc);
+
+    if (have_event) {
+        u32 deadline = pocNowMs() + POC_CONNECT_TIMEOUT_MS;
+        u32 events = 0;
+        u32 logged = 0;
+
+        while ((s32)(deadline - pocNowMs()) > 0 && !pocStopRequested()) {
+            // Primary signal: the user-side channel reports the connection the
+            // stack really made (conn_id + address). btm's own connection list
+            // stays empty in this setup, so this is what says "connected".
+            handle = pocBtFindConnectionEvent(addr, 250u);
+
+            if (handle != 0xFFFFFFFFu) {
+                pocLog("%s: connected (bt event) conn_id=%u addr=%02X:%02X:%02X:%02X:%02X:%02X",
+                    label, handle, addr->address[0], addr->address[1], addr->address[2],
+                    addr->address[3], addr->address[4], addr->address[5]);
+                break;
+            }
+
+            if (R_SUCCEEDED(eventWait(&conn_event, 250000000ull))) { // 250ms
+                events++;
+
+                if (logged < 4u) {
+                    logged++;
+                    pocLog("%s: connection state event #%u", label, events);
+                }
+            }
+
+            {
+                u8 total = 0;
+                Result state_rc;
+
+                memset(g_btm_connections, 0, sizeof(g_btm_connections));
+                state_rc = btmBleGetConnectionState(g_btm_connections, 4u, &total);
+
+                if (R_SUCCEEDED(state_rc) && total > 0u) {
+                    handle = g_btm_connections[0].connection_handle;
+                    pocLog("%s: connected handle=%u addr=%02X:%02X:%02X:%02X:%02X:%02X "
+                           "(events=%u)",
+                        label, handle, g_btm_connections[0].addr.address[0],
+                        g_btm_connections[0].addr.address[1],
+                        g_btm_connections[0].addr.address[2],
+                        g_btm_connections[0].addr.address[3],
+                        g_btm_connections[0].addr.address[4],
+                        g_btm_connections[0].addr.address[5], events);
+                    break;
+                }
+            }
+        }
+    }
+
+    if (have_event)
+        eventClose(&conn_event);
+
+    if (handle == 0xFFFFFFFFu) {
+        pocLog("%s: no connection", label);
+        return false;
+    }
+
+    *out_handle = handle;
+    return true;
+}
+
+// Prints the GATT table of a connection and sets the same milestones the btdev
+// session uses, so the NRO's status line reads the same way.
+static void pocBtmLogGatt(const char* label, u32 handle)
+{
+    u8 total = 0;
+    Result rc;
+
+    pocSetMilestone(DGLAB_POC_MILESTONE_CONNECTED);
+
+    // Service discovery runs after the connection is up, so the first query can
+    // legitimately answer "no services yet" (the 2026-09-24 run did exactly
+    // that: it connected, asked once immediately and got total=0). Wait for the
+    // service-discovery event and retry for a few seconds.
+    {
+        Event discovery_event;
+        bool have_event = false;
+        u32 deadline = pocNowMs() + POC_DISCOVER_TIMEOUT_MS;
+
+        memset(&discovery_event, 0, sizeof(discovery_event));
+        rc = btmAcquireBleServiceDiscoveryEvent(&discovery_event);
+        have_event = R_SUCCEEDED(rc);
+        pocLog("%s: AcquireBleServiceDiscoveryEvent rc=0x%08X", label, (u32)rc);
+
+        for (u32 attempt = 0; attempt < 8u && !pocStopRequested(); attempt++) {
+            if (have_event && R_SUCCEEDED(eventWait(&discovery_event, 1000000000ull)))
+                pocLog("%s: service discovery event after %u attempt(s)", label, attempt);
+
+            memset(g_btm_services, 0, sizeof(g_btm_services));
+            total = 0;
+            rc = btmGetGattServices(handle, g_btm_services, POC_BTM_SERVICE_MAX, &total);
+            pocLog("%s: GetGattServices attempt %u rc=0x%08X total=%u", label, attempt,
+                (u32)rc, (unsigned)total);
+
+            if (R_SUCCEEDED(rc) && total > 0u)
+                break;
+
+            if ((s32)(deadline - pocNowMs()) < 0)
+                break;
+
+            svcSleepThread(500000000ull); // 500ms
+        }
+
+        if (have_event)
+            eventClose(&discovery_event);
+    }
+
+    for (u32 i = 0; i < total && i < POC_BTM_SERVICE_MAX; i++) {
+        char text[64];
+
+        pocUuidText(text, sizeof(text), &g_btm_services[i].uuid);
+        pocLog("%s:   service[%u] uuid=%s handle=%u end=%u primary=%u", label, i, text,
+            g_btm_services[i].handle, g_btm_services[i].end_group_handle,
+            g_btm_services[i].primary_service ? 1u : 0u);
+
+        if (g_btm_services[i].uuid.size == 2 &&
+            g_btm_services[i].uuid.uuid[0] == (u8)(DGLAB_COYOTE_V3_UUID16_SERVICE & 0xFF) &&
+            g_btm_services[i].uuid.uuid[1] == (u8)(DGLAB_COYOTE_V3_UUID16_SERVICE >> 8)) {
+            u8 chars = 0;
+
+            pocSetMilestone(DGLAB_POC_MILESTONE_SERVICE_FOUND);
+
+            memset(g_btm_characteristics, 0, sizeof(g_btm_characteristics));
+            rc = btmGetGattCharacteristics(handle, g_btm_services[i].handle,
+                g_btm_characteristics, POC_BTM_CHARACTERISTIC_MAX, &chars);
+            pocLog("%s: GetGattCharacteristics rc=0x%08X total=%u", label, (u32)rc,
+                (unsigned)chars);
+
+            for (u32 c = 0; c < chars && c < POC_BTM_CHARACTERISTIC_MAX; c++) {
+                pocUuidText(text, sizeof(text), &g_btm_characteristics[c].uuid);
+                pocLog("%s:     char[%u] uuid=%s handle=%u props=0x%02X", label, c, text,
+                    g_btm_characteristics[c].handle,
+                    g_btm_characteristics[c].properties);
+
+                // Remember the two characteristics the transport writes to and
+                // listens on, so the connection can be driven afterwards.
+                if (g_btm_characteristics[c].uuid.size == 2 &&
+                    g_btm_characteristics[c].uuid.uuid[0] ==
+                        (u8)(DGLAB_COYOTE_V3_UUID16_CHAR_WRITE & 0xFF) &&
+                    g_btm_characteristics[c].uuid.uuid[1] ==
+                        (u8)(DGLAB_COYOTE_V3_UUID16_CHAR_WRITE >> 8)) {
+                    g_btm_proto_service = g_btm_services[i];
+                    g_btm_proto_write = g_btm_characteristics[c];
+                } else if (g_btm_characteristics[c].uuid.size == 2 &&
+                    g_btm_characteristics[c].uuid.uuid[0] ==
+                        (u8)(DGLAB_COYOTE_V3_UUID16_CHAR_NOTIFY & 0xFF) &&
+                    g_btm_characteristics[c].uuid.uuid[1] ==
+                        (u8)(DGLAB_COYOTE_V3_UUID16_CHAR_NOTIFY >> 8)) {
+                    g_btm_proto_service = g_btm_services[i];
+                    g_btm_proto_notify = g_btm_characteristics[c];
+                }
+            }
+        } else if (g_btm_services[i].uuid.size == 2 &&
+            g_btm_services[i].uuid.uuid[0] ==
+                (u8)(DGLAB_COYOTE_V3_UUID16_BATTERY_SERVICE & 0xFF) &&
+            g_btm_services[i].uuid.uuid[1] ==
+                (u8)(DGLAB_COYOTE_V3_UUID16_BATTERY_SERVICE >> 8)) {
+            // The battery characteristic is a plain read: it exercises the GATT
+            // client + event path without driving any output, which is exactly
+            // what the notification investigation needs.
+            u8 chars = 0;
+
+            memset(g_btm_characteristics, 0, sizeof(g_btm_characteristics));
+            rc = btmGetGattCharacteristics(handle, g_btm_services[i].handle,
+                g_btm_characteristics, POC_BTM_CHARACTERISTIC_MAX, &chars);
+            pocLog("%s: battery GetGattCharacteristics rc=0x%08X total=%u", label, (u32)rc,
+                (unsigned)chars);
+
+            for (u32 c = 0; c < chars && c < POC_BTM_CHARACTERISTIC_MAX; c++) {
+                pocUuidText(text, sizeof(text), &g_btm_characteristics[c].uuid);
+                pocLog("%s:   battery char[%u] uuid=%s handle=%u props=0x%02X", label, c, text,
+                    g_btm_characteristics[c].handle, g_btm_characteristics[c].properties);
+
+                if (g_btm_characteristics[c].uuid.size == 2 &&
+                    g_btm_characteristics[c].uuid.uuid[0] ==
+                        (u8)(DGLAB_COYOTE_V3_UUID16_CHAR_BATTERY & 0xFF) &&
+                    g_btm_characteristics[c].uuid.uuid[1] ==
+                        (u8)(DGLAB_COYOTE_V3_UUID16_CHAR_BATTERY >> 8)) {
+                    g_btm_battery_service = g_btm_services[i];
+                    g_btm_battery_char = g_btm_characteristics[c];
+                    g_btm_battery_ready = true;
+                }
+            }
+        }
+    }
+
+    g_btm_proto_ready = g_btm_proto_service.uuid.size == 2 &&
+        g_btm_proto_write.uuid.size == 2 && g_btm_proto_notify.uuid.size == 2;
+
+    if (g_btm_proto_ready)
+        pocLog("%s: protocol coordinates found (service handle=%u, write=%u, notify=%u)",
+            label, g_btm_proto_service.handle, g_btm_proto_write.handle,
+            g_btm_proto_notify.handle);
+}
+
+static void pocRunBtmBleProbe(PocWorker* w)
+{
+    BtdrvAddress address;
+    Event scan_event;
+    bool have_scan_event = false;
+    bool have_address = false;
+    u32 handle = 0xFFFFFFFFu;
+    Result rc;
+
+    (void)w;
+
+    memset(&address, 0, sizeof(address));
+    memset(&scan_event, 0, sizeof(scan_event));
+
+    // This probe deliberately does NOT touch btdrv at all.
+    //
+    // Two attempts to make the probe self-sufficient both broke the connect:
+    //   - calling btdrvInitializeBle + btdrvEnableBle here (a second stack
+    //     initialisation in a boot the driver-level probe already prepared), and
+    //   - calling RegisterGattClient here (btm then drove the connect through
+    //     the client context this process created, client_if=3, which never
+    //     establishes a link).
+    // Every run that did either failed; the two runs that connected
+    // (2026-09-24 22:17/22:31) had a btm probe that only used the btm/bt
+    // services, with the driver-level probe having run in an earlier session.
+    // So the recipe is: press D-pad Left first, then StickR / idle-B.
+    pocLog("btm probe: base btm only; run the D-pad Left probe first if the BLE "
+           "stack has not been brought up in this boot");
+
+    pocLog("=== btm probe: base btm service, sysmodule calling ===");
+
+    rc = btmInitialize();
+    pocLog("btm probe: btmInitialize rc=0x%08X", (u32)rc);
+    if (R_FAILED(rc))
+        return;
+
+    {
+        BtmState state = BtmState_NotInitialized;
+        Result state_rc = btmGetState(&state);
+
+        pocLog("btm probe: GetState rc=0x%08X state=%u", (u32)state_rc, (u32)state);
+    }
+
+    // Self-validating baseline. These two reads are btm's stored scan
+    // parameters; a wrong command number cannot produce a company id and an
+    // UUID that match what the console has configured, so they say whether
+    // libnx's btm bindings are live on this firmware at all before a scan is
+    // blamed.
+    {
+        BtdrvBleAdvertisePacketParameter param;
+        BtdrvGattAttributeUuid uuid;
+        char text[64];
+
+        memset(&param, 0, sizeof(param));
+        rc = btmGetBleScanParameterGeneral(0xFFFFu, &param);
+        pocLog("btm probe: GetBleScanParameterGeneral(0xFFFF) rc=0x%08X company=0x%04X "
+               "pattern=%02X%02X%02X%02X%02X%02X",
+            (u32)rc, param.company_id, param.pattern_data[0], param.pattern_data[1],
+            param.pattern_data[2], param.pattern_data[3], param.pattern_data[4],
+            param.pattern_data[5]);
+
+        memset(&uuid, 0, sizeof(uuid));
+        rc = btmGetBleScanParameterSmartDevice(0x2u, &uuid);
+        pocUuidText(text, sizeof(text), &uuid);
+        pocLog("btm probe: GetBleScanParameterSmartDevice(2) rc=0x%08X size=%u uuid=%s",
+            (u32)rc, (unsigned)uuid.size, text);
+    }
+
+    // Registering the NRO's ARUID with btm is deliberately NOT done any more.
+    //
+    // It was the first hypothesis (btm identifies its BLE clients by ARUID, and
+    // the base service has no ARUID field in its requests, only this command).
+    // The 2026-09-22 hardware round showed it is accepted - and that btm still
+    // does nothing afterwards. Since btm may keep referring to that identity, and
+    // the crash that followed happened right after the applet (whose ARUID this
+    // was) exited, the sysmodule no longer adopts an applet identity at all.
+    pocLog("btm probe: ARUID registration skipped (applet identity is not adopted)");
+
+    rc = btmAcquireBleScanEvent(&scan_event);
+    have_scan_event = R_SUCCEEDED(rc);
+    pocLog("btm probe: AcquireBleScanEvent rc=0x%08X", (u32)rc);
+
+    // Phase A: nothing in this session has touched Bluetooth yet.
+    if (pocBtmScanPass("", false, &scan_event, have_scan_event, &address)) {
+        have_address = true;
+        pocSetMilestone(DGLAB_POC_MILESTONE_DEVICE_FOUND);
+    } else {
+        pocLog("btm probe: phase A general scan reported no device");
+    }
+
+    // Control pass: the UUID-filtered scan is the one Nintendo's smart-device
+    // flow uses, and whether it can see this device is the open 0x180C question.
+    {
+        BtdrvAddress smart_address;
+
+        memset(&smart_address, 0, sizeof(smart_address));
+
+        if (!pocBtmScanPass(" (smart)", true, &scan_event, have_scan_event, &smart_address)) {
+            pocLog("btm probe: phase A smart scan reported no device");
+        } else if (!have_address) {
+            memcpy(address.address, smart_address.address, sizeof(address.address));
+            have_address = true;
+            pocSetMilestone(DGLAB_POC_MILESTONE_DEVICE_FOUND);
+        }
+    }
+
+    // Paired / auto-connection pass.
+    //
+    // This is the last precondition of the Nintendo-shaped flow that had never
+    // been tried: btm's own "scan for paired devices" is what arms auto
+    // connection for devices the console already knows (libnx wraps the btm:u
+    // form as btdevEnableBleAutoConnection). If the stack wants a known device
+    // before it establishes a link, this is where that shows up. The paired scan
+    // has no result list in libnx - it is the auto-connection path.
+    {
+        BtdrvBleAdvertisePacketParameter param;
+        u8 total = 0;
+
+        memset(&param, 0, sizeof(param));
+        param.company_id = POC_ADVERTISED_COMPANY_ID;
+
+        rc = btmStartBleScanForPaired(param);
+        pocLog("btm probe: StartBleScanForPaired(company=0x%04X) rc=0x%08X",
+            POC_ADVERTISED_COMPANY_ID, (u32)rc);
+
+        for (u32 i = 0; i < 6u && !pocStopRequested(); i++) {
+            pocBtEventsDrain("btm probe paired scan", 8u, NULL);
+            svcSleepThread(500000000ull); // 500ms
+        }
+
+        rc = btmStopBleScanForPaired();
+        pocLog("btm probe: StopBleScanForPaired rc=0x%08X", (u32)rc);
+
+        memset(g_btm_connections, 0, sizeof(g_btm_connections));
+        rc = btmBleGetConnectionState(g_btm_connections, 4u, &total);
+        pocLog("btm probe: connection state after paired scan rc=0x%08X total=%u", (u32)rc,
+            (unsigned)total);
+    }
+
+    // Connect only when a scan actually reported the device.
+    //
+    // It used to connect to the configured address even on a scan miss, copying
+    // what the applet probe does. That request is exactly what was still sitting
+    // in btm's worker when btm aborted on 2026-09-22 - the crash report's thread
+    // stack held this device address - so it is gone: a blind connect has no
+    // diagnostic value left (btm accepts it and does nothing) and it leaves btm
+    // holding work it cannot complete.
+    //
+    // The `bt` service is opened for this part on purpose: btm is the only
+    // client on this console with a connection context (btm's own registration
+    // fills the client slots - docs/ble-re.md), its connect is accepted, and the
+    // user-side channel is where an applet sees what the stack does with it. The
+    // btdrv side is deliberately NOT brought up here: doing that while btm has
+    // work in flight is the combination that aborted btm on 2026-09-22.
+    pocBtEventsOpen();
+    pocBtEventsDrain("btm probe before connect", 16u, NULL);
+
+    if (have_address) {
+        if (pocBtmConnectRetry("btm probe", &address, &handle)) {
+            pocBtmLogGatt("btm probe", handle);
+
+            // With the GATT table in hand, drive the device through the protocol
+            // layer for a few seconds: BF + a B0 stream (strength 0) and the B1
+            // answers, which is what a real transport has to do.
+            if (g_btm_proto_ready) {
+                pocBtmTransportStart(handle);
+                pocBtmTransportPump(3000u);
+                pocBtmTransportStop();
+            } else {
+                pocLog("btm probe: protocol coordinates missing, transport not started");
+            }
+
+            rc = btmBleDisconnect(handle);
+            pocLog("btm probe: BleDisconnect rc=0x%08X", (u32)rc);
+        } else {
+            pocBtmLogConnectionState("btm probe");
+            pocBtmLogClientCondition("btm probe");
+        }
+    } else if (g_poc.use_target_address) {
+        // The configured address is the one thing worth connecting to even
+        // without a scan hit: btm accepts the request (rc=0) and the user-side
+        // channel then shows whether the stack does anything with it. Reboot
+        // afterwards - btm keeps the request queued until it completes.
+        BtdrvAddress configured;
+
+        memset(&configured, 0, sizeof(configured));
+        memcpy(configured.address, g_poc.target_address, sizeof(configured.address));
+
+        pocLog("btm probe: no scan hit, connecting to the configured address anyway");
+
+        if (pocBtmConnectRetry("btm probe (configured)", &configured, &handle)) {
+            pocBtmLogGatt("btm probe (configured)", handle);
+
+            if (g_btm_proto_ready) {
+                pocBtmTransportStart(handle);
+                pocBtmTransportPump(3000u);
+                pocBtmTransportStop();
+            } else {
+                pocLog("btm probe: protocol coordinates missing, transport not started");
+            }
+
+            rc = btmBleDisconnect(handle);
+            pocLog("btm probe (configured): BleDisconnect rc=0x%08X", (u32)rc);
+        } else {
+            pocBtmLogConnectionState("btm probe (configured)");
+            pocBtmLogClientCondition("btm probe (configured)");
+
+            // The 2026-09-24 runs show a second precondition beyond the client
+            // activation gate: the same connect succeeded in the boot where the
+            // driver-level probe (D-pad Left) had run first - it calls
+            // btdrvInitializeBle + btdrvEnableBle, i.e. it turns the BLE stack on
+            // - and failed with this same event when the btm probe ran alone.
+            pocLog("btm probe: connect failed; if this is a fresh boot, run the "
+                   "D-pad Left probe first (it enables the BLE stack), then retry");
+        }
+    } else {
+        pocLog("btm probe: no scan hit and no configured address, connect skipped");
+    }
+
+    pocBtEventsDrain("btm probe after connect", 32u, NULL);
+    pocBtEventsClose();
+
+    if (have_scan_event)
+        eventClose(&scan_event);
+
+    btmExit();
+
+    pocLog("btm probe: done");
 }
 
 // btm:u requests with the applet's ARUID.
@@ -1892,6 +3476,14 @@ static bool pocHandleAction(PocWorker* w, u32 action)
             w->restart_scan = true;
             return true;
 
+        case DglabPocAction_ProbeBtmBle:
+            // Runs before the session touches bt/btm:u/btdrv at all, so the btm
+            // service sees a console state this run did not modify.
+            pocLog("action: base btm BLE probe");
+            w->probe_btm = true;
+            w->restart_scan = true;
+            return true;
+
         case DglabPocAction_ScanWithCommonCompany:
             pocLog("action: control scan with a common company ID");
             w->forced_filter = POC_FILTER_CONTROL_COMPANY;
@@ -2006,6 +3598,31 @@ static void pocThreadFunc(void* arg)
 
     pocSetState(DglabPocState_Initializing);
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
+    // Printed by every session so a log says which sysmodule build produced it;
+    // the probe versions below only appear when their key is pressed.
+    pocLog("poc build: ble_poc v18 (base btm probe on StickR)");
+
+    // The NRO sends START and the first ACTION back to back, so give that action
+    // a moment to arrive before anything is opened or scanned. Collecting the
+    // actions before btdevInitialize also lets the base-btm probe below run
+    // before the session has opened bt, btm:u or btdrv at all.
+    svcSleepThread(300000000ull); // 300ms
+
+    bool any_action = false;
+    while (pocTakeAction(w, &action)) {
+        any_action = true;
+        pocHandleAction(w, action);
+    }
+
+    // The base-btm probe owns the whole session: it must see the console the way
+    // it is before this project touched Bluetooth (btm and the BLE manager keep
+    // per-session state, docs/ble-poc.md), and there is nothing for the scan
+    // loop to add to a btm answer. So it runs first, and the session ends here.
+    if (w->probe_btm) {
+        w->probe_btm = false;
+        pocRunBtmBleProbe(w);
+        goto out;
+    }
 
     rc = btdevInitialize();
     pocLog("btdevInitialize rc=0x%08X", (u32)rc);
@@ -2029,22 +3646,12 @@ static void pocThreadFunc(void* arg)
         w->forced_filter = (u16)g_poc.start_scan_filter;
     }
 
-    // The NRO sends START and the first ACTION back to back, so give that action
-    // a moment to arrive before the first scan starts.
-    //
     // The driver-level scan probe is no longer automatic: it calls
     // btdrvInitializeBle, and the BLE manager binds its internal connection to
     // the session that did that - once that session ends, every later BLE-side
     // command answers 0xF601 (KernelError_ConnectionClosed), which is what the
     // 2026-09-21 hardware logs in docs/ble-poc.md show. The Left key still runs
     // it on demand.
-    svcSleepThread(300000000ull); // 300ms
-
-    bool any_action = false;
-    while (pocTakeAction(w, &action)) {
-        any_action = true;
-        pocHandleAction(w, action);
-    }
 
     if (w->probe_identity) {
         w->probe_identity = false;
@@ -2075,6 +3682,17 @@ static void pocThreadFunc(void* arg)
         while (pocTakeAction(w, &action)) {
             if (pocHandleAction(w, action))
                 break;
+        }
+
+        if (w->probe_btm) {
+            // The base-btm probe has to be the first Bluetooth access of its
+            // session, and this one has already opened bt/btm:u and scanned.
+            // Rather than read a state this run dirtied, ask for a fresh
+            // session: the NRO starts one with the probes skipped when StickR is
+            // pressed on the idle screen.
+            w->probe_btm = false;
+            pocLog("btm probe: needs a fresh session, press StickR on the idle screen");
+            continue;
         }
 
         if (w->probe_btdrv) {

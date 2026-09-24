@@ -151,11 +151,20 @@ static void testRequestPayloads(void)
 {
     const DglabPocStartRequest start = { .applet_resource_user_id = 0x0123456789ABCDEFull };
     const DglabPocActionRequest action = { .action = DglabPocAction_WriteZeroB0 };
+    // The newest action value. It is an additive change (same 8-byte action
+    // word), and the round trip pins the value: an action number that moves
+    // silently breaks a console still running the previous NRO.
+    const DglabPocActionRequest btm_action = { .action = DglabPocAction_ProbeBtmBle };
     const DglabPocLogRequest log = { .cursor = 0x00001234u };
 
     checkRequestRoundTrip("start", DGLAB_IPC_POC_CMD_START, &start, sizeof(start));
     checkRequestRoundTrip("action", DGLAB_IPC_POC_CMD_ACTION, &action, sizeof(action));
+    checkRequestRoundTrip("action btm", DGLAB_IPC_POC_CMD_ACTION, &btm_action,
+        sizeof(btm_action));
     checkRequestRoundTrip("log", DGLAB_IPC_POC_CMD_LOG, &log, sizeof(log));
+
+    CHECK(DglabPocAction_ScanWithCommonCompany == 13);
+    CHECK(DglabPocAction_ProbeBtmBle == 14);
 }
 
 // A command without a payload must not satisfy a check for one, otherwise the
