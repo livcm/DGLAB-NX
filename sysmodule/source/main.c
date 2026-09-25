@@ -286,6 +286,20 @@ static bool dglabHandleRequest(void)
             dglabMakeResponse(CmifCommandType_Request, token, 0, &status, sizeof(status));
             break;
         }
+        case DGLAB_IPC_CMD_BLE_LIMIT: {
+            DglabBleLimitRequest request = { 0 };
+
+            if (!dglabRequestHasPayload(parsed.meta.num_data_words, sizeof(request))) {
+                dglabMakeResponse(CmifCommandType_Request, token,
+                    MAKERESULT(Module_Libnx, LibnxError_BadInput), NULL, 0);
+                break;
+            }
+
+            memcpy(&request, dglabRequestPayload(in), sizeof(request));
+            dglabMakeResponse(CmifCommandType_Request, token,
+                blePocSessionSetSoftLimit(request.soft_limit), NULL, 0);
+            break;
+        }
 
         // Temporary BLE transport PoC commands, see common/include/dglab/ipc_poc.h.
         case DGLAB_IPC_POC_CMD_START: {

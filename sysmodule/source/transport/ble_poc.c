@@ -490,6 +490,8 @@ static bool g_ble_waveform_pending;
 static DglabNetWaveformRequest g_ble_waveform;
 static PocBleStrengthOp g_ble_strength[POC_BLE_STRENGTH_QUEUE];
 static u32 g_ble_strength_count;
+static bool g_ble_limit_pending;
+static u32 g_ble_limit;
 static u8 g_managed_last[0x50];
 
 // The other two queues btdrv keeps: the LE HID one and the general one. Both are
@@ -1221,12 +1223,23 @@ static void pocBleSessionApplyInputs(void)
     DglabNetWaveformRequest waveform;
     PocBleStrengthOp ops[POC_BLE_STRENGTH_QUEUE];
     u32 count = 0u;
+    u32 limit = 0u;
     bool have_waveform = false;
+    bool have_limit = false;
 
     memset(&waveform, 0, sizeof(waveform));
     memset(ops, 0, sizeof(ops));
 
     mutexLock(&g_ble_mutex);
+
+    if (g_ble_limit_pending) {
+        limit = g_ble_limit;
+        have_limit = true;
+        g_ble_limit_pending = false;
+        // Take it into the session state here: everything below that clamps a
+        // strength reads this, and it has to already be the new ceiling.
+        g_ble_soft_limit = limit;
+    }
 
     if (g_ble_waveform_pending) {
         waveform = g_ble_waveform;
@@ -1244,6 +1257,12 @@ static void pocBleSessionApplyInputs(void)
 
     g_ble_strength_count = 0u;
     mutexUnlock(&g_ble_mutex);
+
+    // The new ceiling goes out first: it is what caps the strength applied below.
+    if (have_limit) {
+        pocLog("ble session: soft limit -> %u", (unsigned)limit);
+        pocBtmTransportSetSoftLimits((u8)limit);
+    }
 
     if (have_waveform) {
         DglabCoyoteV3WaveformEntry entries[DGLAB_NET_WAVEFORM_MAX_SLOTS];
@@ -1424,6 +1443,7 @@ Result blePocSessionStart(const DglabBleStartRequest* request)
     memcpy(g_ble_status.address, request->address, sizeof(g_ble_status.address));
     g_ble_status.state = DglabBleState_Connecting;
     g_ble_waveform_pending = false;
+    g_ble_limit_pending = false;
     g_ble_strength_count = 0u;
 
     mutexUnlock(&g_ble_mutex);
@@ -1533,6 +1553,27 @@ Result blePocSessionSend(const DglabNetSendRequest* request)
 
     if (g_ble_active && g_ble_strength_count < POC_BLE_STRENGTH_QUEUE)
         g_ble_strength[g_ble_strength_count++] = op;
+
+    mutexUnlock(&g_ble_mutex);
+    return 0;
+}
+
+Result blePocSessionSetSoftLimit(u32 soft_limit)
+{
+    if (soft_limit > 200u)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    mutexLock(&g_ble_mutex);
+
+    if (!g_ble_active) {
+        mutexUnlock(&g_ble_mutex);
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    }
+
+    // Staged like the strength ops: the worker is the only thread that may touch
+    // the transport, so the new ceiling is applied between its pump steps.
+    g_ble_limit = soft_limit;
+    g_ble_limit_pending = true;
 
     mutexUnlock(&g_ble_mutex);
     return 0;

@@ -31,7 +31,7 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 ## 版本
 
 `GET_VERSION` 返回的号来自 `common/include/dglab/ipc.h` 的
-`DGLAB_IPC_PROTOCOL_VERSION`（打包值 `0x000201u`），当前是 `0.2.1`。它是 **IPC 接口
+`DGLAB_IPC_PROTOCOL_VERSION`（打包值 `0x000202u`），当前是 `0.2.2`。它是 **IPC 接口
 版本**，`GET_VERSION` 是它唯一的出口（不进任何配置文件）。发行版本号是另一回事：
 它属于 NRO 的 NACP 与 About 页，也写进 sysmodule 安装目录的 `toolbox.json` 的
 `version` 字段，单一来源是仓库根 `VERSION`（见 `nro/AGENTS.md` 的"元信息与版本"、
@@ -42,6 +42,7 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 | 0.1.0 | `GET_VERSION`、`PING` |
 | 0.2.0 | 增加 `NET_*`（Wi-Fi + WebSocket 传输） |
 | 0.2.1 | 增加 `BLE_*`（sysmodule 直连设备；强度与波形仍走 `NET_SEND` / `NET_WAVEFORM`） |
+| 0.2.2 | 增加 `BLE_LIMIT`（会话运行时改软上限） |
 
 ## 命令表
 
@@ -59,6 +60,7 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 | `BLE_START` | 9 | `DglabBleStartRequest` | — | 启动 **BLE 会话**：sysmodule 自己连设备并驱动它（见下） |
 | `BLE_STOP` | 10 | — | — | 停止 BLE 会话（收尾会先写 BF=0 再把两通道归零） |
 | `BLE_STATUS` | 11 | — | `DglabBleStatus` | BLE 会话状态快照（**开环**：强度是"我们请求过多少"） |
+| `BLE_LIMIT` | 12 | `DglabBleLimitRequest` | — | 会话运行中改软上限（BF）；没有会话时被拒——那一路由 `BLE_START` 带 |
 
 ## BLE_*（sysmodule 直连设备）
 
@@ -70,6 +72,11 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 **强度与波形沿用 Socket 模式那两个命令**（`NET_SEND` 的 `SetStrength` / `IncreaseStrength`
 / `DecreaseStrength`，以及 `NET_WAVEFORM`），BLE 会话激活时它们被路由到本地协议层而不是
 转发给 App——所以玩法的代码不需要为 BLE 改一行。
+
+`BLE_LIMIT` 是**会话运行中**改那个上限的办法（0.2.2 加的）。上限在 `BLE_START` 里带一次，
+但页面上的键是"随时可调"的：不补这一条，改完只有行在动、设备还停在上限 0 上，屏幕上则完全
+看不出区别（2026-09-26 那轮就是这样：会话连上、GATT 齐全、写了 172 包，BF 却是 `0000`，
+设备当然一点输出都没有）。上限一变，强度请求也跟着按新值夹紧。
 
 三条已知限制（都来自实机结论，见 `docs/ble-re.md`）：
 

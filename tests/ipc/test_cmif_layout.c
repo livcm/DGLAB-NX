@@ -178,18 +178,21 @@ static void testRequestPayloads(void)
             .channel = 1u,
             .value = 5u,
         };
+        const DglabBleLimitRequest limit = { .soft_limit = 30u };
 
         checkRequestRoundTrip("ble start", DGLAB_IPC_CMD_BLE_START, &ble, sizeof(ble));
         checkRequestRoundTrip("strength", DGLAB_IPC_CMD_NET_SEND, &strength,
             sizeof(strength));
+        checkRequestRoundTrip("ble limit", DGLAB_IPC_CMD_BLE_LIMIT, &limit, sizeof(limit));
     }
 
     CHECK(DGLAB_IPC_CMD_BLE_START == 9);
     CHECK(DGLAB_IPC_CMD_BLE_STOP == 10);
     CHECK(DGLAB_IPC_CMD_BLE_STATUS == 11);
+    CHECK(DGLAB_IPC_CMD_BLE_LIMIT == 12);
     // The version a client sees: the BLE commands are an additive change, so the
     // minor moves and the major stays.
-    CHECK(DGLAB_IPC_PROTOCOL_VERSION == 0x000201u);
+    CHECK(DGLAB_IPC_PROTOCOL_VERSION == 0x000202u);
 }
 
 // A command without a payload must not satisfy a check for one, otherwise the

@@ -1647,6 +1647,66 @@ static bool bleStateIsActive(u32 state)
     return state == DglabBleState_Connecting || state == DglabBleState_Connected;
 }
 
+// One step of the ceiling. A running session keeps its own copy of it, so the
+// move has to be sent as well - otherwise the row moves and the device stays
+// where it was, which is exactly how the 2026-09-26 run ended up streaming with
+// soft limit 0 and no output at all.
+static void bleStepSoftLimit(Service* dglab, DglabBlePageState* state, int delta)
+{
+    int next = (int)state->soft_limit + delta;
+
+    if (next < (int)TEST_STRENGTH_MIN)
+        next = (int)TEST_STRENGTH_MIN;
+
+    if (next > (int)TEST_STRENGTH_MAX)
+        next = (int)TEST_STRENGTH_MAX;
+
+    if ((u32)next == state->soft_limit)
+        return;
+
+    state->soft_limit = (u32)next;
+
+    if (bleStateIsActive(state->status.state)) {
+        DglabBleLimitRequest request = { 0 };
+
+        request.soft_limit = state->soft_limit;
+        serviceDispatchIn(dglab, DGLAB_IPC_CMD_BLE_LIMIT, request);
+    }
+}
+
+// Holding up or down walks the ceiling the same way the strength keys walk a
+// strength (TEST_STRENGTH_HOLD_NS then TEST_STRENGTH_REPEAT_NS): 0..100 at one
+// step per press is a lot of presses, and a tap still lands exactly one step.
+static u64 g_ble_limit_hold_started_ns;
+static u64 g_ble_limit_last_repeat_ns;
+
+static void bleRepeatSoftLimit(Service* dglab, DglabBlePageState* state, u64 held, u64 now_ns)
+{
+    if (!(held & (HidNpadButton_Up | HidNpadButton_Down))) {
+        g_ble_limit_hold_started_ns = 0;
+        return;
+    }
+
+    if (g_ble_limit_hold_started_ns == 0) {
+        // 0 doubles as "not held", so a clock that reads 0 still starts a hold.
+        g_ble_limit_hold_started_ns = now_ns ? now_ns : 1u;
+        g_ble_limit_last_repeat_ns = 0;
+        return;
+    }
+
+    if (now_ns - g_ble_limit_hold_started_ns < TEST_STRENGTH_HOLD_NS)
+        return;
+
+    if (g_ble_limit_last_repeat_ns != 0 &&
+        now_ns - g_ble_limit_last_repeat_ns < TEST_STRENGTH_REPEAT_NS)
+        return;
+
+    g_ble_limit_last_repeat_ns = now_ns;
+
+    bleStepSoftLimit(dglab, state, (held & HidNpadButton_Up) ? (int)TEST_STRENGTH_STEP
+                                                             : -(int)TEST_STRENGTH_STEP);
+}
+
 // The Bluetooth page. Starting is two steps because the transport needs two:
 // the driver-level probe brings the stack up (it is the only thing that may call
 // InitializeBle/EnableBle, docs/history.md §28), and the session then connects
@@ -1687,20 +1747,15 @@ static void runBleView(Service* dglab, PadState* pad)
         }
 
         // Up and down set the ceiling the device enforces; the row shows it, so
-        // there is no hint for it in the bottom bar.
-        if (down & HidNpadButton_Up) {
-            state.soft_limit += TEST_STRENGTH_STEP;
+        // there is no hint for it in the bottom bar. The press lands one step and
+        // holding walks the value, and a running session follows immediately.
+        if (down & HidNpadButton_Up)
+            bleStepSoftLimit(dglab, &state, (int)TEST_STRENGTH_STEP);
 
-            if (state.soft_limit > TEST_STRENGTH_MAX)
-                state.soft_limit = TEST_STRENGTH_MAX;
-        }
+        if (down & HidNpadButton_Down)
+            bleStepSoftLimit(dglab, &state, -(int)TEST_STRENGTH_STEP);
 
-        if (down & HidNpadButton_Down) {
-            if (state.soft_limit > TEST_STRENGTH_MIN)
-                state.soft_limit -= TEST_STRENGTH_STEP;
-            else
-                state.soft_limit = TEST_STRENGTH_MIN;
-        }
+        bleRepeatSoftLimit(dglab, &state, padGetButtons(pad), armTicksToNs(armGetSystemTick()));
 
         if (down & HidNpadButton_X)
             serviceDispatch(dglab, DGLAB_IPC_CMD_BLE_STOP);

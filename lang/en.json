@@ -142,7 +142,7 @@
     "ble_soft_limit": "Soft limit",
     "ble_strength": "Strength asked for",
     "ble_packets": "Packets sent",
-    "ble_open_loop": "Open loop: the device never reports back on this firmware, so the strength above is the value this side asked for. The soft limit is enforced by the device itself.",
-    "ble_procedure": "Starting runs the two steps the transport needs: the driver-level step brings the Bluetooth stack up, then the session connects. Needs the exefs patch, and the console should be rebooted before the socket mode is used again."
+    "ble_open_loop": "Open loop: the device never reports back on this firmware, so the strength above is the value this side asked for. The soft limit is enforced by the device itself - at 0 nothing can come out, whatever the strength says. Up and down move it, and a running session follows.",
+    "ble_procedure": "Starting runs the two steps the transport needs: the driver-level step brings the Bluetooth stack up, then the session connects. Needs the exefs patch. One BLE path per boot: reboot before the next attempt. Socket mode is not affected - stop the session and the gameplay pages drive the App again."
   }
 }

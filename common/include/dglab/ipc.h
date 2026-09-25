@@ -12,7 +12,7 @@
 //
 // This is the interface version, not the application's release version (that
 // one lives in the NRO's NACP, see AGENTS.md priority 13).
-#define DGLAB_IPC_PROTOCOL_VERSION 0x000201u
+#define DGLAB_IPC_PROTOCOL_VERSION 0x000202u
 
 // Commands implemented by the sysmodule. Command IDs are part of the public IPC
 // contract and must not be renumbered once released.
@@ -34,6 +34,12 @@ enum {
     DGLAB_IPC_CMD_BLE_START   = 9,  // in: DglabBleStartRequest
     DGLAB_IPC_CMD_BLE_STOP    = 10, // no payload
     DGLAB_IPC_CMD_BLE_STATUS  = 11, // out: DglabBleStatus
+    // Changes the ceiling while the session runs. The keys on the page are live,
+    // so a client does not have to stop and start the session (which would drop
+    // the link and, on this firmware, spend another BLE path) just to move it.
+    // Without a running session there is nothing to move: the start request
+    // carries the value.
+    DGLAB_IPC_CMD_BLE_LIMIT   = 12, // in: DglabBleLimitRequest
 };
 
 // Value returned by DGLAB_IPC_CMD_PING. Keeping this stable gives clients a
@@ -220,3 +226,9 @@ typedef struct {
     u8 strength_b;
     u8 pad[3];
 } DglabBleStatus;
+
+typedef struct {
+    /// The new ceiling (BF soft limit, 0..200). Out of range is rejected rather
+    /// than clamped: a client that asks for 0xFFFFFFFF wants to know.
+    u32 soft_limit;
+} DglabBleLimitRequest;

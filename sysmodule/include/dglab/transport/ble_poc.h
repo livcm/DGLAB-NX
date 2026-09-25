@@ -72,3 +72,9 @@ Result blePocSessionUploadWaveform(const DglabNetWaveformRequest* request);
 // is what the gameplay sends (docs/dglab-socket.md), and it is applied to the
 // local session instead of being forwarded to a phone.
 Result blePocSessionSend(const DglabNetSendRequest* request);
+
+// Moves the session's ceiling (0..200). The worker writes the new BF soft limit
+// on its next step, so a running session follows immediately and strength the
+// caller asks for afterwards is clamped to the new value. Rejected while no
+// session is running - the start request is what sets it for a fresh session.
+Result blePocSessionSetSoftLimit(u32 soft_limit);

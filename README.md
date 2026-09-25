@@ -185,6 +185,8 @@ BLE PoC 与启动出错提示——有效）。菜单有 7 项：`socket server`
 `motion (Joy-Con)`、`touch (screen)`、`advanced (motion)`、`about`、`BLE PoC console`。
 其中 **bluetooth (direct)** 是 BLE 模式的正式入口（起会话、看状态、调软上限；玩法页照旧用，
 数据会自动走 sysmodule 的 BLE 会话；见 `docs/ble-poc.md` 与 `docs/ipc.md` 的 `BLE_*`）。
+`↑`/`↓`（按住连发）改的是**软上限**：设备侧强制的输出天花板，默认 0，而 0 就是"设备不会有
+任何输出"——连上却一点感觉都没有，先看这一行。会话跑着改也立即生效。
 它有两条规矩：需要 exefs 补丁；**一个开机周期只走一条 BLE 路径**，跑完想再连一次（或再跑
 探针实验）就先重启。重启用在 BLE 那条路上——BT 栈/btm 被我们动过，混着来会崩整机；
 Socket 模式是手机连设备、Switch 只当 WebSocket 服务端，不碰这些，停掉会话后数据就自动回到
