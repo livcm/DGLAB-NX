@@ -70,6 +70,16 @@ typedef struct {
 
     uint8_t strength_max; ///< 0..100 waveform strength at full scale
 
+    // The device's channel strength ceilings (the BF command's 强度软上限),
+    // 0..200 on the device but 0..100 here because that is the whole strength
+    // range this front end dials. They are NOT strengths: the strength is what
+    // a page dials and the ceiling is the cap it may not pass, one variable per
+    // channel. The motion feed itself never reads them - they ride in this
+    // struct because this is the config the parameters page edits and the BLE
+    // transport sends (see motion_settings.h).
+    uint8_t channel_limit_a;
+    uint8_t channel_limit_b;
+
     // Whether the pulse interval follows the level, which is what the motion mode
     // wants: a harder swing is also a denser one. A mode that names its own
     // targets (dglabMotionFeedSetTarget below - the touch mode, whose density is

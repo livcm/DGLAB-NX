@@ -244,6 +244,51 @@ static void testBadLinesAreIgnored(void)
     CHECK(config.strength_max == 100);       // out of range: clamped, not rejected
 }
 
+// The two channel strength ceilings ride in the same config as the motion
+// parameters, so they have to step, format and serialise like the rest - and 0
+// has to stay reachable, because a ceiling of 0 is what makes a channel unable
+// to pulse at all (docs/ipc.md, BLE_START).
+static void testChannelLimits(void)
+{
+    DglabMotionFeedConfig config;
+    DglabMotionFeedConfig read;
+    char text[512];
+    char value[32];
+
+    dglabMotionSettingsDefault(&config);
+
+    CHECK(config.channel_limit_a == 100);
+    CHECK(config.channel_limit_b == 100);
+
+    for (int i = 0; i < 120; i++)
+        dglabMotionSettingsStep(&config, DglabMotionSetting_ChannelLimitA, -1);
+
+    CHECK(config.channel_limit_a == 0);
+
+    dglabMotionSettingsStep(&config, DglabMotionSetting_ChannelLimitB, -1);
+    CHECK(config.channel_limit_b == 99);
+
+    // A strength, not a duration: no "ms" suffix, unlike the frequency rows.
+    dglabMotionSettingsFormat(&config, DglabMotionSetting_ChannelLimitB, value, sizeof(value));
+    CHECK(strcmp(value, "99") == 0);
+
+    dglabMotionSettingsSerialize(&config, text, sizeof(text));
+    CHECK(strstr(text, "channel_limit_a=0\n") != NULL);
+    CHECK(strstr(text, "channel_limit_b=99\n") != NULL);
+
+    dglabMotionSettingsDefault(&read);
+    dglabMotionSettingsParse(&read, text);
+    CHECK(read.channel_limit_a == 0);
+    CHECK(read.channel_limit_b == 99);
+
+    // A file written before the ceilings existed leaves both at their default:
+    // the A one stays at 0 and the B one at 99, which is what the config already
+    // had - "no key" means "keep what I have", not "reset to 100".
+    dglabMotionSettingsParse(&read, "strength_max=90\n");
+    CHECK(read.channel_limit_a == 0);
+    CHECK(read.channel_limit_b == 99);
+}
+
 int main(void)
 {
     testDefaultsMatchTheMode();
@@ -254,6 +299,7 @@ int main(void)
     testFileRoundTrip();
     testOlderFileLeavesTheNewKeysAlone();
     testBadLinesAreIgnored();
+    testChannelLimits();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
 

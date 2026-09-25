@@ -32,6 +32,12 @@ static const SettingRange kRanges[DglabMotionSetting_Count] = {
     { "density_fixed", "density", 0.0f, 1.0f, 1.0f, 0 },
     { "frequency_fixed_ms", "fixed density", 10.0f, 500.0f, 5.0f, 0 },
     { "strength_max", "strength max", 1.0f, 100.0f, 1.0f, 0 },
+    // The device's channel strength ceilings. They are not waveform values: the
+    // device multiplies channel strength and waveform strength, and the ceiling
+    // caps the channel strength - which is why the top end is this front end's
+    // own strength range (0..100), not the device's 0..200.
+    { "channel_limit_a", "channel limit A", 0.0f, 100.0f, 1.0f, 0 },
+    { "channel_limit_b", "channel limit B", 0.0f, 100.0f, 1.0f, 0 },
 };
 
 // Only these are milliseconds. The strength ceiling is a plain 0..100 number, and
@@ -105,6 +111,8 @@ static float settingValue(const DglabMotionFeedConfig* config, unsigned setting)
         case DglabMotionSetting_FrequencyStill: return (float)config->frequency_still_ms;
         case DglabMotionSetting_FrequencyFixed: return (float)config->frequency_fixed_ms;
         case DglabMotionSetting_StrengthMax: return (float)config->strength_max;
+        case DglabMotionSetting_ChannelLimitA: return (float)config->channel_limit_a;
+        case DglabMotionSetting_ChannelLimitB: return (float)config->channel_limit_b;
         default: return 0.0f;
     }
 }
@@ -159,6 +167,12 @@ static void setSetting(DglabMotionFeedConfig* config, unsigned setting, float va
                 break;
             case DglabMotionSetting_StrengthMax:
                 config->strength_max = (uint8_t)(value + 0.5f);
+                break;
+            case DglabMotionSetting_ChannelLimitA:
+                config->channel_limit_a = (uint8_t)(value + 0.5f);
+                break;
+            case DglabMotionSetting_ChannelLimitB:
+                config->channel_limit_b = (uint8_t)(value + 0.5f);
                 break;
             default:
                 break;
@@ -271,6 +285,12 @@ const char* dglabMotionSettingDescription(unsigned setting)
         case DglabMotionSetting_StrengthMax:
             return "The waveform strength at full intensity, on top of the channel strength set "
                    "in Socket test. The device multiplies the two.";
+        case DglabMotionSetting_ChannelLimitA:
+        case DglabMotionSetting_ChannelLimitB:
+            return "The most this channel's strength may be. The device enforces it, and it is "
+                   "not the strength itself: the strength is what the pages dial up and down, "
+                   "this is the cap it stops at. 0 leaves the device unable to pulse on that "
+                   "channel, whatever the strength says.";
         default:
             return "";
     }

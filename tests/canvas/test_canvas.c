@@ -478,6 +478,8 @@ static const DglabString kSettingNameKeys[DglabMotionSetting_Count] = {
     [DglabMotionSetting_FrequencyFast] = DglabString_SetFrequencyFast,
     [DglabMotionSetting_FrequencyStill] = DglabString_SetFrequencyStill,
     [DglabMotionSetting_StrengthMax] = DglabString_SetStrengthMax,
+    [DglabMotionSetting_ChannelLimitA] = DglabString_SetChannelLimitA,
+    [DglabMotionSetting_ChannelLimitB] = DglabString_SetChannelLimitB,
 };
 
 static void testAdvancedScreen(void)
@@ -1728,7 +1730,7 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
         // what makes one page taller than the other.
         {
             static const unsigned settings[] = { DglabMotionSetting_DeadzoneEnter,
-                DglabMotionSetting_StrengthMax };
+                DglabMotionSetting_ChannelLimitB };
             DglabAdvancedState advanced;
 
             for (size_t i = 0; i < sizeof(settings) / sizeof(settings[0]); i++) {
@@ -1775,15 +1777,18 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
         }
 
         // The Bluetooth page: idle with no device known, streaming with a
-        // device, strengths and a packet count (scrolled), and the header when
-        // the sysmodule cannot be reached.
+        // device, the channel strength ceilings and strengths (scrolled), and
+        // the header when the sysmodule cannot be reached.
         for (unsigned variant = 0; variant < 3; variant++) {
             DglabBlePageState ble;
             char name[96];
 
             memset(&ble, 0, sizeof(ble));
             ble.sysmodule_ok = variant < 2;
-            ble.soft_limit = 20u;
+            ble.limit_a = 20u;
+            ble.limit_b = 100u;
+            ble.strength_a = 5u;
+            ble.strength_b = 0u;
 
             if (variant == 1) {
                 ble.status.state = DglabBleState_Connected;
@@ -1802,6 +1807,28 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             snprintf(name, sizeof(name), "%s ble %u", frames, variant);
             beginPage(&canvas, blue);
             dglabBleDraw(&canvas, fonts, &ble);
+            checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
+        }
+
+        // The Bluetooth page's log sub-page (Y): the sysmodule log page's layout
+        // with this session's title, scrolled to the end of a ring that is full.
+        {
+            static const char* lines[DGLAB_SCREEN_LOG_LINES];
+            DglabLogPage log;
+            char name[96];
+
+            for (int i = 0; i < DGLAB_SCREEN_LOG_LINES; i++)
+                lines[i] = "btm transport: write 20 byte(s) B000000064646464000F1E0F000000";
+
+            log.title = dglabString(DglabString_BleLogTitle);
+            log.lines = lines;
+            log.count = DGLAB_SCREEN_LOG_LINES;
+            log.offset = dglabLogPageMaxOffset(DGLAB_SCREEN_LOG_LINES);
+            log.sysmodule_ok = true;
+
+            snprintf(name, sizeof(name), "%s ble log", frames);
+            beginPage(&canvas, blue);
+            dglabLogPageDraw(&canvas, fonts, &log);
             checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
         }
     }

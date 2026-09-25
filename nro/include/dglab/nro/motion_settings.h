@@ -27,6 +27,12 @@ typedef enum {
     DglabMotionSetting_DensityFixed,   ///< waveform density: variable or fixed
     DglabMotionSetting_FrequencyFixed, ///< the interval while it is fixed
     DglabMotionSetting_StrengthMax,    ///< waveform strength at full intensity
+    // The two channel strength ceilings. They are not motion parameters: they
+    // belong to the device (the BF command's 强度软上限) and the BLE transport
+    // sends them. They live on this page because it is the one page that edits
+    // the shared config both gameplay modes and the BLE session read.
+    DglabMotionSetting_ChannelLimitA, ///< ceiling of channel A, 0..100
+    DglabMotionSetting_ChannelLimitB, ///< ceiling of channel B, 0..100
     DglabMotionSetting_Count,
 } DglabMotionSetting;
 

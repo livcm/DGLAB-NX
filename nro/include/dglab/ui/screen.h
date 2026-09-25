@@ -82,6 +82,27 @@ typedef struct {
     int log_offset;
 } DglabScreenState;
 
+/// One log sub-page: the ring of lines a page collected, the row it is scrolled
+/// to, and the title over it. The socket page shows the sysmodule log and the
+/// Bluetooth page shows the BLE session log - the same page with a different
+/// title, drawn by the same code so the two cannot drift apart.
+typedef struct {
+    const char* title;
+    const char* const* lines;
+    int count;
+    /// The first line the page shows; 0 is the oldest, and the caller clamps it
+    /// with dglabLogPageMaxOffset().
+    int offset;
+    bool sysmodule_ok; ///< the header's status line, like every other page
+} DglabLogPage;
+
+/// How far a log of `count` lines can scroll, in pixels: 0 while it fits.
+int dglabLogPageMaxOffset(int count);
+
+/// Draws one log sub-page. Up and down scroll it, so the bar on the right edge
+/// is the only hint - the same rule every scrollable page follows.
+void dglabLogPageDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabLogPage* page);
+
 void dglabScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     const DglabScreenState* state);
 

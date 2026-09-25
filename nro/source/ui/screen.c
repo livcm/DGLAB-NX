@@ -354,33 +354,43 @@ static void drawSocketPage(DglabCanvas* canvas, const DglabFontSet* fonts,
     dglabPageHints(canvas, fonts->icon, fonts->body, hints, 5);
 }
 
+int dglabLogPageMaxOffset(int count)
+{
+    int view_height = DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP;
+    int content_height = count * DGLAB_SCREEN_LOG_PITCH;
+
+    return content_height > view_height ? content_height - view_height : 0;
+}
+
 // The log page: the console's long text look - white body text at a 37px pitch -
 // scrolled with up and down. The newest line is at the bottom when it opens.
-static void drawLogPage(DglabCanvas* canvas, const DglabFontSet* fonts,
-    const DglabScreenState* state)
+// Both the socket page (the sysmodule log) and the Bluetooth page (the session
+// log) show one, so it takes its content and its title and knows nothing about
+// either.
+void dglabLogPageDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabLogPage* log)
 {
     const DglabTheme* theme = dglabThemeGet();
     DglabTextStyle title = { fonts->title, theme->text };
     DglabListPage page;
     DglabHint hints[2];
     int view_height = DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP;
-    int content_height = state->log_count * DGLAB_SCREEN_LOG_PITCH;
+    int content_height = log->count * DGLAB_SCREEN_LOG_PITCH;
 
     // The page is a list of lines rather than of rows, but it scrolls like one:
     // the same layout decides how far the offset may go and whether the bar is
     // drawn at all.
     page = dglabListPageLayout(DGLAB_PAGE_CONTENT_TOP, view_height, content_height,
-        state->log_offset);
+        log->offset);
 
     dglabPageBegin(canvas);
-    dglabPageHeader(canvas, &title, dglabString(DglabString_LogTitle));
-    dglabPageHeaderStatus(canvas, fonts->value, state->sysmodule_ok);
+    dglabPageHeader(canvas, &title, log->title);
+    dglabPageHeaderStatus(canvas, fonts->value, log->sysmodule_ok);
     dglabPageClipContent(canvas);
 
-    for (int i = 0; i < state->log_count; i++) {
+    for (int i = 0; i < log->count; i++) {
         int y = DGLAB_PAGE_CONTENT_TOP - page.offset + i * DGLAB_SCREEN_LOG_PITCH;
 
-        dglabTextDraw(canvas, fonts->body, DGLAB_PAGE_CONTENT_X, y, state->log_lines[i],
+        dglabTextDraw(canvas, fonts->body, DGLAB_PAGE_CONTENT_X, y, log->lines[i],
             theme->text);
     }
 
@@ -395,6 +405,20 @@ static void drawLogPage(DglabCanvas* canvas, const DglabFontSet* fonts,
     hints[1] = (DglabHint){ DglabButton_B, DglabButton_None,
         dglabString(DglabString_ActionBack), };
     dglabPageHints(canvas, fonts->icon, fonts->body, hints, 2);
+}
+
+static void drawLogPage(DglabCanvas* canvas, const DglabFontSet* fonts,
+    const DglabScreenState* state)
+{
+    DglabLogPage log;
+
+    log.title = dglabString(DglabString_LogTitle);
+    log.lines = state->log_lines;
+    log.count = state->log_count;
+    log.offset = state->log_offset;
+    log.sysmodule_ok = state->sysmodule_ok;
+
+    dglabLogPageDraw(canvas, fonts, &log);
 }
 
 void dglabScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,

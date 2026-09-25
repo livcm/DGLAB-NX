@@ -5,12 +5,19 @@
 #include <dglab/ui/theme.h>
 
 #include <stdio.h>
+#include <string.h>
 
 // The rows the page is made of: what the session is doing, which device it is
-// talking to, and the two numbers this side controls or tracks. The two notes
-// under them say the things the rows cannot: that the strength is what we asked
-// for, and what starting actually does.
-#define BLE_ROW_COUNT 7
+// talking to, the two channel strength ceilings the session was started with,
+// the two strengths the D-pad dials, and how many packets went out. The two
+// notes under them say the things the rows cannot: that the strengths are what
+// we asked for, and what starting actually does.
+//
+// The ceilings are read only here: they are settings, and the advanced
+// parameters page is where they are changed (motion_settings.c). Keeping one
+// page able to change them would mean two places to look for "why is nothing
+// coming out", which is the state the 2026-09-26 run ended in.
+#define BLE_ROW_COUNT 9
 
 static const char* stateName(u32 state)
 {
@@ -40,29 +47,49 @@ static void deviceText(const DglabBleStatus* status, char* out, size_t size)
         status->address[2], status->address[3], status->address[4], status->address[5]);
 }
 
-static int buildRows(const DglabBlePageState* state, DglabRow* rows, char* device,
-    size_t device_size, char* limit, size_t limit_size, char* strength, size_t strength_size,
-    char* packets, size_t packets_size)
+// One buffer per row: the rows are drawn after the whole list is built, so a
+// single shared buffer would leave every row showing the last value.
+typedef struct {
+    char device[32];
+    char limit_a[8];
+    char limit_b[8];
+    char strength_a[16];
+    char strength_b[16];
+    char packets[16];
+    char label_a[64];
+    char label_b[64];
+} BleRowText;
+
+static int buildRows(const DglabBlePageState* state, DglabRow* rows, BleRowText* text)
 {
     const DglabTheme* theme = dglabThemeGet();
     int count = 0;
 
-    deviceText(&state->status, device, device_size);
-    snprintf(limit, limit_size, "%u", (unsigned)state->soft_limit);
-    snprintf(strength, strength_size, "A %u / B %u", (unsigned)state->status.strength_a,
-        (unsigned)state->status.strength_b);
-    snprintf(packets, packets_size, "%u", (unsigned)state->status.packets);
+    deviceText(&state->status, text->device, sizeof(text->device));
+    snprintf(text->limit_a, sizeof(text->limit_a), "%u", (unsigned)state->limit_a);
+    snprintf(text->limit_b, sizeof(text->limit_b), "%u", (unsigned)state->limit_b);
+    snprintf(text->strength_a, sizeof(text->strength_a), "%u/100", (unsigned)state->strength_a);
+    snprintf(text->strength_b, sizeof(text->strength_b), "%u/100", (unsigned)state->strength_b);
+    snprintf(text->packets, sizeof(text->packets), "%u", (unsigned)state->status.packets);
+    // The two channels are named the way the motion page names them, so the
+    // strength that is dialled reads the same on every page that dials it.
+    snprintf(text->label_a, sizeof(text->label_a), "%s A", dglabString(DglabString_MotionVolume));
+    snprintf(text->label_b, sizeof(text->label_b), "%s B", dglabString(DglabString_MotionVolume));
 
     rows[count++] = (DglabRow){ DglabRow_Item, dglabString(DglabString_BleState),
         stateName(state->status.state), NULL, theme->text };
-    rows[count++] = (DglabRow){ DglabRow_Item, dglabString(DglabString_BleDevice), device, NULL,
-        theme->text };
-    rows[count++] = (DglabRow){ DglabRow_Item, dglabString(DglabString_BleSoftLimit), limit, NULL,
-        theme->text };
-    rows[count++] = (DglabRow){ DglabRow_Item, dglabString(DglabString_BleStrength), strength,
+    rows[count++] = (DglabRow){ DglabRow_Item, dglabString(DglabString_BleDevice), text->device,
         NULL, theme->text };
-    rows[count++] = (DglabRow){ DglabRow_Item, dglabString(DglabString_BlePackets), packets, NULL,
+    rows[count++] = (DglabRow){ DglabRow_Item, dglabString(DglabString_SetChannelLimitA),
+        text->limit_a, NULL, theme->text };
+    rows[count++] = (DglabRow){ DglabRow_Item, dglabString(DglabString_SetChannelLimitB),
+        text->limit_b, NULL, theme->text };
+    rows[count++] = (DglabRow){ DglabRow_Item, text->label_a, text->strength_a, NULL,
         theme->text };
+    rows[count++] = (DglabRow){ DglabRow_Item, text->label_b, text->strength_b, NULL,
+        theme->text };
+    rows[count++] = (DglabRow){ DglabRow_Item, dglabString(DglabString_BlePackets), text->packets,
+        NULL, theme->text };
     rows[count++] = (DglabRow){ DglabRow_Paragraph, NULL, NULL,
         dglabString(DglabString_BleOpenLoop), theme->text };
     rows[count++] = (DglabRow){ DglabRow_Paragraph, NULL, NULL,
@@ -76,12 +103,11 @@ int dglabBleContentHeight(const DglabFontSet* fonts, const DglabBlePageState* st
     DglabListFonts list_fonts = { fonts->body, fonts->value, fonts->note };
     DglabRow rows[BLE_ROW_COUNT];
     DglabRowBox boxes[BLE_ROW_COUNT];
-    char device[32];
-    char limit[8];
-    char strength[32];
-    char packets[16];
-    int count = buildRows(state, rows, device, sizeof(device), limit, sizeof(limit), strength,
-        sizeof(strength), packets, sizeof(packets));
+    BleRowText text;
+    int count;
+
+    memset(&text, 0, sizeof(text));
+    count = buildRows(state, rows, &text);
 
     return dglabListMeasure(&list_fonts, rows, count, DGLAB_PAGE_CONTENT_WIDTH, boxes,
         BLE_ROW_COUNT);
@@ -94,19 +120,19 @@ void dglabBleDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     DglabListFonts list_fonts = { fonts->body, fonts->value, fonts->note };
     DglabRow rows[BLE_ROW_COUNT];
     DglabRowBox boxes[BLE_ROW_COUNT];
-    DglabHint hints[2];
+    DglabHint hints[5];
     DglabTextStyle title = { fonts->title, theme->text };
     DglabListStyle style;
     DglabListPage page;
-    char device[32];
-    char limit[8];
-    char strength[32];
-    char packets[16];
-    int count = buildRows(state, rows, device, sizeof(device), limit, sizeof(limit), strength,
-        sizeof(strength), packets, sizeof(packets));
+    BleRowText text;
+    int count;
     int view_height = DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP;
-    int content_height = dglabListMeasure(&list_fonts, rows, count, DGLAB_PAGE_CONTENT_WIDTH,
-        boxes, BLE_ROW_COUNT);
+    int content_height;
+
+    memset(&text, 0, sizeof(text));
+    count = buildRows(state, rows, &text);
+    content_height = dglabListMeasure(&list_fonts, rows, count, DGLAB_PAGE_CONTENT_WIDTH, boxes,
+        BLE_ROW_COUNT);
 
     page = dglabListPageLayout(DGLAB_PAGE_CONTENT_TOP, view_height, content_height, state->offset);
 
@@ -129,12 +155,18 @@ void dglabBleDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
 
     dglabListPageScrollBar(canvas, &page);
 
-    // Start and stop are the page's actions; B is the back key everywhere, so the
-    // bar does not repeat it. Up and down change the soft limit, which the row
-    // above shows - a hint would only repeat the row.
-    hints[0] = (DglabHint){ DglabButton_A, DglabButton_None,
+    // The D-pad is the mixer here too, exactly as on the socket and motion
+    // pages, so the bar has to say what it does. B is the back key everywhere,
+    // so the bar does not repeat it.
+    hints[0] = (DglabHint){ DglabButton_Up, DglabButton_Down,
+        dglabString(DglabString_HintAdjustA), };
+    hints[1] = (DglabHint){ DglabButton_Left, DglabButton_Right,
+        dglabString(DglabString_HintAdjustB), };
+    hints[2] = (DglabHint){ DglabButton_Y, DglabButton_None,
+        dglabString(DglabString_ActionLog), };
+    hints[3] = (DglabHint){ DglabButton_A, DglabButton_None,
         dglabString(DglabString_ActionStart), };
-    hints[1] = (DglabHint){ DglabButton_X, DglabButton_None,
+    hints[4] = (DglabHint){ DglabButton_X, DglabButton_None,
         dglabString(DglabString_ActionStop), };
-    dglabPageHints(canvas, fonts->icon, fonts->value, hints, 2);
+    dglabPageHints(canvas, fonts->icon, fonts->body, hints, 5);
 }

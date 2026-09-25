@@ -1647,85 +1647,37 @@ static bool bleStateIsActive(u32 state)
     return state == DglabBleState_Connecting || state == DglabBleState_Connected;
 }
 
-// One step of the ceiling. A running session keeps its own copy of it, so the
-// move has to be sent as well - otherwise the row moves and the device stays
-// where it was, which is exactly how the 2026-09-26 run ended up streaming with
-// soft limit 0 and no output at all.
-static void bleStepSoftLimit(Service* dglab, DglabBlePageState* state, int delta)
-{
-    int next = (int)state->soft_limit + delta;
-
-    if (next < (int)TEST_STRENGTH_MIN)
-        next = (int)TEST_STRENGTH_MIN;
-
-    if (next > (int)TEST_STRENGTH_MAX)
-        next = (int)TEST_STRENGTH_MAX;
-
-    if ((u32)next == state->soft_limit)
-        return;
-
-    state->soft_limit = (u32)next;
-
-    if (bleStateIsActive(state->status.state)) {
-        DglabBleLimitRequest request = { 0 };
-
-        request.soft_limit = state->soft_limit;
-        serviceDispatchIn(dglab, DGLAB_IPC_CMD_BLE_LIMIT, request);
-    }
-}
-
-// Holding up or down walks the ceiling the same way the strength keys walk a
-// strength (TEST_STRENGTH_HOLD_NS then TEST_STRENGTH_REPEAT_NS): 0..100 at one
-// step per press is a lot of presses, and a tap still lands exactly one step.
-static u64 g_ble_limit_hold_started_ns;
-static u64 g_ble_limit_last_repeat_ns;
-
-static void bleRepeatSoftLimit(Service* dglab, DglabBlePageState* state, u64 held, u64 now_ns)
-{
-    if (!(held & (HidNpadButton_Up | HidNpadButton_Down))) {
-        g_ble_limit_hold_started_ns = 0;
-        return;
-    }
-
-    if (g_ble_limit_hold_started_ns == 0) {
-        // 0 doubles as "not held", so a clock that reads 0 still starts a hold.
-        g_ble_limit_hold_started_ns = now_ns ? now_ns : 1u;
-        g_ble_limit_last_repeat_ns = 0;
-        return;
-    }
-
-    if (now_ns - g_ble_limit_hold_started_ns < TEST_STRENGTH_HOLD_NS)
-        return;
-
-    if (g_ble_limit_last_repeat_ns != 0 &&
-        now_ns - g_ble_limit_last_repeat_ns < TEST_STRENGTH_REPEAT_NS)
-        return;
-
-    g_ble_limit_last_repeat_ns = now_ns;
-
-    bleStepSoftLimit(dglab, state, (held & HidNpadButton_Up) ? (int)TEST_STRENGTH_STEP
-                                                             : -(int)TEST_STRENGTH_STEP);
-}
-
 // The Bluetooth page. Starting is two steps because the transport needs two:
 // the driver-level probe brings the stack up (it is the only thing that may call
 // InitializeBle/EnableBle, docs/history.md §28), and the session then connects
 // and streams. Leaving the page stops the session: one left running would keep
 // driving the device with nobody watching.
+//
+// The D-pad dials the two channel strengths exactly like the socket and motion
+// pages do (they share g_test_strength_a/b and the two helpers), and the two
+// channel strength *ceilings* are settings the advanced parameters page owns -
+// this page shows them and hands them to the session at start, which is why
+// there are two more numbers on it than there used to be instead of two keys.
 static void runBleView(Service* dglab, PadState* pad)
 {
     DglabBlePageState state;
     DglabBlePageState drawn;
     bool have_drawn = false;
     u32 drawn_generation = 0;
+    u32 drawn_log_generation = 0;
     int offset = 0;
     int drawn_offset = 0;
+    DglabMotionFeedConfig config;
 
     memset(&state, 0, sizeof(state));
     memset(&drawn, 0, sizeof(drawn));
-    // Default 0, ceiling and step the same as the Socket mode's strength keys
-    // (TEST_STRENGTH_*): one number, one range, whichever transport is driving.
-    state.soft_limit = TEST_STRENGTH_MIN;
+
+    // Read once, when the page opens: the ceilings are not adjustable from here
+    // (see above), and a session cannot outlive the page, so a session always
+    // runs with the pair that was on the settings page when it was started.
+    motionSettingsLoad(&config);
+    state.limit_a = config.channel_limit_a;
+    state.limit_b = config.channel_limit_b;
 
     while (appletMainLoop()) {
         DglabCanvas canvas;
@@ -1733,34 +1685,46 @@ static void runBleView(Service* dglab, PadState* pad)
         DglabPocStatus poc_status;
         Result status_rc;
         u64 down;
+        u64 held;
 
         padUpdate(pad);
         down = padGetButtonsDown(pad);
+        held = padGetButtons(pad);
 
         // The session's own log goes to the card while this page is open, so a
-        // failed connect can be read back instead of only seen on screen.
+        // failed connect can be read back instead of only seen on screen. The
+        // same ring is what Y shows (the sysmodule log page's layout, with this
+        // session's title).
         bleLogPoll(dglab);
+        buildLogPointers();
 
         if (down & HidNpadButton_B) {
             serviceDispatch(dglab, DGLAB_IPC_CMD_BLE_STOP);
             return;
         }
 
-        // Up and down set the ceiling the device enforces; the row shows it, so
-        // there is no hint for it in the bottom bar. The press lands one step and
-        // holding walks the value, and a running session follows immediately.
-        if (down & HidNpadButton_Up)
-            bleStepSoftLimit(dglab, &state, (int)TEST_STRENGTH_STEP);
+        if (down & HidNpadButton_Y) {
+            state.log_open = !state.log_open;
 
-        if (down & HidNpadButton_Down)
-            bleStepSoftLimit(dglab, &state, -(int)TEST_STRENGTH_STEP);
+            if (state.log_open)
+                state.log_offset = logMaxOffset(g_log_filled);
+        } else if (state.log_open) {
+            state.log_offset = logScrollFromDirections(state.log_offset,
+                logMaxOffset(g_log_filled), down, held, armTicksToNs(armGetSystemTick()));
+        } else {
+            // The mixer, the same two helpers the socket and motion pages call:
+            // up/down dial channel A, left/right channel B, one step per press
+            // and a walk while held. A running session follows them because the
+            // sysmodule routes NET_SEND to it while it is active.
+            adjustStrengthFromDirections(dglab, down);
+            repeatStrengthFromDirections(dglab, held, armTicksToNs(armGetSystemTick()));
 
-        bleRepeatSoftLimit(dglab, &state, padGetButtons(pad), armTicksToNs(armGetSystemTick()));
+            if (down & HidNpadButton_X)
+                serviceDispatch(dglab, DGLAB_IPC_CMD_BLE_STOP);
+        }
 
-        if (down & HidNpadButton_X)
-            serviceDispatch(dglab, DGLAB_IPC_CMD_BLE_STOP);
-
-        if ((down & HidNpadButton_A) && !state.starting && !bleStateIsActive(state.status.state)) {
+        if ((down & HidNpadButton_A) && !state.log_open && !state.starting &&
+            !bleStateIsActive(state.status.state)) {
             u8 address[6];
 
             if (loadBleAddress(address)) {
@@ -1813,7 +1777,8 @@ static void runBleView(Service* dglab, PadState* pad)
                 Result rc;
 
                 state.starting = false;
-                request.soft_limit = state.soft_limit;
+                request.limit_a = state.limit_a;
+                request.limit_b = state.limit_b;
                 memcpy(request.address, address, sizeof(request.address));
                 memcpy(state.status.address, address, sizeof(state.status.address));
                 rc = serviceDispatchIn(dglab, DGLAB_IPC_CMD_BLE_START, request);
@@ -1827,17 +1792,37 @@ static void runBleView(Service* dglab, PadState* pad)
                 (DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP));
         state.offset = offset;
 
+        // The two rows the D-pad dials come from the same pair the socket and
+        // motion pages show, so the number on screen and the number that went
+        // out cannot be two different things.
+        state.strength_a = g_test_strength_a;
+        state.strength_b = g_test_strength_b;
+
         if (have_drawn && memcmp(&drawn, &state, sizeof(state)) == 0 &&
-            drawn_offset == offset && drawn_generation == g_display_generation)
+            drawn_offset == offset && drawn_generation == g_display_generation &&
+            drawn_log_generation == g_log_generation)
             continue;
 
         if (dglabFramebufferBegin(&canvas)) {
-            dglabBleDraw(&canvas, &g_fonts, &state);
+            if (state.log_open) {
+                DglabLogPage log;
+
+                log.title = dglabString(DglabString_BleLogTitle);
+                log.lines = g_log_pointers;
+                log.count = g_log_filled;
+                log.offset = state.log_offset;
+                log.sysmodule_ok = state.sysmodule_ok;
+                dglabLogPageDraw(&canvas, &g_fonts, &log);
+            } else {
+                dglabBleDraw(&canvas, &g_fonts, &state);
+            }
+
             dglabFramebufferEnd();
 
             drawn = state;
             drawn_offset = offset;
             drawn_generation = g_display_generation;
+            drawn_log_generation = g_log_generation;
             have_drawn = true;
         }
     }

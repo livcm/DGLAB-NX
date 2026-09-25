@@ -29,6 +29,8 @@ static const DglabString kNameKeys[DglabMotionSetting_Count] = {
     [DglabMotionSetting_DensityFixed] = DglabString_SetDensityFixed,
     [DglabMotionSetting_FrequencyFixed] = DglabString_SetFrequencyFixed,
     [DglabMotionSetting_StrengthMax] = DglabString_SetStrengthMax,
+    [DglabMotionSetting_ChannelLimitA] = DglabString_SetChannelLimitA,
+    [DglabMotionSetting_ChannelLimitB] = DglabString_SetChannelLimitB,
 };
 
 static const DglabString kDescKeys[DglabMotionSetting_Count] = {
@@ -46,6 +48,8 @@ static const DglabString kDescKeys[DglabMotionSetting_Count] = {
     [DglabMotionSetting_DensityFixed] = DglabString_DescDensityFixed,
     [DglabMotionSetting_FrequencyFixed] = DglabString_DescFrequencyFixed,
     [DglabMotionSetting_StrengthMax] = DglabString_DescStrengthMax,
+    [DglabMotionSetting_ChannelLimitA] = DglabString_DescChannelLimit,
+    [DglabMotionSetting_ChannelLimitB] = DglabString_DescChannelLimit,
 };
 
 // The switch row's value: the screen shows a word where every other row shows a

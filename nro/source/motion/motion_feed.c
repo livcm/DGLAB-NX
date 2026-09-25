@@ -39,6 +39,14 @@ void dglabMotionFeedDefaultConfig(DglabMotionFeedConfig* config)
 
     config->strength_max = 100u;
 
+    // Both channel strength ceilings start wide open. They only ever cap a
+    // strength, and every strength starts at 0, so a fresh session still cannot
+    // output anything until somebody dials one up - the ceiling is the safety
+    // limit a user sets when they want one, not the thing that keeps the device
+    // quiet.
+    config->channel_limit_a = 100u;
+    config->channel_limit_b = 100u;
+
     // The motion mode's own shape: it only ever writes a level, and the pulse
     // interval follows it.
     config->frequency_follows_level = true;

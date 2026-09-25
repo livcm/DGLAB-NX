@@ -52,11 +52,10 @@ typedef enum {
     DglabString_BleStateFailed,
     DglabString_BleDevice,
     DglabString_BleDeviceNone,
-    DglabString_BleSoftLimit,
-    DglabString_BleStrength,
     DglabString_BlePackets,
     DglabString_BleOpenLoop,
     DglabString_BleProcedure,
+    DglabString_BleLogTitle,
     DglabString_DescSocket,
     DglabString_DescMotion,
     DglabString_DescTouch,
@@ -135,6 +134,11 @@ typedef enum {
     DglabString_SetDensityFixed,
     DglabString_SetFrequencyFixed,
     DglabString_SetStrengthMax,
+    // The two channel strength ceilings. They are the same two variables the
+    // Bluetooth page shows, so the two pages read the same keys and cannot end
+    // up calling the same number two different things.
+    DglabString_SetChannelLimitA,
+    DglabString_SetChannelLimitB,
     DglabString_DescDeadzoneEnter,
     DglabString_DescDeadzoneExit,
     DglabString_DescGyroRange,
@@ -149,6 +153,7 @@ typedef enum {
     DglabString_DescDensityFixed,
     DglabString_DescFrequencyFixed,
     DglabString_DescStrengthMax,
+    DglabString_DescChannelLimit,
     // The two words the density switch's value is drawn with. It is the one row
     // that is not a number (motion_settings.c stores it as 0/1).
     DglabString_DensityFixedValue,
