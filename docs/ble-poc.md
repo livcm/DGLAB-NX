@@ -129,6 +129,11 @@ applet ARUID 能不能连）都已经有答案，剩下的 btdev 直连本身就
 日志里对应两行：`btdrv probe: window: device EA:A8:... rssi=…` 与
 `btdrv probe: discovered the device at EA:A8:…, saved to …`。
 
+**实机验证（2026-09-26 00:33）**：把地址文件删掉（改名成 `.bak`）后跑一轮——驱动级窗口认出
+设备（`rssi=-46`）并写回文件，同一轮的 **btm 会话直接用这个地址连上**（`connected handle=4`），
+全程没有手工配置。中途修掉一个自己造的鸡生蛋问题：那段窗口原先被 `if (use_target_address)`
+挡着，而没有地址时它恰好不该被挡（v35）。
+
 ## 命令号是否漂移：`Right` 身份探针
 
 > **已删除**（2026-09-25）：这个探针在控制台上没有了，`DglabPocAction_ProbeBtdrvIdentity`
