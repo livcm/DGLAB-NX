@@ -1558,6 +1558,20 @@ static void runTouchView(Service* dglab, PadState* pad)
 
 #define BLE_ADDRESS_PATH CONFIG_DIR "/dglab-ble-address.txt"
 
+// A refused start used to leave no trace at all: the page just stayed idle and
+// the screen said nothing about why. Both start steps report their failures into
+// the same log the session lines go to.
+static void bleLogFailure(const char* what, Result rc)
+{
+    char line[80];
+
+    if (R_SUCCEEDED(rc))
+        return;
+
+    snprintf(line, sizeof(line), "%s failed rc=0x%08X", what, (unsigned)rc);
+    logPushLine(line);
+}
+
 // The BLE session logs into the sysmodule's PoC ring, and only the front end can
 // drain that ring to the SD card. The BLE PoC console page does it for the probe
 // experiments; this page has to do it for the session, otherwise a failed
@@ -1697,13 +1711,21 @@ static void runBleView(Service* dglab, PadState* pad)
             if (loadBleAddress(address)) {
                 DglabPocStartRequest request = { 0 };
                 DglabPocActionRequest action = { .action = DglabPocAction_ProbeBtdrvScan };
+                Result rc;
 
                 request.flags = DGLAB_POC_START_FLAG_TARGET_ADDRESS;
                 memcpy(request.target_address, address, sizeof(request.target_address));
                 memcpy(state.status.address, address, sizeof(state.status.address));
 
-                if (R_SUCCEEDED(serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_START, request)) &&
-                    R_SUCCEEDED(serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_ACTION, action)))
+                rc = serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_START, request);
+                bleLogFailure("driver probe start", rc);
+
+                if (R_SUCCEEDED(rc)) {
+                    rc = serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_ACTION, action);
+                    bleLogFailure("driver probe action", rc);
+                }
+
+                if (R_SUCCEEDED(rc))
                     state.starting = true;
             }
         }
@@ -1733,12 +1755,14 @@ static void runBleView(Service* dglab, PadState* pad)
 
             if (!state.driver_running && loadBleAddress(address)) {
                 DglabBleStartRequest request = { 0 };
+                Result rc;
 
                 state.starting = false;
                 request.soft_limit = state.soft_limit;
                 memcpy(request.address, address, sizeof(request.address));
                 memcpy(state.status.address, address, sizeof(state.status.address));
-                serviceDispatchIn(dglab, DGLAB_IPC_CMD_BLE_START, request);
+                rc = serviceDispatchIn(dglab, DGLAB_IPC_CMD_BLE_START, request);
+                bleLogFailure("ble session start", rc);
             }
         }
 
