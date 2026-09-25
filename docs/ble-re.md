@@ -234,7 +234,7 @@ libnx 的 `btdrv.c` 最近一次改动是 2025-04（`btdrvTriggerConnection` 的
 | `0x0005568F` | 143 = `Btm` | 0x2AB | btm 模块拒绝（libnx 的 `btmu*` 封装在 sysmodule 里填的 ARUID 无效） |
 | `0x0000060A` | 10 = `Sf` | 3 | **服务框架**直接拒了请求：我们按 libnx 形状自造、但填了 NRO 的真实 ARUID 的那条 `btmu StartBleScanForSmartDevice` 就走到了这里 |
 | `0x0000F601` | 1 = `Kernel` | 123 = `ConnectionClosed` | 会话被服务端关掉（cmd 40 那次） |
-| `0x0000E401` | 1 = `Kernel` | 114 = `InvalidHandle` | 在已死的会话上继续调用 |
+| `0x0000E401` | 1 = `Kernel` | 114 = `InvalidHandle` | 在已死的会话上继续调用；2026-09-26 又见一次：**btm 服务没初始化就调 btm 命令**（会话路径漏了 `btmInitialize()`，`btmBleConnect` 第一个就中），所以同一个 rc 有两种来源，先确认这一轮有没有 `btmInitialize rc=0x0` |
 | `0x00006359` | 345 = `libnx` | 49 = `LibnxError_Timeout` | PoC 自己的重试耗尽，不是固件错误 |
 
 `Sf`/`Btm` 这两条合起来说明：**`btm:u` 这条路对后台 sysmodule 是不通的**——填无效 ARUID 时

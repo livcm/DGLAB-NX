@@ -77,7 +77,8 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
    `DglabBleStatus` 里的 `strength_a` / `strength_b` 是**我们请求过的值**，不是设备实际状态；
    UI 不应把它当成真实强度显示；
 2. **需要 exefs 补丁**，且要按 `docs/ble-poc.md` 的顺序启动（先驱动级探针把 BLE 栈打开，
-   再起 BLE 会话）；
+   再起 BLE 会话）。会话内部还要自己开一次 btm 服务（`btmInitialize()`，和 btm 探针一样）——
+   漏掉它时 `btmBleConnect` 会直接回 `0xE401`（`Kernel/114`，见 `docs/ble-re.md` 错误码表）；
 3. **一个开机周期只走一条 BLE 路径**：会话跑完，这一周期里就不要再走第二条 BLE 路径
    （想再连一次、或再跑探针，先重启主机）。这条规矩管的是 BLE 自己——BT 栈与 btm 被我们
    动过，同一个周期里混着用会崩整机（`docs/ble-re.md` 的「`0x668F` 与 btm 的崩溃路径」）。

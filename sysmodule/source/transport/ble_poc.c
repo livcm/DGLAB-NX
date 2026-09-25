@@ -1350,7 +1350,7 @@ static void pocBleSessionRun(void)
 {
     BtdrvAddress address;
     u32 handle = 0;
-    bool connected = false;
+    Result rc;
 
     memset(&address, 0, sizeof(address));
     memcpy(address.address, g_ble_address, sizeof(address.address));
@@ -1358,11 +1358,21 @@ static void pocBleSessionRun(void)
     pocBtEventsOpen();
     pocBtEventsDrain("ble session before connect", 16u, NULL);
 
-    if (!pocBtmConnectRetry("ble session", &address, &handle)) {
+    // btm is a service of its own and every libnx btm call in here goes through
+    // it: the probe opens it before it connects, and this session has to do the
+    // same. It was missing, and the very first btm call then left on an unopened
+    // session and came back 0xE401 (Kernel/114, InvalidHandle) - that is the
+    // 2026-09-26 "connect failed" (docs/ble-re.md, 错误码表).
+    rc = btmInitialize();
+    pocLog("ble session: btmInitialize rc=0x%08X", (u32)rc);
+
+    if (R_FAILED(rc)) {
+        pocLog("ble session: no btm service, nothing to drive");
+        pocBleSessionSetState(DglabBleState_Failed, false);
+    } else if (!pocBtmConnectRetry("ble session", &address, &handle)) {
         pocLog("ble session: connect failed");
         pocBleSessionSetState(DglabBleState_Failed, false);
     } else {
-        connected = true;
         pocBtmLogGatt("ble session", handle);
 
         if (g_btm_proto_ready) {
@@ -1376,7 +1386,7 @@ static void pocBleSessionRun(void)
         pocLog("ble session: disconnected");
     }
 
-    (void)connected;
+    btmExit();
 
     // The session is over: let a new one start, and leave a non-failure state as
     // "idle" so a client can tell "finished" from "never started".
