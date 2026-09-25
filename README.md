@@ -5,14 +5,16 @@
 项目把 DG-LAB 的连接与协议实现收进一个常驻后台服务（sysmodule），前端组件
 （NRO / Overlay / Game Mod）只通过 IPC 使用它，不各自实现一遍协议，也不各自去抢设备。
 
-传输分两种模式，当前只有 **WebSocket 模式**可用：
+传输分两种模式：**WebSocket 模式**（主力，装上就能用）和 **BLE 模式**（能用的入口，但要装
+exefs 补丁、且只能开环）：
 
 | 模式 | 连接方式 | 状态 |
 | --- | --- | --- |
 | WebSocket | sysmodule 与手机 DG-LAB App 建立 WebSocket 会话：Switch 当服务端，App 扫码连入（Switch 不主动外连）；手机负责与设备之间的 BLE，并把波形数据转发给设备 | 已实现（Socket V3） |
-| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | **扫描 + 连接 + GATT 表已实机跑通，但必须安装 exefs 补丁**（见下）：固件把 BLE 客户端在"控制器层"的激活留给了系统自身的配对流程，第三方客户端会被 `result=0x1A` 挡下；补丁跳过这道检查后，sysmodule 能连上设备并读到 `0x180C`/`0x150A`/`0x150B`（外加 `0x180A` 电量、`0xFE59` DFU）。传输层已接上协议层：BF 与 B0 写入稳定 `rc=0`，且 2026-09-25 的反应测试**实机确认有输出——写入确实到达设备**；但**设备侧一条回包都没有**（通知与读应答全哑），B1 未验证——原因已查清：**连接归 btm 所有，服务层不暴露它的事件**，回读对第三方进程不可得（`docs/ble-re.md` 的「连接所有权在服务层是封的」），因此 BLE 模式按开环设计。完整证据链与补丁说明见 `docs/ble-re.md`，实测记录见 `docs/ble-poc.md` |
+| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议）；NRO 的 `bluetooth (direct)` 页是它的入口 | **扫描 + 连接 + GATT 表 + 流式写入已实机跑通，但必须安装 exefs 补丁**（见下）：固件把 BLE 客户端在"控制器层"的激活留给了系统自身的配对流程，第三方客户端会被 `result=0x1A` 挡下；补丁跳过这道检查后，sysmodule 能连上设备并读到 `0x180C`/`0x150A`/`0x150B`（外加 `0x180A` 电量、`0xFE59` DFU），玩法页的强度/波形原样走 BLE（2026-09-26 实机 `writes=172` 全 `rc=0`）。**注意软上限**：它是设备侧的输出闸门，0 就是设备不会有任何输出（默认 0，会话跑着也能调）。2026-09-25 的反应测试**实机确认有输出——写入确实到达设备**；但**设备侧一条回包都没有**（通知与读应答全哑），B1 未验证——原因已查清：**连接归 btm 所有，服务层不暴露它的事件**，回读对第三方进程不可得（`docs/ble-re.md` 的「连接所有权在服务层是封的」），因此 BLE 模式按开环设计。完整证据链与补丁说明见 `docs/ble-re.md`，实测记录见 `docs/ble-poc.md` |
 
-两种模式下 Switch 都不直接持有蓝牙连接（WebSocket 模式的 BLE 在手机上）。
+WebSocket 模式下 Switch 不持有蓝牙连接（那条 BLE 在手机上）；BLE 模式下则由 sysmodule
+自己持有——**设备侧连接只能由它建立和持有，其它组件一律走 IPC**（`AGENTS.md` §3）。
 
 ## 状态
 
@@ -22,7 +24,7 @@
 | `nro/` 前端 | 可用：菜单选择玩法——测试屏（地址/二维码/测试键/日志）、体感玩法（Joy-Con 驱动波形）与触屏玩法（左右半区对应 A/B 通道） |
 | `overlay/` | 未实现 |
 | `mods/` | 未实现 |
-| BLE 模式（sysmodule 直连设备） | 未实现；路径已跑通到"连接 + GATT 表 + BF/B0 写入"，**但依赖 exefs 补丁、且通知路径未通**（设备不回 B1，波形无法出）。当前状态与下一步见 `docs/ble-re.md` 的「当前状态（2026-09-25）」；实测记录见 `docs/ble-poc.md` |
+| BLE 模式（sysmodule 直连设备） | 入口已实机跑通（`bluetooth (direct)` 页 + `BLE_*`）：连接 + GATT 表 + 流式写入（`writes=172` 全 `rc=0`），玩法页的强度/波形原样走 BLE；**但依赖 exefs 补丁、软上限为 0 时设备不输出、且通知路径不可得**（设备不回 B1）。当前状态与下一步见 `docs/ble-re.md` 的「当前状态（2026-09-26）」；实测记录见 `docs/ble-poc.md` |
 
 进度与顺序见 `AGENTS.md` §15：骨架、Sysmodule、IPC、Coyote V3 协议层、WebSocket 模式
 传输、波形接入、NRO 交互、Joy-Con 输入、基础 UI、NRO 元信息与版本管理、浅色模式都已完成；
@@ -262,7 +264,7 @@ make -C tests/stack      # sysmodule 的线程栈预算（用 devkitA64 的 gcc 
 | `docs/nro-ui.md` | NRO 界面方案调研与实现记录 |
 | `docs/joycon-input.md` | Joy-Con 六轴资料，以及"动作越大波形值越大"这个可选玩法的设计 |
 | `docs/touch-input.md` | 触屏玩法：libnx 触屏资料、左右半区与两轴映射、与体感共用的参数、实机验收清单 |
-| `docs/ble-poc.md` | BLE 模式（sysmodule 直连设备）的实测记录（未完成：连接与写入已通、通知路径待解） |
+| `docs/ble-poc.md` | BLE 模式（sysmodule 直连设备）的实测记录（正式入口已跑通：连接 + 写入；通知/回读按不可得收束） |
 | `docs/ble-re.md` | BLE 直连的只读固件逆向：模块归属、固件侧 IPC 形状与当前判定进度 |
 | `docs/docs-audit.md` | 文档约定（谁放哪一层）与 2026-09-17 审计的处置结果 |
 | `docs/history.md` | 文档压缩时移出的历史原文（各文档的迭代过程与审计明细） |

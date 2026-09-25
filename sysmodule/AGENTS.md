@@ -4,14 +4,17 @@
 
 `sysmodule/` 是项目的核心后端。
 
-负责（传输分两种模式，当前只实现 WebSocket 模式）：
+负责（传输分两种模式：WebSocket 模式已完成，BLE 模式已是能用的入口、但依赖补丁且只能开环）：
 
 - **WebSocket 模式**：与手机 DG-LAB App 的 WebSocket 会话（Switch 是服务端、App 扫码连入）、
   Socket 协议、把事件源的波形数据转发给 App（见 `docs/dglab-socket.md`）；
-- **BLE 模式**：直接连接 DG-LAB 设备（Coyote 协议）——**未实现**：连接与 GATT 表已实机
-  跑通（依赖 exefs 补丁），传输层写入已由实机输出证明到达设备（2026-09-25），但设备侧
-  一条回包都没有（通知与读应答全哑、B1 未验证），所以协议要求的"确认后再改强度"还做不了。
-  见 `docs/ble-poc.md` 与 `docs/ble-re.md`；
+- **BLE 模式**：直接连接 DG-LAB 设备（Coyote 协议）——**正式入口已实机跑通**（IPC 的
+  `BLE_*`）：`bluetooth (direct)` 页先起驱动级探针把 BLE 栈打开，再起会话连接、订阅、流式写
+  （2026-09-26 实机 `writes=172` 全 `rc=0`），玩法页的强度/波形在会话激活时被路由到本地
+  协议层。两个前提：**装 exefs 补丁**；**BF 软上限是唯一的输出闸门，0 就是设备不输出**
+  （`BLE_START` 带初值，运行中改走 `BLE_LIMIT`）。但设备侧一条回包都没有（通知与读应答
+  全哑、B1 未验证），所以协议要求的"确认后再改强度"还做不了，按**开环**设计。
+  见 `docs/ble-poc.md`、`docs/ble-re.md`（「当前状态（2026-09-26）」）与 `docs/ipc.md`；
 - DG-LAB 设备发现、连接、断开；
 - 设备状态管理；
 - Effect / Wave / Command 等协议层功能；

@@ -1396,6 +1396,40 @@ CCCD 的读应答都没回来。要么设备不回（与"官方 App 能收到 B1
 `seq / A mode,value / B mode,value`，不再被抽样吃掉），以及把订阅拆成 A/B——默认
 `POC_BTM_CCCD_HAND_WRITE = 0`，只让 `RegisterNotification` 持有订阅，不再手工写 CCCD。
 
+### 第五十三次实机（2026-09-26）：正式入口连上了，卡在软上限 0；环形日志只有内存那一份
+
+这一轮跑的不是探针，而是 NRO 的新页 `bluetooth (direct)`（也就是 BLE 模式的正式入口，
+`docs/ipc.md` 的 `BLE_*`）：`A` 键先起驱动级探针会话把 BLE 栈打开，该会话结束后起 BLE
+会话（连接 → GATT → 传输层）。同一轮里还暴露了两个会话路径自己的 bug 和两个"仪表"问题，
+顺序如下。
+
+| 轮次 | 构建 | 日志里的关键行 | 结论 |
+| --- | --- | --- | --- |
+| 09-26 01:45 | v89 | `BleConnect(EA:A8:AC:22:2C:18) rc=0x0000E401` ×3 → `connect failed` | 会话路径漏了 `btmInitialize()`：`0xE401` = `Kernel/114` = InvalidHandle。探针那条路有这一步，所以它一直好的（`07f1df7` 修） |
+| 09-26 01:58 | v93 | `btmInitialize rc=0` → `BleConnect rc=0` → `connected handle=4` → `0x180C` + `write=19 notify=16` → `streaming, soft limit 0` → `writes=172 notify=0 b1=0` | 连接/订阅/写入全通，**但 BF 写的是 `0000`**：软上限默认 0 而且只在 `BLE_START` 那一刻被读一次，之后按 `↑` 只动屏幕（`109881a` 修） |
+
+第二轮的判据行（`SD:/switch/DGLAB-NX/logs/dglab-net.log`）：
+
+    ble session: btmInitialize rc=0x00000000
+    ble session: BleConnect(EA:A8:AC:22:2C:18) rc=0x00000000
+    ble session: connected handle=4 addr=EA:A8:AC:22:2C:18 (events=1)
+    ble session:   service[2] uuid=0x180C handle=14 end=19 primary=1
+    ble session: protocol coordinates found (service handle=14, write=19, notify=16)
+    btm transport: RegisterNotification(0x150B) rc=0x00000000
+    btm transport: write 7 byte(s) BF000000000000 rc=0x00000000
+    ble session: streaming, soft limit 0
+    btm transport: done, writes=172 notify=0 b1=0
+
+所以"没有输出"跟连接、GATT、写入都无关：**软上限是设备侧的输出闸门，它是 0 时设备不会
+输出任何东西**，而那一轮的上限就是 0。软上限现在有两个入口：`BLE_START` 带一个初值，
+会话运行中改走 `BLE_LIMIT`（页面上的 `↑`/`↓`，按住连发，立即补写 BF）。
+
+**日志在哪（这一轮学到的）**：会话与探针的日志都只写在 sysmodule 的**内存 ring** 里，
+只有 NRO 在主机上跑着的时候才会被抽到 SD 卡上——`bluetooth (direct)` 页抽到
+`logs/dglab-net.log`，`BLE PoC console` 页抽到 `logs/dglab-ble-poc.log`。而**拔卡就是
+关机**（卡里是虚拟系统），ring 随之消失，所以"事后拔卡再读"读不到任何东西：要在同一次
+开机里、关主机之前退出 NRO，让它把 ring 抽完。
+
 ### 早期状态：搁置（2026-09-22 收束，已被上面的结果取代）
 
 **结论（完整证据链见 `docs/ble-re.md` 的「当前总览」与「收束结论」）**：

@@ -2292,3 +2292,48 @@ managed 队列里——两处都只装着连接级记录。
 强度包还会单独解出 `seq / A mode,value / B mode,value`），以及把订阅拆成 A/B——默认只留
 `RegisterNotification`，不再手工写 CCCD（v19/v20 两种方式同时开着，手工写有可能与栈内部的
 订阅状态不一致）。
+
+## 32. 追加（2026-09-26）：BLE 有了正式入口，两轮实机把会话路径打通，也把"没输出"钉死
+
+这一轮的目标是把 BLE 从"探针实验"变成能用的入口：NRO 主菜单加 **`bluetooth (direct)`**
+页（`191753f`），IPC 加 `BLE_START` / `BLE_STOP` / `BLE_STATUS`（`8852601`，接口升到
+0.2.1），而玩法页一行没改——sysmodule 在会话激活时把 `NET_SEND` / `NET_WAVEFORM` 路由到
+本地协议层（`sysmodule/source/main.c`），体感与触屏照旧发它们的强度/波形。会话本身是
+"驱动级探针（唯一能 `InitializeBle`/`EnableBle` 的地方）+ btm 会话（连接 → GATT → 传输层）"
+两段，由 `A` 键串起来（见 `docs/ble-poc.md` 的「操作」与 `docs/ipc.md` 的 `BLE_*`）。
+
+随后是两个实机 bug，各占一轮：
+
+1. **`0xE401`：会话没开 btm 服务**（`07f1df7`）。第一轮的日志只有三行
+   `ble session: BleConnect(EA:A8:AC:22:2C:18) rc=0x0000E401`。`0xE401` = `Kernel/114` =
+   `InvalidHandle`，错误码表里原先记的是"在已死的会话上继续调用"——这次是第二种来源：
+   新的会话路径直接去连，忘了 `btmInitialize()`（btm 探针那条路有这一步，所以它一直好的）。
+   核对办法是反汇编链接后的 `btmInitialize`：带互斥锁 + 引用计数，`btmExit` 在计数为 0 时
+   也安全——于是会话按"开一次、收尾关一次"补齐，和探针同构。
+2. **软上限只在启动那一次生效**（`109881a`）。第二轮**连上了**，GATT 也齐：
+   `service[2] uuid=0x180C handle=14`、`write=19`、`notify=16`、`RegisterNotification rc=0`、
+   `writes=172`。但用户"没有输出"，日志一行就说完了原因：
+
+       ble session: streaming, soft limit 0
+       btm transport: write 7 byte(s) BF000000000000 rc=0x00000000
+
+   BF（软上限）写的是 `0000`：设备被限在 0，再怎么写 B0 也不会有输出。而页面上的 `↑`
+   只动屏幕上的数字——软上限只在 `BLE_START` 那一刻被读一次。修法是加 `BLE_LIMIT`
+   （IPC 0.2.2）：会话运行中改上限会立即补写 BF，且之后请求的强度按新值夹紧；`↑`/`↓`
+   同时改成按住连发（0~100 一步一次太费手）。
+
+还顺带定了两件"仪表"上的事，都是被这一轮"看不见"逼出来的：
+
+- **蓝牙页把 sysmodule 的 PoC ring 落到 `logs/dglab-net.log`**（`7d48553`）。会话自己的
+  日志（`ble session: …`、`btm transport: …`）只写在 sysmodule 的内存 ring 里，而 ring
+  只有 NRO 在主机上跑着时才被抽到卡上——新页面原先不抽，所以第一次失败在卡上一点痕迹都
+  没有，只剩两行无关的 net 日志。同一版还让"启动被拒"写一行带 rc 的日志（`b1b23cd`）：
+   sysmodule 拒绝时页面原本只是静静停在空闲，和"设备不搭理"长得一模一样。
+- **拔卡就是关机**：卡里是虚拟系统，插拔必须在关机状态下做，ring 随关机一起消失。所以
+  "先拔卡、回头再读日志"是读不到的，日志必须在**同一次开机里、关主机之前**由 NRO 抽完
+  （`4e29414` 写进 `docs/ble-poc.md`）。
+
+这一轮结束时 BLE 的状态：`bluetooth (direct)` 能把设备连上并流式写（`rc=0`），
+**软上限是唯一的输出闸门**，回读仍按"不可得"（开环）。没跑到的只有一件事——软上限 > 0
+时的玩法轮（也就是"体感/触屏真的驱动设备"这一条在**正式会话路径**上的实机确认；
+2026-09-25 15:58 那次输出是探针路径的）。
