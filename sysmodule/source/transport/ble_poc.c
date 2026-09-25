@@ -1330,6 +1330,38 @@ static void pocControlConnect(const char* label)
     pocLog("%s: control connect client_if=0xFF rc=0x%08X", label, (u32)rc);
 }
 
+// The device's advertised local name (docs/dglab-protocol.md, "支持的设备").
+#define POC_COYOTE_DEVICE_NAME "47L121000"
+
+// Writes a paired-device record for the target address through btdrv (cmd 24)
+// and reads it back, then asks for a bond. The connect path resolves its
+// client_if from a slot table that is only filled for devices the console
+// already knows (docs/ble-re.md, "连接归谁"), and this store is the one such
+// piece of knowledge a third-party process can write - so the experiment is
+// "make the device known, then connect with our own client_if".
+static void pocBtdrvAddPairedDevice(const BtdrvAddress* addr)
+{
+    SetSysBluetoothDevicesSettings settings;
+    Result rc;
+
+    memset(&settings, 0, sizeof(settings));
+    memcpy(settings.addr.address, addr->address, sizeof(settings.addr.address));
+    snprintf(settings.name.name, sizeof(settings.name.name), "%s", POC_COYOTE_DEVICE_NAME);
+    snprintf(settings.name2, sizeof(settings.name2), "%s", POC_COYOTE_DEVICE_NAME);
+
+    rc = btdrvAddPairedDeviceInfo(&settings);
+    pocLog("btdrv probe: AddPairedDeviceInfo(%02X:%02X:...:%02X) rc=0x%08X",
+        addr->address[0], addr->address[1], addr->address[5], (u32)rc);
+
+    memset(&settings, 0, sizeof(settings));
+    rc = btdrvGetPairedDeviceInfo(*addr, &settings);
+    pocLog("btdrv probe: GetPairedDeviceInfo rc=0x%08X name=\"%.12s\"", (u32)rc,
+        settings.name.name);
+
+    rc = btdrvCreateBond(*addr, 0);
+    pocLog("btdrv probe: CreateBond(type=0) rc=0x%08X", (u32)rc);
+}
+
 static void pocRunBtdrvScanProbe(PocWorker* w)
 {
     static const u16 kInterval[4] = { 0x0060u, 0x0060u, 0x0060u, 0x0030u };
@@ -1422,6 +1454,23 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     pocBtEventsOpen();
     pocBtEventsDrain("btdrv probe before register", 16u, NULL);
     pocControlConnect("after bt open");
+
+    // Make the device known to the console before anything tries to connect to
+    // it, then try a connect with the interface the manager itself handed out.
+    if (g_poc.use_target_address) {
+        BtdrvAddress paired;
+        Result paired_rc;
+
+        memset(&paired, 0, sizeof(paired));
+        memcpy(paired.address, g_poc.target_address, sizeof(paired.address));
+
+        pocBtdrvAddPairedDevice(&paired);
+
+        paired_rc = btdrvConnectGattServer(client_if, paired, true, 0);
+        pocLog("btdrv probe: ConnectGattServer(client_if=0x%02X, after paired write) "
+            "rc=0x%08X", client_if, (u32)paired_rc);
+        pocDrainBleEvents("btdrv probe after paired connect", 1500u, NULL);
+    }
 
     registered_if = pocRegisterGattClientStep(client_if);
 
@@ -2954,7 +3003,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v24 (wheel phase: the device's own strength change)");
+    pocLog("poc build: ble_poc v25 (paired-device record, then our own client_if)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before any probe runs: both probes care about what has
