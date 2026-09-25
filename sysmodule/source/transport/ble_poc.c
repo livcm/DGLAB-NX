@@ -1190,10 +1190,27 @@ static void pocBtmLinkWrite(void* context, const u8* data, size_t size)
 
     pocHex(hex, sizeof(hex), data, size < 24u ? size : 24u);
 
-    // Every write would flood the ring; the first few and every tenth after that
-    // are enough to read the cadence and the packet contents.
-    if (transport->writes < 3u || (transport->writes % 10u) == 0u)
+    // Every write would flood the ring, so the keepalive B0s are sampled (the
+    // first few and every tenth after that). The packets that actually change
+    // something are always worth a line: a strength packet is the one the device
+    // is supposed to answer with B1, and the BF writes are the safety cap. The
+    // sampling hid both in the 2026-09-25 15:58 round, where the output was
+    // felt but the packet that asked for it never showed up in the log.
+    bool carries_change = size == DGLAB_COYOTE_V3_BF_SIZE ||
+        (size == DGLAB_COYOTE_V3_B0_SIZE && data[0] == DGLAB_COYOTE_V3_HEADER_B0 &&
+            data[1] != 0u);
+
+    if (carries_change || transport->writes < 3u || (transport->writes % 10u) == 0u)
         pocLog("btm transport: write %u byte(s) %s rc=0x%08X", (unsigned)size, hex, (u32)rc);
+
+    // Byte 1 of a B0 is (sequence << 4) | A mode << 2 | B mode, the modes being
+    // 0 no change, 1 relative +, 2 relative -, 3 absolute (docs/dglab-protocol.md).
+    if (size == DGLAB_COYOTE_V3_B0_SIZE && data[0] == DGLAB_COYOTE_V3_HEADER_B0 &&
+        data[1] != 0u) {
+        pocLog("btm transport: strength seq=%u A mode=%u value=%u B mode=%u value=%u",
+            (unsigned)(data[1] >> 4), (unsigned)((data[1] >> 2) & 0x3u), (unsigned)data[2],
+            (unsigned)(data[1] & 0x3u), (unsigned)data[3]);
+    }
 
     if (R_SUCCEEDED(rc))
         transport->writes++;
@@ -1210,6 +1227,13 @@ static void pocBtmLinkWrite(void* context, const u8* data, size_t size)
 #define POC_BTM_TEST_SOFT_LIMIT 20u
 #define POC_BTM_TEST_STRENGTH 5u
 #define POC_BTM_TEST_DURATION_MS 6000u
+
+// Two ways to subscribe were active in v19/v20: RegisterNotification plus a hand
+// written 0x0001 into the CCCD. The 2026-09-25 15:58 round proved the writes
+// reach the device (the waveform was felt) and still got nothing back, so the
+// next round separates them. 0 = RegisterNotification owns the subscription,
+// 1 = also write the CCCD by hand.
+#define POC_BTM_CCCD_HAND_WRITE 0
 
 // A slow up-and-down envelope. Four entries fill exactly one B0 packet, so the
 // pattern repeats every 100ms and never parks at a high value.
@@ -1278,13 +1302,12 @@ static bool pocBtmTransportStart(u32 handle)
         pocLog("btm transport: no CCCD entry from btm, subscription cannot be read back");
     }
 
-    // The subscription itself, done by hand. RegisterNotification only says
-    // "accepted", and the read-back above cannot prove anything either: the
-    // value it returns would arrive through the very channel that has stayed
-    // silent. Writing 0x0001 into the CCCD under 0x150B is the one step whose
-    // outcome is a plain return code - if the device still says nothing
-    // afterwards, the subscription is not what is missing.
-    if (g_btm_cccd_ready) {
+    // Writing 0x0001 into the CCCD under 0x150B is a subscription done by hand.
+    // It is off by default now (see POC_BTM_CCCD_HAND_WRITE): v19/v20 had both
+    // ways active and got nothing back, and a hand-written CCCD can disagree
+    // with the stack's own idea of the subscription, so the next round lets
+    // RegisterNotification own it. Turn it on to test the other half.
+    if (POC_BTM_CCCD_HAND_WRITE && g_btm_cccd_ready) {
         u8 cccd[2] = { 0x01, 0x00 };
         Result cccd_write = btLeClientWriteDescriptor(handle, true,
             &g_btm_transport.service, &g_btm_transport.notify_char, &g_btm_cccd,
@@ -1293,6 +1316,8 @@ static bool pocBtmTransportStart(u32 handle)
         pocLog("btm transport: WriteDescriptor(CCCD 0x2902 = 0100) rc=0x%08X",
             (u32)cccd_write);
         pocBtmSettle("after the CCCD write");
+    } else {
+        pocLog("btm transport: CCCD hand write off, RegisterNotification owns the subscription");
     }
 
     g_btm_transport.connected = true;
@@ -3927,7 +3952,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v20 (reaction test: waveform + tiny strength)");
+    pocLog("poc build: ble_poc v21 (log the strength packets, CCCD write off)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before anything is opened or scanned. Collecting the
