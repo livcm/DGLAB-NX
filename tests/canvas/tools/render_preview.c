@@ -160,7 +160,8 @@ int main(int argc, char** argv)
     if (argc < 3) {
         fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> [normal|nowifi|stopped|"
                         "log|menu|motion|touch|touchdock|touchclamp|touchfixed|advanced|"
-                        "advanceddensity|about|aboutlow|ble|bleend|blelog] [dock]\n");
+                        "advanceddensity|advancedlimit|about|aboutlow|ble|bleend|blelog]"
+                        " [dock]\n");
         return 2;
     }
 
@@ -415,7 +416,8 @@ int main(int argc, char** argv)
 
         dglabTouchScreenDraw(&canvas, &g_fonts, &touch);
     } else if (argc >= 4 && (strcmp(argv[3], "advanced") == 0 ||
-                                strcmp(argv[3], "advanceddensity") == 0)) {
+                                strcmp(argv[3], "advanceddensity") == 0 ||
+                                strcmp(argv[3], "advancedlimit") == 0)) {
         DglabMotionFeedConfig motion_config;
         DglabAdvancedState advanced;
 
@@ -436,6 +438,12 @@ int main(int argc, char** argv)
         if (strcmp(argv[3], "advanceddensity") == 0) {
             motion_config.density_fixed = true;
             advanced.selected = DglabMotionSetting_FrequencyFixed;
+        } else if (strcmp(argv[3], "advancedlimit") == 0) {
+            // The two channel strength ceilings, which are the rows the
+            // Bluetooth session reads (docs/ipc.md).
+            dglabMotionSettingsStep(&motion_config, DglabMotionSetting_ChannelLimitA, -20);
+            dglabMotionSettingsStep(&motion_config, DglabMotionSetting_ChannelLimitB, -70);
+            advanced.selected = DglabMotionSetting_ChannelLimitA;
         }
 
         dglabAdvancedDraw(&canvas, &g_fonts, &advanced);
