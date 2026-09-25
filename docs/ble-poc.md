@@ -978,7 +978,7 @@ base `btm` 的请求里根本没有 ARUID 字段——它用 `RegisterAppletReso
 重启。2026-09-24/25 的成功轮都是这条路径。`sysmodule/source/transport/ble_poc.c` 里
 `pocBtmProbe` 开头那段注释还写着"盲连已经去掉"，与下面的代码矛盾，下一轮顺手改掉。）
 
-每次会话开头都会打印 `poc build: ble_poc v21 (log the strength packets, CCCD write off)`：拿到日志先看
+每次会话开头都会打印 `poc build: ble_poc v22 (CCCD-only subscription, peek the btdrv queues)`：拿到日志先看
 这一行，就能确认 SD 上装的是不是带 btm 探针的那个构建。
 
 这个探针**现在是手动触发、开机不跑**：它曾经被改成"开机后第一次会话自动执行"，2026-09-22
@@ -1193,10 +1193,10 @@ btm 会话的完整链路（原文见 SD `logs/dglab-ble-poc.log`，1241 行）�
 连上并读到 GATT 表之后，btm 探针会继续把连接**驱动起来**：GATT 客户端操作走 `bt` 服务
 （Nintendo 给 btm 客户端的配套接口），报文构造复用协议层 `coyote_v3_session`。
 
-1. `btLeClientRegisterNotification(handle, 0x180C, 0x150B)` 订阅，再回读一次 CCCD。
-   v19/v20 还会**手工写一次 CCCD**（`0x2902 = 0100`），但两种方式同时开着也收不到回包
-   （见第五十二次实机），所以 v21 起默认只留 `RegisterNotification`，手工写由
-   `POC_BTM_CCCD_HAND_WRITE` 开关控制，用来做 A/B；
+1. 订阅 `0x150B` 有两条路：`btLeClientRegisterNotification` 与手工写 CCCD
+   （`0x2902 = 0100`）。v19/v20 两条同时开、v21 只留前者，都收不到回包（见第五十二、第
+   五十三次实机），所以 v22 换成只手工写（`POC_BTM_NOTIFY_REGISTER = 0`、
+   `POC_BTM_CCCD_HAND_WRITE = 1`）——这是 A/B 的最后一格；每种组合都附一次 CCCD 回读；
 2. 每次 GATT 读之后停 300ms 再发下一个请求（`pocBtmSettle`）——紧跟读之后的写会被回
    `Bluetooth/0x153`（`0x0002A671`），那一包会静默丢掉，而丢的正是单发的 BF；
 3. `dglabCoyoteV3SessionOnConnected()` 立刻写 **BF**（7 字节，软上限 + 平衡参数）；
@@ -1210,6 +1210,10 @@ btm 会话的完整链路（原文见 SD `logs/dglab-ble-poc.log`，1241 行）�
    就说明写真的到设备了（2026-09-25 15:58 第一次拿到这个证据）；
 7. 收尾：软上限写回 0（BF 立即生效，等于先把设备的能力掐掉）、清波形、两通道请求绝对零、
    再跑 1 秒让归零那包发出去，然后才断开。
+8. 断开之前再用 `btm transport: peek` 读 **三条 btdrv 队列**（managed、LE HID、通用
+   `btdrvGetEventInfo`），看回包是不是落在我们读不到的地方。只读，而且发生在测量已经写进
+   日志之后（`docs/history.md` §28 的教训：坏连接的是 `InitializeBle`/`EnableBle`/
+   `RegisterGattClient`，不是打开这个服务）。
 
 写日志的规则（v21 起）：保活 B0（序列号 0、不改强度）按"前 3 条 + 每第 10 条"抽样，而
 **7 字节的 BF 与任何带强度改变的 B0 一律打全**，强度包还会多打一行

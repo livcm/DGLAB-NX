@@ -1162,7 +1162,12 @@ static bool g_btm_cccd_ready;
 #define POC_BTM_EVENT_DUMP_MAX 6u
 static BtdrvBleEventInfo g_managed_event;
 static u8 g_managed_last[0x50];
-static u32 g_managed_seen;
+
+// The other two queues btdrv keeps: the LE HID one and the general one. Both are
+// big enough that they live in .bss like the managed payload.
+static BtdrvBleEventInfo g_leh_event;
+static u8 g_leh_last[0x50];
+static BtdrvEventInfo g_general_event;
 
 static void pocBtmLinkWrite(void* context, const u8* data, size_t size)
 {
@@ -1228,12 +1233,13 @@ static void pocBtmLinkWrite(void* context, const u8* data, size_t size)
 #define POC_BTM_TEST_STRENGTH 5u
 #define POC_BTM_TEST_DURATION_MS 6000u
 
-// Two ways to subscribe were active in v19/v20: RegisterNotification plus a hand
-// written 0x0001 into the CCCD. The 2026-09-25 15:58 round proved the writes
-// reach the device (the waveform was felt) and still got nothing back, so the
-// next round separates them. 0 = RegisterNotification owns the subscription,
-// 1 = also write the CCCD by hand.
-#define POC_BTM_CCCD_HAND_WRITE 0
+// How the probe subscribes to 0x150B. Both mechanisms were active together in
+// v19/v20 (nothing came back), v21 used RegisterNotification alone (nothing came
+// back), so v22 runs the remaining arm: the CCCD written by hand and no
+// RegisterNotification at all. A hand written CCCD and the stack's own
+// subscription can disagree, which is exactly what this pair of switches is for.
+#define POC_BTM_NOTIFY_REGISTER 0
+#define POC_BTM_CCCD_HAND_WRITE 1
 
 // A slow up-and-down envelope. Four entries fill exactly one B0 packet, so the
 // pattern repeats every 100ms and never parks at a high value.
@@ -1282,10 +1288,14 @@ static bool pocBtmTransportStart(u32 handle)
     config.bf.soft_limit_b = 0;
     dglabCoyoteV3SessionInit(&g_btm_transport.session, &link, &config);
 
-    rc = btLeClientRegisterNotification(handle, true, &g_btm_transport.service,
-        &g_btm_transport.notify_char);
-    pocLog("btm transport: RegisterNotification(0x150B) rc=0x%08X", (u32)rc);
-    g_btm_transport.notify_registered = R_SUCCEEDED(rc);
+    if (POC_BTM_NOTIFY_REGISTER) {
+        rc = btLeClientRegisterNotification(handle, true, &g_btm_transport.service,
+            &g_btm_transport.notify_char);
+        pocLog("btm transport: RegisterNotification(0x150B) rc=0x%08X", (u32)rc);
+        g_btm_transport.notify_registered = R_SUCCEEDED(rc);
+    } else {
+        pocLog("btm transport: RegisterNotification off (A/B: hand written CCCD only)");
+    }
 
     // RegisterNotification only says "accepted". If it really subscribed, the
     // CCCD under 0x150B reads back as 0x0001; if it did not, the device has no
@@ -1492,56 +1502,104 @@ static void pocBtmTransportPump(u32 duration_ms)
     }
 }
 
-// Last thing before the disconnect: does btdrv's *managed* queue carry the same
-// records the `bt` channel shows? This probe has stayed away from btdrv on
-// purpose (docs/history.md §28) - what broke the connect was a second
-// InitializeBle/EnableBle and a RegisterGattClient from this process, not
-// opening the service - so the peek runs after the transport window, when the
-// measurement is already in the log, and it only reads.
-static void pocBtmManagedPeek(void)
+// Dumps one of btdrv's BLE queues: the queue hands the same record back until
+// something else arrives, so only a record that differs from the previous read
+// is worth a line. 0x50 bytes are compared and dumped, which is where a
+// notification payload would sit (size at +0x48, payload at +0x4A).
+static u32 pocBtmPeekBleQueue(const char* label,
+    Result (*read)(void*, size_t, BtdrvBleEventType*), BtdrvBleEventInfo* event, u8* last)
 {
-    Result rc = btdrvInitialize();
-
-    pocLog("btm transport: managed peek, btdrvInitialize rc=0x%08X", (u32)rc);
-    if (R_FAILED(rc))
-        return;
+    u32 seen = 0u;
 
     for (u32 i = 0; i < 8u; i++) {
         BtdrvBleEventType type = (BtdrvBleEventType)0;
         bool nonzero = false;
+        Result rc;
 
-        memset(&g_managed_event, 0, sizeof(g_managed_event));
-        rc = btdrvGetBleManagedEventInfo(&g_managed_event, sizeof(g_managed_event), &type);
+        memset(event, 0, sizeof(*event));
+        rc = read(event, sizeof(*event), &type);
         if (R_FAILED(rc)) {
-            pocLog("btm transport: managed peek read rc=0x%08X", (u32)rc);
+            pocLog("btm transport: %s peek read rc=0x%08X", label, (u32)rc);
             break;
         }
 
         for (u32 b = 0; b < sizeof(g_managed_last); b++) {
-            if (g_managed_event.data[b] != 0)
+            if (event->data[b] != 0)
                 nonzero = true;
         }
 
         if (!nonzero)
             break;
 
-        if (memcmp(g_managed_last, g_managed_event.data, sizeof(g_managed_last)) == 0)
+        if (memcmp(last, event->data, sizeof(g_managed_last)) == 0)
             continue;
 
-        memcpy(g_managed_last, g_managed_event.data, sizeof(g_managed_last));
-        g_managed_seen++;
+        memcpy(last, event->data, sizeof(g_managed_last));
+        seen++;
 
-        if (g_managed_seen <= 4u) {
+        if (seen <= 4u) {
             char raw_label[48];
 
-            snprintf(raw_label, sizeof(raw_label), "btm transport: managed#%u type=%u",
-                (unsigned)g_managed_seen, (unsigned)type);
-            pocLogWords(raw_label, g_managed_event.data, 0x50u, 0u);
+            snprintf(raw_label, sizeof(raw_label), "btm transport: %s#%u type=%u",
+                label, (unsigned)seen, (unsigned)type);
+            pocLogWords(raw_label, event->data, 0x50u, 0u);
         }
     }
 
-    pocLog("btm transport: managed peek done, %u distinct record(s)",
-        (unsigned)g_managed_seen);
+    pocLog("btm transport: %s peek done, %u distinct record(s)", label, (unsigned)seen);
+    return seen;
+}
+
+// Last thing before the disconnect: do btdrv's own queues carry the records the
+// `bt` channel never shows? A notification that never reaches us has to be
+// somewhere, and btdrv keeps three states: the managed queue, the LE HID one and
+// the general one (btdrvGetEventInfo, the one btm itself reads). This probe has
+// stayed away from btdrv on purpose (docs/history.md §28) - what broke the
+// connect was a second InitializeBle/EnableBle and a RegisterGattClient from
+// this process, not opening the service - so the peek runs after the transport
+// window, when the measurement is already in the log, and it only reads.
+static void pocBtmEventPeek(void)
+{
+    Result rc = btdrvInitialize();
+
+    pocLog("btm transport: peek, btdrvInitialize rc=0x%08X", (u32)rc);
+    if (R_FAILED(rc))
+        return;
+
+    pocBtmPeekBleQueue("managed", btdrvGetBleManagedEventInfo, &g_managed_event, g_managed_last);
+    pocBtmPeekBleQueue("lehid", btdrvGetLeHidEventInfo, &g_leh_event, g_leh_last);
+
+    // The general queue uses its own payload struct and type enum, so it gets
+    // its own small block. btm reads this queue too, so an empty read here is a
+    // possible outcome; it is still worth a line.
+    {
+        const u32 dump = sizeof(g_general_event) < 0x50u ? (u32)sizeof(g_general_event) : 0x50u;
+        const u8* raw = (const u8*)&g_general_event;
+        BtdrvEventType type = (BtdrvEventType)0;
+        bool nonzero = false;
+
+        memset(&g_general_event, 0, sizeof(g_general_event));
+        rc = btdrvGetEventInfo(&g_general_event, sizeof(g_general_event), &type);
+        if (R_FAILED(rc)) {
+            pocLog("btm transport: general peek read rc=0x%08X", (u32)rc);
+        } else {
+            for (u32 b = 0; b < dump; b++) {
+                if (raw[b] != 0)
+                    nonzero = true;
+            }
+
+            if (nonzero) {
+                char raw_label[48];
+
+                snprintf(raw_label, sizeof(raw_label), "btm transport: general#1 type=%u",
+                    (unsigned)type);
+                pocLogWords(raw_label, raw, dump, 0u);
+            } else {
+                pocLog("btm transport: general peek empty (type=%u)", (unsigned)type);
+            }
+        }
+    }
+
     btdrvExit();
 }
 
@@ -1560,7 +1618,7 @@ static void pocBtmTransportStop(void)
         g_btm_transport.notify_registered = false;
     }
 
-    pocBtmManagedPeek();
+    pocBtmEventPeek();
 
     pocLog("btm transport: done, writes=%u notify=%u b1=%u", g_btm_transport.writes,
         g_btm_transport.notifications, g_btm_transport.b1_count);
@@ -3952,7 +4010,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v21 (log the strength packets, CCCD write off)");
+    pocLog("poc build: ble_poc v22 (CCCD-only subscription, peek the btdrv queues)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before anything is opened or scanned. Collecting the
