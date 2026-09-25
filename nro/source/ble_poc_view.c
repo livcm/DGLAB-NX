@@ -400,13 +400,12 @@ void dglabBlePocViewRun(Service* dglab)
 
         u32 action = 0;
 
-        // Three keys are left. StickR (or B on the idle screen - Stick R is easy
-        // to confuse with the SR button) starts the whole sequence: the
-        // driver-level probe, then the base-btm probe. D-pad Left runs the
-        // driver-level probe on its own, which is all it is good for now that the
-        // scan-filter questions are settled.
-        if ((down & HidNpadButton_A || down & HidNpadButton_StickR || down & HidNpadButton_B) &&
-            !run_active) {
+        // One key starts the whole sequence - the driver-level probe first, then
+        // the base-btm probe. A only: it is the key that opened this page, it
+        // cannot be confused with the stick buttons, and one trigger means there
+        // is exactly one way to start a round (docs/ble-re.md, "一个开机周期只走
+        // 一条 BLE 路径"). D-pad Left still runs the driver-level probe on its own.
+        if ((down & HidNpadButton_A) && !run_active) {
             pocSendStart(dglab);
             pocSendAction(dglab, DglabPocAction_ProbeBtdrvScan);
             g_probe_sequence = 1u;
@@ -451,12 +450,12 @@ void dglabBlePocViewRun(Service* dglab)
 
         // What to press goes first; the key list is short by design (the probes
         // that answered their question were removed, see docs/history.md).
-        printf(">>> PRESS A (or StickR / B) while idle: one-key probe <<<\n");
+        printf(">>> PRESS A while idle: one-key probe <<<\n");
         printf("    1) driver-level probe (brings the BLE stack up)\n");
         printf("    2) base btm probe (scan, connect, GATT, BF/B0 + reaction test)\n");
         printf("    it leaves btm busy: reboot before the next experiment\n");
         printf("\n");
-        printf("A / StickR / B  one-key probe   D-pad Left  driver-level probe only\n");
+        printf("A            one-key probe   D-pad Left  driver-level probe only\n");
         printf("-  stop the session          +  exit\n");
 
         consoleUpdate(NULL);
