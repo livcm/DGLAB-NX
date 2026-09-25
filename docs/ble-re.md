@@ -230,6 +230,7 @@ libnx 的 `btdrv.c` 最近一次改动是 2025-04（`btdrvTriggerConnection` 的
 | --- | --- | --- | --- |
 | `0x00029E71` | 113 = `Bluetooth` | 0x14F | 蓝牙模块自己的通用失败（模块里有十几处 `mov w0,#0x9e71; movk w0,#0x2,lsl#16`）：`btdrvConnectGattServer` 与"注册放在 InitializeBle 之前"都拿到它 |
 | `0x0002A671` | 113 = `Bluetooth` | 0x153 | 2026-09-25 02:17 新见：`btLeClientWriteCharacteristic` 在**刚发过 GATT 读**（描述符/电量）之后被判失败——无响应写与有响应写都失败，那一包不会发出去。模块里没有这个字面量，可能来自同模块的 `bt` 服务一侧；语义未定（见「当前状态」的第三轮） |
+| `0x0000D671` | 113 = `Bluetooth` | 0x6B | 2026-09-25 19:02：`btdrvGetPairedDeviceInfo` 对**没有记录的地址**回它。对照 v26：先 `AddPairedDeviceInfo` 过、记录存在但内容为空时回的是 `rc=0`——所以第三方**能**往那套存储写记录，只是写不出 link key |
 | `0x0005568F` | 143 = `Btm` | 0x2AB | btm 模块拒绝（libnx 的 `btmu*` 封装在 sysmodule 里填的 ARUID 无效） |
 | `0x0000060A` | 10 = `Sf` | 3 | **服务框架**直接拒了请求：我们按 libnx 形状自造、但填了 NRO 的真实 ARUID 的那条 `btmu StartBleScanForSmartDevice` 就走到了这里 |
 | `0x0000F601` | 1 = `Kernel` | 123 = `ConnectionClosed` | 会话被服务端关掉（cmd 40 那次） |
