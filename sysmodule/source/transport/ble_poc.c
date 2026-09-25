@@ -624,8 +624,8 @@ static void pocBtRawRead(u32 handle, u32 cmd, const BtdrvGattId* serv, const Btd
     {
         char hex[3u * 0x20u + 1u];
 
-        pocHex(hex, sizeof(hex), reply, 0x10u);
-        pocLog("%s: rc=0x%08X reply %s", label, (u32)rc, hex);
+        pocLog("%s: rc=0x%08X, reply (0x%02X bytes):", label, (u32)rc, (unsigned)sizeof(reply));
+        pocLogWords(label, reply, sizeof(reply), 0u);
         pocHex(hex, sizeof(hex), payload, 0x20u);
         pocLog("%s: out %s", label, hex);
     }
@@ -713,11 +713,9 @@ static bool pocBtmTransportStart(u32 handle)
     // subscription really is in place and the device has a reason to notify.
     pocBtmSettle("before the raw reads");
 
-    if (g_btm_cccd_ready) {
-        pocBtRawRead(handle, 1u, &g_btm_transport.service, &g_btm_transport.notify_char,
-            &g_btm_cccd, "btm transport: raw CCCD");
-    }
-
+    // The battery first: its value is a known quantity (a percentage the device
+    // has to report), so it calibrates what a read reply looks like before the
+    // CCCD read needs to be interpreted.
     if (g_btm_battery_ready) {
         BtdrvGattId battery_service;
         BtdrvGattId battery_char;
@@ -731,6 +729,13 @@ static bool pocBtmTransportStart(u32 handle)
 
         pocBtRawRead(handle, 0u, &battery_service, &battery_char, NULL,
             "btm transport: raw battery");
+        pocBtmSettle("after the raw battery read");
+    }
+
+    if (g_btm_cccd_ready) {
+        pocBtRawRead(handle, 1u, &g_btm_transport.service, &g_btm_transport.notify_char,
+            &g_btm_cccd, "btm transport: raw CCCD");
+        pocBtmSettle("after the raw CCCD read");
     }
 
     g_btm_transport.connected = true;
@@ -3145,7 +3150,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v30 (read the CCCD and battery through the raw CMIF call)");
+    pocLog("poc build: ble_poc v31 (raw reads: battery first, then the CCCD)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before any probe runs: both probes care about what has
