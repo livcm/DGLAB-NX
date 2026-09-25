@@ -37,7 +37,14 @@ int dglabListMeasure(const DglabListFonts* fonts, const DglabRow* rows, int coun
 
     for (int i = 0; i < count; i++) {
         int height;
-        int lines = noteLines(fonts->note, rows[i].note, width);
+        // A note is drawn under item rows and nowhere else (dglabListDraw below),
+        // so only those reserve room for one. Counting it for every kind is how
+        // a paragraph carrying its text in `note` measured a band that nothing
+        // ever filled: the page scrolled as if it had content there. Measure and
+        // draw have to come from the same rule, which is what this is.
+        int lines = rows[i].kind == DglabRow_Item
+            ? noteLines(fonts->note, rows[i].note, width)
+            : 0;
 
         switch (rows[i].kind) {
             case DglabRow_Note:

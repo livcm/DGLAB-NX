@@ -482,6 +482,83 @@ static const DglabString kSettingNameKeys[DglabMotionSetting_Count] = {
     [DglabMotionSetting_ChannelLimitB] = DglabString_SetChannelLimitB,
 };
 
+// A paragraph row paints the text it carries in `label`: that kind is the page's
+// own voice (white body text, no bullet, wrapped to the column) and `note` is
+// not one of its fields. The Bluetooth page handed its two explanations over in
+// `note` instead, so it drew an empty band where they belong - and the layout
+// checks could not tell, because "no ink at all" is inside every region they
+// walk. Two frames whose paragraph text differs only change if that text is what
+// gets painted, and a paragraph carrying its text in `note` has to stay blank.
+static void testParagraphRowPaintsItsText(void)
+{
+    static uint8_t with_label[1280 * 720 * 4];
+    static uint8_t note_only[1280 * 720 * 4];
+    static uint8_t no_text[1280 * 720 * 4];
+    const DglabTheme dark = dglabThemeDark;
+    DglabFontSet font_set = blockFonts();
+    DglabListFonts fonts = { font_set.body, font_set.value, font_set.note };
+    const DglabListStyle style = {
+        .x = DGLAB_PAGE_CONTENT_X,
+        .origin_y = DGLAB_PAGE_CONTENT_TOP,
+        .width = DGLAB_PAGE_CONTENT_WIDTH,
+        .focus = -1,
+        .navigation = false,
+    };
+    DglabRow rows[1];
+    DglabRowBox boxes[1];
+    DglabRowBox note_boxes[1];
+    DglabRowBox empty_boxes[1];
+    DglabCanvas canvas;
+    int label_differs = 0;
+    int note_differs = 0;
+
+    dglabThemeSet(&dark);
+    setScreenSize(1280, 720, 1, 1);
+
+    rows[0] = (DglabRow){ .kind = DglabRow_Paragraph, .label = "the page's own words" };
+    dglabListMeasure(&fonts, rows, 1, DGLAB_PAGE_CONTENT_WIDTH, boxes, 1);
+    dglabCanvasInit(&canvas, with_label, 1280, 720, 1280 * 4);
+    dglabCanvasFill(&canvas, 0, 0, 1280, 720, dark.background);
+    dglabListDraw(&canvas, &fonts, &style, rows, boxes, 1);
+
+    rows[0] = (DglabRow){ .kind = DglabRow_Paragraph, .note = "the page's own words" };
+    dglabListMeasure(&fonts, rows, 1, DGLAB_PAGE_CONTENT_WIDTH, note_boxes, 1);
+    dglabCanvasInit(&canvas, note_only, 1280, 720, 1280 * 4);
+    dglabCanvasFill(&canvas, 0, 0, 1280, 720, dark.background);
+    dglabListDraw(&canvas, &fonts, &style, rows, note_boxes, 1);
+
+    rows[0] = (DglabRow){ .kind = DglabRow_Paragraph };
+    dglabListMeasure(&fonts, rows, 1, DGLAB_PAGE_CONTENT_WIDTH, empty_boxes, 1);
+    dglabCanvasInit(&canvas, no_text, 1280, 720, 1280 * 4);
+    dglabCanvasFill(&canvas, 0, 0, 1280, 720, dark.background);
+    dglabListDraw(&canvas, &fonts, &style, rows, empty_boxes, 1);
+
+    // The text is painted (the row does leave ink on the frame, not just its
+    // closing rule) ...
+    for (size_t i = 0; i < sizeof(with_label); i++) {
+        if (with_label[i] != no_text[i])
+            label_differs++;
+    }
+
+    CHECK(label_differs > 0);
+
+    // ... and a paragraph that carries it anywhere else is drawn exactly like an
+    // empty one, which is the shape of the bug this pins.
+    for (size_t i = 0; i < sizeof(note_only); i++) {
+        if (note_only[i] != no_text[i])
+            note_differs++;
+    }
+
+    CHECK(note_differs == 0);
+
+    // Measured the same way too: a note is drawn under item rows only, so only
+    // those may reserve room for one. A paragraph that reserves a band nothing
+    // draws is the phantom gap this pins.
+    CHECK(note_boxes[0].height == empty_boxes[0].height);
+
+    dglabThemeSet(NULL);
+}
+
 static void testAdvancedScreen(void)
 {
     static uint8_t screen_pixels[1280 * 720 * 4];
@@ -2226,6 +2303,7 @@ int main(void)
     testScreen();
     testMenu();
     testMotionScreen();
+    testParagraphRowPaintsItsText();
     testAdvancedScreen();
     testAboutShowsItsThreeVersions();
     testAboutShowsItsThemeRow();

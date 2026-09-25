@@ -90,10 +90,20 @@ static int buildRows(const DglabBlePageState* state, DglabRow* rows, BleRowText*
         theme->text };
     rows[count++] = (DglabRow){ DglabRow_Item, dglabString(DglabString_BlePackets), text->packets,
         NULL, theme->text };
-    rows[count++] = (DglabRow){ DglabRow_Paragraph, NULL, NULL,
-        dglabString(DglabString_BleOpenLoop), theme->text };
-    rows[count++] = (DglabRow){ DglabRow_Paragraph, NULL, NULL,
-        dglabString(DglabString_BleProcedure), theme->text };
+    // A paragraph row paints its own text out of `label` (nro/include/dglab/ui/list.h).
+    // These two used to hand it over in `note`, which the row kind never reads -
+    // so the page drew an empty band where its two explanations belong, and
+    // nothing said so: the layout checks only look at where ink lands, and "no
+    // ink at all" is inside every region (found by rendering the page, see
+    // tests/canvas). Spell the field out so the next edit cannot repeat it.
+    rows[count++] = (DglabRow){
+        .kind = DglabRow_Paragraph,
+        .label = dglabString(DglabString_BleOpenLoop),
+    };
+    rows[count++] = (DglabRow){
+        .kind = DglabRow_Paragraph,
+        .label = dglabString(DglabString_BleProcedure),
+    };
 
     return count;
 }

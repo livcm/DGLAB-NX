@@ -40,6 +40,7 @@
 
 #include <dglab/ui/screen.h>
 #include <dglab/ui/advanced.h>
+#include <dglab/ui/ble.h>
 #include <dglab/ui/menu.h>
 #include <dglab/ui/motion.h>
 #include <dglab/ui/touch.h>
@@ -134,6 +135,19 @@ int main(int argc, char** argv)
         "tx command 1 channel 0 value 15",
         "app 3c71d0b2-... has been quiet for 90 s",
     };
+    // The Bluetooth page's own log, as the ring carries it: the lines are the
+    // session's, and the ring cuts them at 39 characters (DGLAB_SCREEN_LOG_LINE_LEN),
+    // so a real one looks like these.
+    static const char* ble_log_lines[] = {
+        "ble session: btmInitialize rc=0x00000000",
+        "ble session: BleConnect(EA:A8:AC:22:2C:18)",
+        "ble session: connected handle=4 (events=1)",
+        "ble session: protocol coordinates found",
+        "btm transport: RegisterNotification(0x150B) rc",
+        "btm transport: write 7 byte(s) BF64641E0000",
+        "ble session: streaming, channel limits A=100",
+        "btm transport: write 20 byte(s) B01F0000646",
+    };
     DglabFont font;
     DglabScreenState state;
     DglabCanvas canvas;
@@ -143,7 +157,7 @@ int main(int argc, char** argv)
     if (argc < 3) {
         fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> [normal|nowifi|stopped|"
                         "log|menu|motion|touch|touchdock|touchclamp|touchfixed|advanced|"
-                        "advanceddensity|about|aboutlow] [dock]\n");
+                        "advanceddensity|about|aboutlow|ble|bleend|blelog] [dock]\n");
         return 2;
     }
 
@@ -428,6 +442,45 @@ int main(int argc, char** argv)
         state.log_offset = 0;
 
         dglabScreenDraw(&canvas, &g_fonts, &state);
+    } else if (argc >= 4 && (strcmp(argv[3], "ble") == 0 || strcmp(argv[3], "bleend") == 0)) {
+        // The Bluetooth page with a session running: the two channel strength
+        // ceilings (read only here), the two strengths the D-pad dials, and the
+        // packet count. `bleend` scrolls to the notes under the rows.
+        DglabBlePageState ble;
+
+        memset(&ble, 0, sizeof(ble));
+        ble.sysmodule_ok = true;
+        ble.limit_a = 100u;
+        ble.limit_b = 30u;
+        ble.strength_a = 20u;
+        ble.strength_b = 5u;
+        ble.status.state = DglabBleState_Connected;
+        ble.status.connected = 1u;
+        ble.status.packets = 172u;
+        ble.status.address[0] = 0xEA;
+        ble.status.address[1] = 0xA8;
+        ble.status.address[2] = 0xAC;
+        ble.status.address[3] = 0x22;
+        ble.status.address[4] = 0x2C;
+        ble.status.address[5] = 0x18;
+
+        if (strcmp(argv[3], "bleend") == 0)
+            ble.offset = 1000; // past the end: the page clamps it
+
+        dglabBleDraw(&canvas, &g_fonts, &ble);
+    } else if (argc >= 4 && strcmp(argv[3], "blelog") == 0) {
+        // The Bluetooth page's log sub-page: the sysmodule log page's layout
+        // with this session's title.
+        DglabLogPage log;
+
+        log.title = dglabString(DglabString_BleLogTitle);
+        log.lines = ble_log_lines;
+        log.count = (int)(sizeof(ble_log_lines) / sizeof(ble_log_lines[0]));
+        log.offset = dglabLogPageMaxOffset((int)(sizeof(ble_log_lines) /
+            sizeof(ble_log_lines[0])));
+        log.sysmodule_ok = true;
+
+        dglabLogPageDraw(&canvas, &g_fonts, &log);
     } else {
         dglabScreenDraw(&canvas, &g_fonts, &state);
     }
