@@ -23,7 +23,7 @@ typedef struct {
     bool sysmodule_ok;     ///< the header's liveness line
     bool driver_running;   ///< step 1 of the start sequence is still running
     bool starting;         ///< ...and step 2 has not been sent yet
-    u32 soft_limit;        ///< the ceiling this page asks for (0..200, step 5)
+    u32 soft_limit;        ///< the ceiling this page asks for (0..100, step 1)
     int offset;            ///< first row shown, clamped by content height
 } DglabBlePageState;
 

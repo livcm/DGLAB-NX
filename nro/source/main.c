@@ -1608,7 +1608,9 @@ static void runBleView(Service* dglab, PadState* pad)
 
     memset(&state, 0, sizeof(state));
     memset(&drawn, 0, sizeof(drawn));
-    state.soft_limit = 20u;
+    // Default 0, ceiling and step the same as the Socket mode's strength keys
+    // (TEST_STRENGTH_*): one number, one range, whichever transport is driving.
+    state.soft_limit = TEST_STRENGTH_MIN;
 
     while (appletMainLoop()) {
         DglabCanvas canvas;
@@ -1627,11 +1629,19 @@ static void runBleView(Service* dglab, PadState* pad)
 
         // Up and down set the ceiling the device enforces; the row shows it, so
         // there is no hint for it in the bottom bar.
-        if (down & HidNpadButton_Up)
-            state.soft_limit = (state.soft_limit + 5u > 200u) ? 200u : state.soft_limit + 5u;
+        if (down & HidNpadButton_Up) {
+            state.soft_limit += TEST_STRENGTH_STEP;
 
-        if (down & HidNpadButton_Down)
-            state.soft_limit = (state.soft_limit >= 5u) ? state.soft_limit - 5u : 0u;
+            if (state.soft_limit > TEST_STRENGTH_MAX)
+                state.soft_limit = TEST_STRENGTH_MAX;
+        }
+
+        if (down & HidNpadButton_Down) {
+            if (state.soft_limit > TEST_STRENGTH_MIN)
+                state.soft_limit -= TEST_STRENGTH_STEP;
+            else
+                state.soft_limit = TEST_STRENGTH_MIN;
+        }
 
         if (down & HidNpadButton_X)
             serviceDispatch(dglab, DGLAB_IPC_CMD_BLE_STOP);
