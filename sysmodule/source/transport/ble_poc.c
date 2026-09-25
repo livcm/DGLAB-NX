@@ -496,13 +496,29 @@ static void pocBtmLinkWrite(void* context, const u8* data, size_t size)
 #define POC_BTM_TEST_STRENGTH 5u
 #define POC_BTM_TEST_DURATION_MS 6000u
 
+// The wheel phase tests the one strength change this console has nothing to do
+// with: the device's own wheel. The official v3 README (example No.3) says a
+// wheel change is answered with a B1 carrying sequence 0, and the user can feel
+// the output rise - which proves the strength really did change. Neither half
+// depends on our B0 being understood, so this is the cleanest test of the
+// notification path that exists.
+//
+// Two conditions come out of the official example and the user's phone test
+// (2026-09-25): the channel has to be outputting, so a waveform must play, and
+// the soft limit is what keeps that output small. The device is brought to
+// strength 0 by the baseline phase before this one starts.
+//
+// Set POC_BTM_WHEEL_DURATION_MS to 0 to skip the phase.
+#define POC_BTM_WHEEL_SOFT_LIMIT 10u
+#define POC_BTM_WHEEL_DURATION_MS 15000u
+
 // How the probe subscribes to 0x150B. Both mechanisms were active together in
-// v19/v20 (nothing came back), v21 used RegisterNotification alone (nothing came
-// back), so v22 runs the remaining arm: the CCCD written by hand and no
-// RegisterNotification at all. A hand written CCCD and the stack's own
-// subscription can disagree, which is exactly what this pair of switches is for.
-#define POC_BTM_NOTIFY_REGISTER 0
-#define POC_BTM_CCCD_HAND_WRITE 1
+// v19/v20, RegisterNotification alone in v21, the hand written CCCD alone in
+// v22 - all three silent. v24 goes back to RegisterNotification alone, which is
+// the subscription the phone app's working session uses (the same API, the same
+// stack), so the wheel phase compares like with like.
+#define POC_BTM_NOTIFY_REGISTER 1
+#define POC_BTM_CCCD_HAND_WRITE 0
 
 // A slow up-and-down envelope. Four entries fill exactly one B0 packet, so the
 // pattern repeats every 100ms and never parks at a high value.
@@ -511,6 +527,16 @@ static const DglabCoyoteV3WaveformEntry g_poc_btm_test_waveform[] = {
     { .frequency_ms = 100u, .strength = 30u },
     { .frequency_ms = 100u, .strength = 60u },
     { .frequency_ms = 100u, .strength = 30u },
+};
+
+// A gentler envelope for the wheel phase: the wheel can push the channel up to
+// the soft limit on its own, so the peak amplitude is halved to keep the ceiling
+// at roughly what the reaction test reaches.
+static const DglabCoyoteV3WaveformEntry g_poc_btm_wheel_waveform[] = {
+    { .frequency_ms = 100u, .strength = 0u },
+    { .frequency_ms = 100u, .strength = 15u },
+    { .frequency_ms = 100u, .strength = 30u },
+    { .frequency_ms = 100u, .strength = 15u },
 };
 
 // A GATT request that follows a read right away is answered with
@@ -948,15 +974,57 @@ static void pocBtmTransportReactionTest(void)
     pocBtmTransportPump(1000u);
 }
 
+// The device changes its own strength while this phase runs - the user turns the
+// wheel - and per the official README that must answer a B1 with sequence 0. The
+// console sends nothing but the waveform keepalive here (every B0 carries "no
+// change" for both channels), so anything that arrives in this window came from
+// the device's own control.
+static void pocBtmTransportWheelPhase(void)
+{
+    const size_t entries = sizeof(g_poc_btm_wheel_waveform) / sizeof(g_poc_btm_wheel_waveform[0]);
+
+    if (!g_btm_transport.connected)
+        return;
+
+    if (POC_BTM_WHEEL_DURATION_MS == 0u) {
+        pocLog("btm transport: wheel phase skipped (POC_BTM_WHEEL_DURATION_MS is 0)");
+        return;
+    }
+
+    pocLog("btm transport: wheel phase soft=%u peak=%u for %ums - TURN THE WHEEL NOW",
+        (unsigned)POC_BTM_WHEEL_SOFT_LIMIT, (unsigned)g_poc_btm_wheel_waveform[2].strength,
+        (unsigned)POC_BTM_WHEEL_DURATION_MS);
+
+    pocBtmTransportSetSoftLimits((u8)POC_BTM_WHEEL_SOFT_LIMIT);
+
+    if (!dglabCoyoteV3SessionSetWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelA,
+            g_poc_btm_wheel_waveform, entries)) {
+        pocLog("btm transport: wheel phase waveform rejected, capping again");
+        pocBtmTransportSetSoftLimits(0u);
+        return;
+    }
+
+    pocBtmTransportPump(POC_BTM_WHEEL_DURATION_MS);
+
+    pocLog("btm transport: wheel phase done, capping and zeroing");
+    pocBtmTransportSetSoftLimits(0u);
+    dglabCoyoteV3SessionClearWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelA);
+    dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelA);
+    dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelB);
+    pocBtmTransportPump(1000u);
+}
+
 // One transport round: the zero-strength baseline first (soft limits 0, nothing
 // can come out of the device, B0 packets still carry sequence numbers the device
-// is supposed to answer), then the reaction test.
+// is supposed to answer), then the wheel phase (a change the device makes on its
+// own) and the reaction test (a change we make).
 static void pocBtmTransportRun(u32 handle)
 {
     if (!pocBtmTransportStart(handle))
         return;
 
     pocBtmTransportPump(3000u);
+    pocBtmTransportWheelPhase();
     pocBtmTransportReactionTest();
     pocBtmTransportStop();
 }
@@ -2886,7 +2954,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v23 (console trimmed to the two probes)");
+    pocLog("poc build: ble_poc v24 (wheel phase: the device's own strength change)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before any probe runs: both probes care about what has
