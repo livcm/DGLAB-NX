@@ -54,6 +54,15 @@ static bool g_target_address_valid;
 // running (or starting), 2 = the btm probe is running. The next session is
 // started when the previous one has finished.
 static u32 g_probe_sequence;
+static u32 g_probe_idle_frames;
+
+// The next session starts only after the previous one has looked idle for this
+// many consecutive frames. One frame is not enough: the status can still say
+// "stopped" (or the read can fail) while the worker is finishing its last
+// connects, and starting the btm session on top of that is what left the
+// 19:0x round with result=0x1A - the same failure as before the exefs patch
+// (docs/ble-re.md, "一个开机周期只走一条 BLE 路径").
+#define PROBE_SEQUENCE_IDLE_FRAMES 30u
 
 static const char* pocStateName(u32 state)
 {
@@ -363,14 +372,24 @@ void dglabBlePocViewRun(Service* dglab)
         // the btm session makes the connect fail, docs/ble-re.md), and the btm
         // probe runs in the next one. The sequence is stepped here so the user
         // presses the key once.
-        if (!run_active && g_probe_sequence == 1u) {
-            logPushLine("one-key probe: driver-level probe done, starting the btm probe");
-            pocSendStart(dglab);
-            pocSendAction(dglab, DglabPocAction_ProbeBtmBle);
-            g_probe_sequence = 2u;
-        } else if (!run_active && g_probe_sequence == 2u) {
-            logPushLine("one-key probe: done - reboot before the next experiment");
-            g_probe_sequence = 0u;
+        if (!run_active && g_probe_sequence != 0u) {
+            g_probe_idle_frames++;
+        } else if (g_probe_sequence != 0u) {
+            g_probe_idle_frames = 0;
+        }
+
+        if (g_probe_sequence != 0u && g_probe_idle_frames >= PROBE_SEQUENCE_IDLE_FRAMES) {
+            if (g_probe_sequence == 1u) {
+                logPushLine("one-key probe: driver-level probe done, starting the btm probe");
+                pocSendStart(dglab);
+                pocSendAction(dglab, DglabPocAction_ProbeBtmBle);
+                g_probe_sequence = 2u;
+            } else {
+                logPushLine("one-key probe: done - reboot before the next experiment");
+                g_probe_sequence = 0u;
+            }
+
+            g_probe_idle_frames = 0;
         }
 
         if (down & HidNpadButton_Plus)
@@ -386,7 +405,8 @@ void dglabBlePocViewRun(Service* dglab)
         // driver-level probe, then the base-btm probe. D-pad Left runs the
         // driver-level probe on its own, which is all it is good for now that the
         // scan-filter questions are settled.
-        if ((down & HidNpadButton_StickR || down & HidNpadButton_B) && !run_active) {
+        if ((down & HidNpadButton_A || down & HidNpadButton_StickR || down & HidNpadButton_B) &&
+            !run_active) {
             pocSendStart(dglab);
             pocSendAction(dglab, DglabPocAction_ProbeBtdrvScan);
             g_probe_sequence = 1u;
@@ -431,12 +451,12 @@ void dglabBlePocViewRun(Service* dglab)
 
         // What to press goes first; the key list is short by design (the probes
         // that answered their question were removed, see docs/history.md).
-        printf(">>> PRESS RIGHT STICK (StickR) or B while idle: one-key probe <<<\n");
+        printf(">>> PRESS A (or StickR / B) while idle: one-key probe <<<\n");
         printf("    1) driver-level probe (brings the BLE stack up)\n");
         printf("    2) base btm probe (scan, connect, GATT, BF/B0 + reaction test)\n");
         printf("    it leaves btm busy: reboot before the next experiment\n");
         printf("\n");
-        printf("StickR or B  one-key probe   D-pad Left  driver-level probe only\n");
+        printf("A / StickR / B  one-key probe   D-pad Left  driver-level probe only\n");
         printf("-  stop the session          +  exit\n");
 
         consoleUpdate(NULL);
