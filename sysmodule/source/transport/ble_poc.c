@@ -1330,102 +1330,6 @@ static void pocControlConnect(const char* label)
     pocLog("%s: control connect client_if=0xFF rc=0x%08X", label, (u32)rc);
 }
 
-// Pairing. The user's iOS note settles what the device supports: the App's
-// "device binding" toggle makes iOS show a real pairing prompt, so the device
-// speaks LE pairing - and without it the connection stays transient (the device
-// disappears from the phone's list again). On this console the request arrives on
-// the *general* btdrv event queue as an SspRequest (type 3), and nothing else
-// will answer it for us, so the probe accepts it itself and then reads the
-// paired-device record back: link_key_present != 0 means a bond really exists.
-//
-// Accepting is off by default on purpose: the App says a bound device only
-// accepts the host it is bound to, so bonding the console to this device could
-// leave the phone unable to connect until the binding is cleared on the device
-// itself. With 0 the probe still asks for a bond and logs whether the device
-// even offers one, then cancels it.
-#define POC_BTM_BOND_ACCEPT 0
-
-static void pocBtdrvTryBond(const BtdrvAddress* addr, const char* label)
-{
-    SetSysBluetoothDevicesSettings settings;
-    Result rc = btdrvCreateBond(*addr, 0);
-
-    pocLog("%s: CreateBond(type=0) rc=0x%08X (accept=%u)", label, (u32)rc,
-        (unsigned)POC_BTM_BOND_ACCEPT);
-
-    for (u32 i = 0; i < 40u; i++) {
-        BtdrvEventType type = (BtdrvEventType)0;
-        bool answered = false;
-
-        memset(&g_general_event, 0, sizeof(g_general_event));
-        rc = btdrvGetEventInfo(&g_general_event, sizeof(g_general_event), &type);
-
-        if (R_SUCCEEDED(rc)) {
-            const u8* raw = (const u8*)&g_general_event;
-
-            if ((u32)type == (u32)BtdrvEventType_SspRequest ||
-                (u32)type == (u32)BtdrvEventType_PairingPinCodeRequest) {
-                Result respond = 0;
-
-                pocLog("%s: pairing event type=%u from %02X:%02X:...:%02X", label, (u32)type,
-                    raw[0], raw[1], raw[5]);
-
-                if (POC_BTM_BOND_ACCEPT) {
-                    // variant 0 = SSP confirm (Just Works). A passkey variant would
-                    // need a value shown on the device, which this device has none of.
-                    respond = btdrvRespondToSspRequest(*addr, 0, true, 0);
-                    pocLog("%s: RespondToSspRequest(variant=0, accept=1) rc=0x%08X", label,
-                        (u32)respond);
-                } else {
-                    respond = btdrvCancelBond(*addr);
-                    pocLog("%s: bonding not accepted by this build, CancelBond rc=0x%08X",
-                        label, (u32)respond);
-                }
-                answered = true;
-            }
-        }
-
-        if (answered)
-            break;
-
-        svcSleepThread(250000000ull); // 250ms, up to 10s
-    }
-
-    memset(&settings, 0, sizeof(settings));
-    rc = btdrvGetPairedDeviceInfo(*addr, &settings);
-    pocLog("%s: paired readback rc=0x%08X link_key_present=%u name=\"%.12s\"", label, (u32)rc,
-        (u32)settings.link_key_present, settings.name.name);
-}
-
-// The device's advertised local name (docs/dglab-protocol.md, "支持的设备").
-#define POC_COYOTE_DEVICE_NAME "47L121000"
-
-// Writes a paired-device record for the target address through btdrv (cmd 24)
-// and reads it back, then asks for a bond. The connect path resolves its
-// client_if from a slot table that is only filled for devices the console
-// already knows (docs/ble-re.md, "连接归谁"), and this store is the one such
-// piece of knowledge a third-party process can write - so the experiment is
-// "make the device known, then connect with our own client_if".
-static void pocBtdrvAddPairedDevice(const BtdrvAddress* addr)
-{
-    SetSysBluetoothDevicesSettings settings;
-    Result rc;
-
-    memset(&settings, 0, sizeof(settings));
-    memcpy(settings.addr.address, addr->address, sizeof(settings.addr.address));
-    snprintf(settings.name.name, sizeof(settings.name.name), "%s", POC_COYOTE_DEVICE_NAME);
-    snprintf(settings.name2, sizeof(settings.name2), "%s", POC_COYOTE_DEVICE_NAME);
-
-    rc = btdrvAddPairedDeviceInfo(&settings);
-    pocLog("btdrv probe: AddPairedDeviceInfo(%02X:%02X:...:%02X) rc=0x%08X",
-        addr->address[0], addr->address[1], addr->address[5], (u32)rc);
-
-    memset(&settings, 0, sizeof(settings));
-    rc = btdrvGetPairedDeviceInfo(*addr, &settings);
-    pocLog("btdrv probe: GetPairedDeviceInfo rc=0x%08X name=\"%.12s\"", (u32)rc,
-        settings.name.name);
-}
-
 static void pocRunBtdrvScanProbe(PocWorker* w)
 {
     static const u16 kInterval[4] = { 0x0060u, 0x0060u, 0x0060u, 0x0030u };
@@ -1518,24 +1422,6 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     pocBtEventsOpen();
     pocBtEventsDrain("btdrv probe before register", 16u, NULL);
     pocControlConnect("after bt open");
-
-    // Make the device known to the console before anything tries to connect to
-    // it, then try a connect with the interface the manager itself handed out.
-    if (g_poc.use_target_address) {
-        BtdrvAddress paired;
-        Result paired_rc;
-
-        memset(&paired, 0, sizeof(paired));
-        memcpy(paired.address, g_poc.target_address, sizeof(paired.address));
-
-        pocBtdrvAddPairedDevice(&paired);
-        pocBtdrvTryBond(&paired, "btdrv probe");
-
-        paired_rc = btdrvConnectGattServer(client_if, paired, true, 0);
-        pocLog("btdrv probe: ConnectGattServer(client_if=0x%02X, after paired write) "
-            "rc=0x%08X", client_if, (u32)paired_rc);
-        pocDrainBleEvents("btdrv probe after paired connect", 1500u, NULL);
-    }
 
     registered_if = pocRegisterGattClientStep(client_if);
 
@@ -2955,12 +2841,6 @@ static void pocRunBtmBleProbe(PocWorker* w)
                 pocLog("btm probe: protocol coordinates missing, transport not started");
             }
 
-            // The connection is still up: try the pairing the App's "device
-            // binding" toggle performs on the phone (see pocBtdrvTryBond). It
-            // touches btdrv on a live connection, so it runs last, after every
-            // measurement is in the log.
-            pocBtdrvTryBond(&address, "btm probe");
-
             rc = btmBleDisconnect(handle);
             pocLog("btm probe: BleDisconnect rc=0x%08X", (u32)rc);
         } else {
@@ -2987,12 +2867,6 @@ static void pocRunBtmBleProbe(PocWorker* w)
             } else {
                 pocLog("btm probe: protocol coordinates missing, transport not started");
             }
-
-            // The connection is still up: try the pairing the App's "device
-            // binding" toggle performs on the phone (see pocBtdrvTryBond). It
-            // touches btdrv on a live connection, so it runs last, after every
-            // measurement is in the log.
-            pocBtdrvTryBond(&configured, "btm probe (configured)");
 
             rc = btmBleDisconnect(handle);
             pocLog("btm probe (configured): BleDisconnect rc=0x%08X", (u32)rc);
@@ -3080,7 +2954,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v26 (bonding: CreateBond + answer the SSP request)");
+    pocLog("poc build: ble_poc v27 (pairing branch removed, back to the connection)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before any probe runs: both probes care about what has

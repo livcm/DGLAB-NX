@@ -99,7 +99,7 @@ Poc 控制台现在只剩三个键（2026-09-25 清理后）：
 | 按键 | 动作 |
 | --- | --- |
 | **`StickR`（把右摇杆按下去）或空闲屏 `B`** | **一键序列**：先起驱动级探针会话（它把 BLE 栈打开），该会话结束后自动起 **base `btm` 探针会话**（扫两遍 general / smart-device → 连配置地址 → GATT 表 → 传输层 BF/B0 + 等 B1 → 反应测试：小强度 + 波形）。**btm 探针会让 btm 留活，跑完必须重启** |
-| **`←`（十字键左）** | 只跑驱动级探针会话（btdrv 扫描 + 广播 dump + `InitializeBle`/`EnableBle`；v25 起还会写一条**配对设备记录**、v26 起再试一次真正的**配对**（`CreateBond` + 自己应答 SSP 请求），然后用管理器给的 `client_if` 自己连一次，见 `docs/ble-re.md` 的「连接归谁」） |
+| **`←`（十字键左）** | 只跑驱动级探针会话（btdrv 扫描 + 广播 dump + `InitializeBle`/`EnableBle`，再用管理器给的 `client_if` 自己连一次；v25/v26 试过的配对支线已删，结论见 `docs/ble-re.md` 的「连接归谁」） |
 | `-` | 停止会话 |
 | `+` | 退出 NRO |
 
@@ -973,7 +973,7 @@ base `btm` 的请求里根本没有 ARUID 字段——它用 `RegisterAppletReso
 重启。2026-09-24/25 的成功轮都是这条路径。`sysmodule/source/transport/ble_poc.c` 里
 `pocBtmProbe` 开头那段注释还写着"盲连已经去掉"，与下面的代码矛盾，下一轮顺手改掉。）
 
-每次会话开头都会打印 `poc build: ble_poc v26 (bonding: CreateBond + answer the SSP request)`：拿到日志先看
+每次会话开头都会打印 `poc build: ble_poc v27 (pairing branch removed, back to the connection)`：拿到日志先看
 这一行，就能确认 SD 上装的是不是带 btm 探针的那个构建。
 
 这个探针**现在是手动触发、开机不跑**：它曾经被改成"开机后第一次会话自动执行"，2026-09-22

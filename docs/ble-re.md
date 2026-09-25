@@ -1085,6 +1085,30 @@ passkey)` 自己应答——主机上没人会替我们答。v26 因此试了「
 才走"触发配对请求但立刻自动取消"的方案（即 `POC_BTM_BOND_ACCEPT = 0`，不要把设备绑到主机上
 ——App 里写明绑定后只有被绑定的主机能连，绑定信息只能在 App 或设备重置里清除）。
 
+**实测结果（2026-09-25 18:43，v26）：配对支线关闭**。
+
+    btdrv probe: AddPairedDeviceInfo(EA:A8:...:18) rc=0x00000000
+    btdrv probe: GetPairedDeviceInfo rc=0x00000000 name=""      ← 记录没写进去
+    btdrv probe: CreateBond(type=0) rc=0x00000000 (accept=0)
+    btdrv probe: paired readback rc=0x00000000 link_key_present=0 name=""   ← 没有绑定
+    btdrv probe: ConnectGattServer(client_if=0x02, after paired write) rc=0x00300C71
+
+即：`CreateBond` 被受理，但**整轮没有任何配对事件**（没有 `SspRequest` / `PairingPinCodeRequest`），
+设备也没有被绑上（`link_key_present=0`，所以不会影响手机 App）。这与 iOS 的观察一致——
+设备只在 App 的「设备绑定」模式下才肯配对，主机侧推不动这一步；`AddPairedDeviceInfo` 写的记录
+也留不下（读回来是空的），说明那套存储要靠真配对产生的 link key。btm 会话里那次尝试因为
+传输窗口末尾的 peek 已经 `btdrvExit` 而拿到 `Kernel/InvalidHandle`，没真正执行（不影响结论）。
+
+顺带得到一个新观测点：连接尝试失败后，btdrv 的 managed 队列里出现了一条**带设备地址**的记录
+（重复出现）：
+
+    03 00 00 00 EA A8 AC 22 2C 18 00 00 00 00 00 00 00 00
+    └ 0x3 ───┘ └── 目标设备地址 ──┘
+
+它不匹配 libnx `BtdrvBleEventInfo` 里的任何成员（`client_connection` 的地址在 +0xC），
+所以固件这条记录的布局还没有对上；它紧接着连接尝试出现，像是"针对这个地址的连接尝试/结果"
+的记录，是第一个能观测"栈对我们的连接请求做了什么"的东西，留给后面查。
+
 ### 早期收束结论（2026-09-22，已被上面的状态取代）
 
 1. **扫描可用**：btdrv 驱动级扫描稳定拿到设备（地址、rssi、AD 内容）。
