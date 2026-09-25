@@ -3,6 +3,7 @@
 #include <switch.h>
 
 #include <dglab/ipc_poc.h>
+#include <dglab/ipc.h>
 
 // BLE transport proof of concept.
 //
@@ -35,3 +36,39 @@ void blePocGetStatus(DglabPocStatus* out);
 // next cursor. Cursors are absolute byte offsets into an internal ring buffer,
 // so a reader that falls behind simply skips forward.
 u32 blePocReadLog(u32 cursor, char* out, u32 out_size);
+
+// ---------------------------------------------------------------------------
+// The BLE session (the mode a client uses to actually play)
+// ---------------------------------------------------------------------------
+//
+// The probes above stay as they are. This is the transport a client drives the
+// device through: it takes the same two inputs the Socket mode takes
+// (DGLAB_IPC_CMD_NET_SEND for strength, DGLAB_IPC_CMD_NET_WAVEFORM for
+// waveform data) and writes them to the device through the local Coyote V3
+// session. There is no readback on this firmware (docs/ble-re.md, "连接所有权在
+// 服务层是封的"), so the status reports what this side asked for.
+
+// Starts a session with the given soft limit (0..200; 0 means the device cannot
+// output anything). The worker thread runs the usual bring-up - the caller has
+// to have run the driver-level probe in an earlier session of this boot, see
+// docs/ble-poc.md - then connects, subscribes and streams until stopped.
+Result blePocSessionStart(const DglabBleStartRequest* request);
+
+// Requests a stop; the worker caps the device and disconnects on its own.
+Result blePocSessionStop(void);
+
+// Copies the session status. Open loop: strength_a/strength_b are the values
+// this side last asked for.
+void blePocSessionGetStatus(DglabBleStatus* out);
+
+// True while a session is requested or running, so a client can route its
+// gameplay inputs (or the sysmodule can, see main.c).
+bool blePocSessionIsActive(void);
+
+// Queues waveform data for the session (no-op when none is running).
+Result blePocSessionUploadWaveform(const DglabNetWaveformRequest* request);
+
+// Queues a Socket V3 message for the session: `strength-<ch>+<mode>+<value>`
+// is what the gameplay sends (docs/dglab-socket.md), and it is applied to the
+// local session instead of being forwarded to a phone.
+Result blePocSessionSend(const DglabNetSendRequest* request);

@@ -12,7 +12,7 @@
 //
 // This is the interface version, not the application's release version (that
 // one lives in the NRO's NACP, see AGENTS.md priority 13).
-#define DGLAB_IPC_PROTOCOL_VERSION 0x000200u
+#define DGLAB_IPC_PROTOCOL_VERSION 0x000201u
 
 // Commands implemented by the sysmodule. Command IDs are part of the public IPC
 // contract and must not be renumbered once released.
@@ -26,6 +26,14 @@ enum {
     DGLAB_IPC_CMD_NET_SEND    = 6,
     DGLAB_IPC_CMD_NET_LOG     = 7,
     DGLAB_IPC_CMD_NET_WAVEFORM = 8,
+    // BLE mode (sysmodule drives the device itself). BLE_START takes a soft
+    // limit - the ceiling the device enforces - so "no output" is what a client
+    // gets unless it asks for more. Strength and waveform arrive through the
+    // same two commands the Socket mode uses, so a client's gameplay code does
+    // not change when it switches transport.
+    DGLAB_IPC_CMD_BLE_START   = 9,  // in: DglabBleStartRequest
+    DGLAB_IPC_CMD_BLE_STOP    = 10, // no payload
+    DGLAB_IPC_CMD_BLE_STATUS  = 11, // out: DglabBleStatus
 };
 
 // Value returned by DGLAB_IPC_CMD_PING. Keeping this stable gives clients a
@@ -174,3 +182,41 @@ typedef struct {
     u32 pad;
     DglabNetWaveformSlot slots[DGLAB_NET_WAVEFORM_MAX_SLOTS];
 } DglabNetWaveformRequest;
+
+// ---------------------------------------------------------------------------
+// BLE mode
+// ---------------------------------------------------------------------------
+
+typedef enum {
+    DglabBleState_Idle = 0,       ///< No session.
+    DglabBleState_Connecting,     ///< Scanning/linking, see docs/ble-poc.md.
+    DglabBleState_Connected,      ///< Linked, subscribed and streaming.
+    DglabBleState_Failed,         ///< Stopped by an error, see last_result.
+} DglabBleState;
+
+typedef struct {
+    // The ceiling the device itself enforces (BF soft limit, 0..200). Start
+    // with a small value: anything the client asks for later is clamped to it,
+    // and 0 means the device cannot output at all. The probe's reaction test
+    // uses 20; the value is the caller's call, this is only the contract.
+    u32 soft_limit;
+    // The device to drive. The console discovers this itself (see
+    // docs/ble-poc.md, "设备地址：自动发现") and hands it over; all zeroes is
+    // rejected rather than guessed.
+    u8 address[6];
+    u8 pad[2];
+} DglabBleStartRequest;
+
+typedef struct {
+    u32 state;      ///< DglabBleState
+    u32 packets;    ///< B0 packets written this session.
+    u32 last_result; ///< Result of the last failing step, 0 when none.
+    u8 address[6];  ///< The device the session is talking to.
+    u8 connected;   ///< 1 once linked and subscribed.
+    // Open loop: the device never reports back (docs/ble-re.md, "连接所有权在
+    // 服务层是封的"), so these are the strengths this side last asked for, not
+    // what the device is actually doing.
+    u8 strength_a;
+    u8 strength_b;
+    u8 pad[3];
+} DglabBleStatus;

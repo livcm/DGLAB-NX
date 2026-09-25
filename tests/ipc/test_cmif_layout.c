@@ -165,6 +165,31 @@ static void testRequestPayloads(void)
 
     CHECK(DglabPocAction_ProbeBtdrvScan == 1);
     CHECK(DglabPocAction_ProbeBtmBle == 2);
+
+    // The BLE session: the gameplay inputs arrive through the same two commands
+    // the Socket mode uses, so those payload sizes are part of the contract too.
+    {
+        const DglabBleStartRequest ble = {
+            .soft_limit = 20u,
+            .address = { 0xEA, 0xA8, 0xAC, 0x22, 0x2C, 0x18 },
+        };
+        const DglabNetSendRequest strength = {
+            .command = DglabNetCommand_SetStrength,
+            .channel = 1u,
+            .value = 5u,
+        };
+
+        checkRequestRoundTrip("ble start", DGLAB_IPC_CMD_BLE_START, &ble, sizeof(ble));
+        checkRequestRoundTrip("strength", DGLAB_IPC_CMD_NET_SEND, &strength,
+            sizeof(strength));
+    }
+
+    CHECK(DGLAB_IPC_CMD_BLE_START == 9);
+    CHECK(DGLAB_IPC_CMD_BLE_STOP == 10);
+    CHECK(DGLAB_IPC_CMD_BLE_STATUS == 11);
+    // The version a client sees: the BLE commands are an additive change, so the
+    // minor moves and the major stays.
+    CHECK(DGLAB_IPC_PROTOCOL_VERSION == 0x000201u);
 }
 
 // A command without a payload must not satisfy a check for one, otherwise the

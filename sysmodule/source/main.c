@@ -219,7 +219,11 @@ static bool dglabHandleRequest(void)
             }
 
             memcpy(&request, dglabRequestPayload(in), sizeof(request));
-            dglabMakeResponse(CmifCommandType_Request, token, dglabNetSocketSend(&request), NULL, 0);
+            // A BLE session consumes the same gameplay inputs: the client does
+            // not change when it switches transport.
+            dglabMakeResponse(CmifCommandType_Request, token,
+                blePocSessionIsActive() ? blePocSessionSend(&request)
+                                        : dglabNetSocketSend(&request), NULL, 0);
             break;
         }
         case DGLAB_IPC_CMD_NET_LOG: {
@@ -248,7 +252,38 @@ static bool dglabHandleRequest(void)
 
             memcpy(&request, dglabRequestPayload(in), sizeof(request));
             dglabMakeResponse(CmifCommandType_Request, token,
-                dglabNetSocketUploadWaveform(&request), NULL, 0);
+                blePocSessionIsActive() ? blePocSessionUploadWaveform(&request)
+                                        : dglabNetSocketUploadWaveform(&request), NULL, 0);
+            break;
+        }
+
+        // BLE mode: the sysmodule drives the device itself. The soft limit is
+        // the ceiling the device enforces, so a client that does not ask for
+        // more gets a device that cannot output.
+        case DGLAB_IPC_CMD_BLE_START: {
+            DglabBleStartRequest request = { 0 };
+
+            if (!dglabRequestHasPayload(parsed.meta.num_data_words, sizeof(request))) {
+                dglabMakeResponse(CmifCommandType_Request, token,
+                    MAKERESULT(Module_Libnx, LibnxError_BadInput), NULL, 0);
+                break;
+            }
+
+            memcpy(&request, dglabRequestPayload(in), sizeof(request));
+            dglabMakeResponse(CmifCommandType_Request, token,
+                blePocSessionStart(&request), NULL, 0);
+            break;
+        }
+        case DGLAB_IPC_CMD_BLE_STOP: {
+            dglabMakeResponse(CmifCommandType_Request, token, blePocSessionStop(), NULL, 0);
+            break;
+        }
+        case DGLAB_IPC_CMD_BLE_STATUS: {
+            DglabBleStatus status;
+
+            memset(&status, 0, sizeof(status));
+            blePocSessionGetStatus(&status);
+            dglabMakeResponse(CmifCommandType_Request, token, 0, &status, sizeof(status));
             break;
         }
 

@@ -95,6 +95,7 @@ typedef struct {
     // session (the driver-level one owns the BLE stack bring-up).
     bool probe_btdrv;
     bool probe_btm;
+    bool probe_ble_session;
 } PocWorker;
 
 typedef struct {
@@ -112,6 +113,7 @@ typedef struct {
     u32 pending_action;
     bool use_target_address;
     bool address_discovered; // The driver-level scan already wrote one out.
+    bool ble_session_requested; // blePocSessionStart asked for a session.
     u8 target_address[6];
 
     // Worker owned.
@@ -332,6 +334,11 @@ static u32 pocDrainBleEvents(const char* label, u32 duration_ms, u8* out_client_
 static bool pocAdIsCoyote(const BtdrvBleAdvertisement* list, u32 count);
 static void pocSaveDiscoveredAddress(const BtdrvAddress* addr);
 
+// btm-side helpers the BLE session uses (all defined next to the btm probe).
+static u8 pocBtEventsDrain(const char* label, u32 rounds, u8* out_client_if);
+static bool pocBtmConnectRetry(const char* label, const BtdrvAddress* addr, u32* out_handle);
+static void pocBtmLogGatt(const char* label, u32 handle);
+
 // Defined next to the btm probe, used by the driver-level probe's device dump.
 static void pocLogAdStructures(const char* label, const u8* data, size_t size);
 static void pocLogAdArray(const char* label, const BtdrvBleAdvertisement* list, u32 count);
@@ -457,6 +464,32 @@ static BtdrvBleEventInfo g_managed_event;
 // probe while the connection is still up - which is the state the App pairs in.
 static BtdrvAddress g_btm_bond_address;
 static bool g_btm_bond_address_valid;
+
+// The BLE session (see ble_poc.h). The IPC thread only stages inputs here; the
+// worker applies them between pump steps, so the two threads never touch the
+// session object at the same time.
+#define POC_BLE_STRENGTH_QUEUE 16u
+#define POC_BLE_SESSION_MAX_MS (10u * 60u * 1000u) // watchdog, not a target
+
+typedef struct {
+    u8 channel; // 1 = A, 2 = B
+    u8 mode;    // 0 = decrease, 1 = increase, 2 = absolute
+    u8 value;
+} PocBleStrengthOp;
+
+#define POC_BLE_STRENGTH_DECREASE 0u
+#define POC_BLE_STRENGTH_INCREASE 1u
+#define POC_BLE_STRENGTH_ABSOLUTE 2u
+
+static Mutex g_ble_mutex;
+static DglabBleStatus g_ble_status;
+static bool g_ble_active;
+static u8 g_ble_address[6];
+static u32 g_ble_soft_limit;
+static bool g_ble_waveform_pending;
+static DglabNetWaveformRequest g_ble_waveform;
+static PocBleStrengthOp g_ble_strength[POC_BLE_STRENGTH_QUEUE];
+static u32 g_ble_strength_count;
 static u8 g_managed_last[0x50];
 
 // The other two queues btdrv keeps: the LE HID one and the general one. Both are
@@ -652,7 +685,7 @@ static void pocBtRawRead(u32 handle, u32 cmd, const BtdrvGattId* serv, const Btd
     serviceClose(&service);
 }
 
-static bool pocBtmTransportStart(u32 handle)
+static bool pocBtmTransportStart(u32 handle, u8 soft_limit)
 {
     DglabCoyoteV3Link link = { pocBtmLinkWrite, &g_btm_transport };
     DglabCoyoteV3SessionConfig config;
@@ -675,8 +708,8 @@ static bool pocBtmTransportStart(u32 handle)
     // state the user cannot get out of. The real implementation takes these from
     // the app's own configuration.
     memset(&config, 0, sizeof(config));
-    config.bf.soft_limit_a = 0;
-    config.bf.soft_limit_b = 0;
+    config.bf.soft_limit_a = soft_limit;
+    config.bf.soft_limit_b = soft_limit;
     dglabCoyoteV3SessionInit(&g_btm_transport.session, &link, &config);
 
     if (POC_BTM_NOTIFY_REGISTER) {
@@ -1151,13 +1184,348 @@ static void pocBtmTransportWheelPhase(void)
 // own) and the reaction test (a change we make).
 static void pocBtmTransportRun(u32 handle)
 {
-    if (!pocBtmTransportStart(handle))
+    // The probes always start with the soft limits at 0: nothing can come out of
+    // the device until a phase raises the limit on purpose.
+    if (!pocBtmTransportStart(handle, 0u))
         return;
 
     pocBtmTransportPump(3000u);
     pocBtmTransportWheelPhase();
     pocBtmTransportReactionTest();
     pocBtmTransportStop();
+}
+
+// ---------------------------------------------------------------------------
+// The BLE session
+// ---------------------------------------------------------------------------
+
+// Publishes state/connected into the status the IPC side reads. Everything else
+// in there (strength, packet count) is filled in as the session runs.
+static void pocBleSessionSetState(u32 state, bool connected)
+{
+    mutexLock(&g_ble_mutex);
+    g_ble_status.state = state;
+    g_ble_status.connected = connected ? 1u : 0u;
+    mutexUnlock(&g_ble_mutex);
+}
+
+static DglabCoyoteV3Channel pocBleChannel(u8 channel)
+{
+    return (channel == 2u) ? DglabCoyoteV3ChannelB : DglabCoyoteV3ChannelA;
+}
+
+// Applies one of the staged inputs. Only the worker thread calls this, so the
+// session object itself needs no lock; the staging area does.
+static void pocBleSessionApplyInputs(void)
+{
+    DglabNetWaveformRequest waveform;
+    PocBleStrengthOp ops[POC_BLE_STRENGTH_QUEUE];
+    u32 count = 0u;
+    bool have_waveform = false;
+
+    memset(&waveform, 0, sizeof(waveform));
+    memset(ops, 0, sizeof(ops));
+
+    mutexLock(&g_ble_mutex);
+
+    if (g_ble_waveform_pending) {
+        waveform = g_ble_waveform;
+        have_waveform = true;
+        g_ble_waveform_pending = false;
+    }
+
+    count = g_ble_strength_count;
+
+    if (count > POC_BLE_STRENGTH_QUEUE)
+        count = POC_BLE_STRENGTH_QUEUE;
+
+    if (count != 0u)
+        memcpy(ops, g_ble_strength, count * sizeof(ops[0]));
+
+    g_ble_strength_count = 0u;
+    mutexUnlock(&g_ble_mutex);
+
+    if (have_waveform) {
+        DglabCoyoteV3WaveformEntry entries[DGLAB_NET_WAVEFORM_MAX_SLOTS];
+        u32 slots = waveform.slot_count;
+
+        if (slots > DGLAB_NET_WAVEFORM_MAX_SLOTS)
+            slots = DGLAB_NET_WAVEFORM_MAX_SLOTS;
+
+        for (u32 i = 0; i < slots; i++) {
+            entries[i].frequency_ms = waveform.slots[i].frequency_ms;
+            entries[i].strength = waveform.slots[i].strength;
+        }
+
+        if (slots != 0u) {
+            if (waveform.channel == 1u || waveform.channel == 0u)
+                dglabCoyoteV3SessionSetWaveform(&g_btm_transport.session,
+                    DglabCoyoteV3ChannelA, entries, slots);
+
+            if (waveform.channel == 2u || waveform.channel == 0u)
+                dglabCoyoteV3SessionSetWaveform(&g_btm_transport.session,
+                    DglabCoyoteV3ChannelB, entries, slots);
+        }
+    }
+
+    for (u32 i = 0; i < count; i++) {
+        DglabCoyoteV3Channel channel = pocBleChannel(ops[i].channel);
+        int32_t delta;
+
+        mutexLock(&g_ble_mutex);
+        {
+            u8* tracked = (ops[i].channel == 2u) ? &g_ble_status.strength_b
+                                                 : &g_ble_status.strength_a;
+            int32_t current = (int32_t)*tracked;
+
+            if (ops[i].mode == POC_BLE_STRENGTH_DECREASE)
+                delta = -(int32_t)ops[i].value;
+            else if (ops[i].mode == POC_BLE_STRENGTH_INCREASE)
+                delta = (int32_t)ops[i].value;
+            else
+                delta = (int32_t)ops[i].value - current; // absolute, sent as a change
+
+            dglabCoyoteV3SessionAdjustStrength(&g_btm_transport.session, channel, delta);
+
+            int32_t next = current + delta;
+
+            if (next < 0)
+                next = 0;
+
+            if ((u32)next > g_ble_soft_limit)
+                next = (int32_t)g_ble_soft_limit;
+
+            *tracked = (u8)next;
+        }
+        mutexUnlock(&g_ble_mutex);
+    }
+
+}
+
+// Drives the device until stopped. Everything the client sends arrives through
+// the staging area; this loop only applies it and keeps the 100ms cadence going.
+static void pocBtmTransportSession(u32 handle)
+{
+    u32 deadline = pocNowMs() + POC_BLE_SESSION_MAX_MS;
+
+    if (!pocBtmTransportStart(handle, (u8)g_ble_soft_limit)) {
+        pocLog("ble session: transport did not start");
+        pocBleSessionSetState(DglabBleState_Failed, false);
+        return;
+    }
+
+    pocBleSessionSetState(DglabBleState_Connected, true);
+    pocLog("ble session: streaming, soft limit %u (open loop: this firmware gives "
+        "the readback to btm, see docs/ble-re.md)", (unsigned)g_ble_soft_limit);
+
+    while (!pocStopRequested() && (s32)(deadline - pocNowMs()) > 0 &&
+        g_btm_transport.connected) {
+        pocBleSessionApplyInputs();
+        pocBtmTransportPump(100u);
+
+        mutexLock(&g_ble_mutex);
+        g_ble_status.packets = g_btm_transport.writes;
+        mutexUnlock(&g_ble_mutex);
+    }
+
+    if ((s32)(deadline - pocNowMs()) <= 0)
+        pocLog("ble session: %u minute watchdog reached, stopping",
+            (unsigned)(POC_BLE_SESSION_MAX_MS / 60000u));
+
+    // Same teardown order as the probes: cap the device first, then stop the
+    // waveform and ask for zero.
+    pocLog("ble session: stopping, capping and zeroing");
+    pocBtmTransportSetSoftLimits(0u);
+    dglabCoyoteV3SessionClearWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelA);
+    dglabCoyoteV3SessionClearWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelB);
+    dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelA);
+    dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelB);
+    pocBtmTransportPump(1000u);
+    pocBtmTransportStop();
+}
+
+// Connects and runs one session. Mirrors the btm probe's connect path, but with
+// no probe phases: connect, resolve the GATT coordinates, stream.
+static void pocBleSessionRun(void)
+{
+    BtdrvAddress address;
+    u32 handle = 0;
+    bool connected = false;
+
+    memset(&address, 0, sizeof(address));
+    memcpy(address.address, g_ble_address, sizeof(address.address));
+
+    pocBtEventsOpen();
+    pocBtEventsDrain("ble session before connect", 16u, NULL);
+
+    if (!pocBtmConnectRetry("ble session", &address, &handle)) {
+        pocLog("ble session: connect failed");
+        pocBleSessionSetState(DglabBleState_Failed, false);
+    } else {
+        connected = true;
+        pocBtmLogGatt("ble session", handle);
+
+        if (g_btm_proto_ready) {
+            pocBtmTransportSession(handle);
+        } else {
+            pocLog("ble session: protocol coordinates missing, nothing to drive");
+            pocBleSessionSetState(DglabBleState_Failed, false);
+        }
+
+        btmBleDisconnect(handle);
+        pocLog("ble session: disconnected");
+    }
+
+    (void)connected;
+
+    // The session is over: let a new one start, and leave a non-failure state as
+    // "idle" so a client can tell "finished" from "never started".
+    mutexLock(&g_ble_mutex);
+    g_ble_active = false;
+
+    if (g_ble_status.state == DglabBleState_Connected)
+        g_ble_status.state = DglabBleState_Idle;
+
+    mutexUnlock(&g_ble_mutex);
+}
+
+Result blePocSessionStart(const DglabBleStartRequest* request)
+{
+    DglabPocStartRequest poc_request;
+    Result rc;
+
+    if (request == NULL)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    if (request->soft_limit > 200u)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    mutexLock(&g_ble_mutex);
+
+    if (g_ble_active) {
+        mutexUnlock(&g_ble_mutex);
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    }
+
+    g_ble_active = true;
+    g_ble_soft_limit = request->soft_limit;
+    memcpy(g_ble_address, request->address, sizeof(g_ble_address));
+    memset(&g_ble_status, 0, sizeof(g_ble_status));
+    memcpy(g_ble_status.address, request->address, sizeof(g_ble_status.address));
+    g_ble_status.state = DglabBleState_Connecting;
+    g_ble_waveform_pending = false;
+    g_ble_strength_count = 0u;
+
+    mutexUnlock(&g_ble_mutex);
+
+    // Reuse the PoC session machinery with the address the client handed over,
+    // and tell the worker (through the shared state, which is race free) that
+    // this session is a BLE one.
+    memset(&poc_request, 0, sizeof(poc_request));
+    poc_request.flags = DGLAB_POC_START_FLAG_TARGET_ADDRESS;
+    memcpy(poc_request.target_address, request->address, sizeof(poc_request.target_address));
+
+    mutexLock(&g_poc.mutex);
+    g_poc.ble_session_requested = true;
+    mutexUnlock(&g_poc.mutex);
+
+    rc = blePocStart(&poc_request);
+
+    if (R_FAILED(rc)) {
+        mutexLock(&g_poc.mutex);
+        g_poc.ble_session_requested = false;
+        mutexUnlock(&g_poc.mutex);
+
+        mutexLock(&g_ble_mutex);
+        g_ble_active = false;
+        g_ble_status.state = DglabBleState_Failed;
+        mutexUnlock(&g_ble_mutex);
+        return rc;
+    }
+
+    return 0;
+}
+
+Result blePocSessionStop(void)
+{
+    bool active;
+
+    mutexLock(&g_ble_mutex);
+    active = g_ble_active;
+    mutexUnlock(&g_ble_mutex);
+
+    return active ? blePocStop() : 0;
+}
+
+void blePocSessionGetStatus(DglabBleStatus* out)
+{
+    if (out == NULL)
+        return;
+
+    mutexLock(&g_ble_mutex);
+    *out = g_ble_status;
+    mutexUnlock(&g_ble_mutex);
+}
+
+bool blePocSessionIsActive(void)
+{
+    bool active;
+
+    mutexLock(&g_ble_mutex);
+    active = g_ble_active;
+    mutexUnlock(&g_ble_mutex);
+
+    return active;
+}
+
+Result blePocSessionUploadWaveform(const DglabNetWaveformRequest* request)
+{
+    if (request == NULL)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    mutexLock(&g_ble_mutex);
+
+    if (g_ble_active) {
+        g_ble_waveform = *request;
+        g_ble_waveform_pending = true;
+    }
+
+    mutexUnlock(&g_ble_mutex);
+    return 0;
+}
+
+Result blePocSessionSend(const DglabNetSendRequest* request)
+{
+    PocBleStrengthOp op;
+
+    if (request == NULL)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    if (request->command != DglabNetCommand_SetStrength &&
+        request->command != DglabNetCommand_IncreaseStrength &&
+        request->command != DglabNetCommand_DecreaseStrength)
+        return 0; // Clear/TestPulse belong to the Socket mode's app side.
+
+    if (request->value > 200u)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    if (request->channel < 1u || request->channel > 2u)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    op.channel = (u8)request->channel;
+    op.value = (u8)request->value;
+    op.mode = (request->command == DglabNetCommand_DecreaseStrength)
+        ? POC_BLE_STRENGTH_DECREASE
+        : (request->command == DglabNetCommand_IncreaseStrength) ? POC_BLE_STRENGTH_INCREASE
+                                                                 : POC_BLE_STRENGTH_ABSOLUTE;
+
+    mutexLock(&g_ble_mutex);
+
+    if (g_ble_active && g_ble_strength_count < POC_BLE_STRENGTH_QUEUE)
+        g_ble_strength[g_ble_strength_count++] = op;
+
+    mutexUnlock(&g_ble_mutex);
+    return 0;
 }
 
 // Drains the user-side channel and prints every payload it holds. A payload with
@@ -3243,8 +3611,20 @@ static void pocThreadFunc(void* arg)
     // touched Bluetooth before them.
     svcSleepThread(300000000ull); // 300ms
 
+    // A BLE session is a start request of its own kind: the shared flag is set
+    // before the thread exists, so no action queue is involved.
+    if (g_poc.ble_session_requested) {
+        g_poc.ble_session_requested = false;
+        w->probe_ble_session = true;
+    }
+
     while (pocTakeAction(w, &action))
         pocHandleAction(w, action);
+
+    if (w->probe_ble_session) {
+        w->probe_ble_session = false;
+        pocBleSessionRun();
+    }
 
     // The base-btm probe owns the whole session: it must see the console the way
     // it is before this project touched Bluetooth (btm and the BLE manager keep
@@ -3296,6 +3676,7 @@ void blePocInitialize(void)
 {
     memset(&g_poc, 0, sizeof(g_poc));
     mutexInit(&g_poc.mutex);
+    mutexInit(&g_ble_mutex);
     g_poc.status.state = DglabPocState_Idle;
 }
 
