@@ -1337,12 +1337,21 @@ static void pocControlConnect(const char* label)
 // the *general* btdrv event queue as an SspRequest (type 3), and nothing else
 // will answer it for us, so the probe accepts it itself and then reads the
 // paired-device record back: link_key_present != 0 means a bond really exists.
+//
+// Accepting is off by default on purpose: the App says a bound device only
+// accepts the host it is bound to, so bonding the console to this device could
+// leave the phone unable to connect until the binding is cleared on the device
+// itself. With 0 the probe still asks for a bond and logs whether the device
+// even offers one, then cancels it.
+#define POC_BTM_BOND_ACCEPT 0
+
 static void pocBtdrvTryBond(const BtdrvAddress* addr, const char* label)
 {
     SetSysBluetoothDevicesSettings settings;
     Result rc = btdrvCreateBond(*addr, 0);
 
-    pocLog("%s: CreateBond(type=0) rc=0x%08X", label, (u32)rc);
+    pocLog("%s: CreateBond(type=0) rc=0x%08X (accept=%u)", label, (u32)rc,
+        (unsigned)POC_BTM_BOND_ACCEPT);
 
     for (u32 i = 0; i < 40u; i++) {
         BtdrvEventType type = (BtdrvEventType)0;
@@ -1356,17 +1365,22 @@ static void pocBtdrvTryBond(const BtdrvAddress* addr, const char* label)
 
             if ((u32)type == (u32)BtdrvEventType_SspRequest ||
                 (u32)type == (u32)BtdrvEventType_PairingPinCodeRequest) {
-                Result respond;
+                Result respond = 0;
 
                 pocLog("%s: pairing event type=%u from %02X:%02X:...:%02X", label, (u32)type,
                     raw[0], raw[1], raw[5]);
 
-                // variant 0 = SSP confirm (Just Works): accept. A passkey variant
-                // would need the value on the device's screen, which this device
-                // does not have.
-                respond = btdrvRespondToSspRequest(*addr, 0, true, 0);
-                pocLog("%s: RespondToSspRequest(variant=0, accept=1) rc=0x%08X", label,
-                    (u32)respond);
+                if (POC_BTM_BOND_ACCEPT) {
+                    // variant 0 = SSP confirm (Just Works). A passkey variant would
+                    // need a value shown on the device, which this device has none of.
+                    respond = btdrvRespondToSspRequest(*addr, 0, true, 0);
+                    pocLog("%s: RespondToSspRequest(variant=0, accept=1) rc=0x%08X", label,
+                        (u32)respond);
+                } else {
+                    respond = btdrvCancelBond(*addr);
+                    pocLog("%s: bonding not accepted by this build, CancelBond rc=0x%08X",
+                        label, (u32)respond);
+                }
                 answered = true;
             }
         }
