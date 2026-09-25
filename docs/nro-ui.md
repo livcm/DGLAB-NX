@@ -471,9 +471,12 @@ QR 编码器是自己写的（devkitPro 里没有可用 QR 库），所以它必
   `D-pad` 上下选参数、左右改值（**按一下只走一格**，按住 0.5 秒后才开始连发、每 0.2 秒
   一格）、`Y` 恢复默认、`B` 保存返回。每次改动都写进
   `sdmc:/switch/DGLAB-NX/config/motion.cfg`，体感玩法进入时读取；参数清单见
-  `docs/joycon-input.md`。其中 `density`（波形密度：可变 / 固定）是唯一值显示成词而不是
-  数字的一行——它由 `dglabMotionSettingsIsSwitch()` 标出来，值取 `density_fixed_value` /
-  `density_variable_value` 两条文案，两种玩法共用（见 `docs/touch-input.md`）；
+  `docs/joycon-input.md`。最后两行是**通道强度上限 A / B**：它们不是体感参数（是设备侧的
+  BF 天花板，蓝牙会话启动时读这一对），放在这一页是因为这是"参数"唯一的家，两种玩法与
+  BLE 会话都从这份配置取（见 `docs/ipc.md`）。其中 `density`（波形密度：可变 / 固定）是
+  唯一值显示成词而不是数字的一行——它由 `dglabMotionSettingsIsSwitch()` 标出来，值取
+  `density_fixed_value` / `density_variable_value` 两条文案，两种玩法共用
+  （见 `docs/touch-input.md`）；
 - `motion (Joy-Con)` 玩法（`nro/source/ui/motion.c`）见 `docs/joycon-input.md`；
 - `about` 页显示发行版本、IPC 版本、构建标识、源码地址与两行偏好设置（语言：左右键
   循环切换；颜色主题：`Y` 循环切换；上下键滚动）；发行版本是列表的第一行值，页头右侧
@@ -658,10 +661,10 @@ HOS 的侧栏聚焦框偏蓝（`#1A9AD5`），内容行的聚焦框偏青（`#66
 | --- | --- | --- |
 | 菜单（标题 `DGLAB-NX`） | 导航列表：5 行 + 选中项的说明 note | ↑↓ 选择，A 进入，B 退出 |
 | socket server | 左栏 x=80 宽 390：提示行 + 二维码 + 三行小字计数；右栏 x=470 宽 719：页内提示行 + 6 行参数 | X 清空、Y 日志、A 启停、B 返回、ZL/ZR 测 A/B、↑↓ 调 A、←→ 调 B |
-| bluetooth (direct) | 页头 + 5 行值（会话、设备、软上限、请求的强度、已发包数）+ 两段说明（开环、启动的两步）；排不下时出滚动条。**这一页还会把 sysmodule 的 PoC ring 落到 `logs/dglab-net.log`**——会话自己的日志（`ble session: …`）只在那条 ring 里，没有它就只能靠屏幕猜 | A 启动（内部先跑驱动级再连会话）、X 停止、↑↓ 调软上限（0~100，步进 1，与 socket 页一致；按住连发，且**会话跑着也立即生效**——`BLE_LIMIT`，见 `docs/ipc.md`）、B 返回（离开会自动停会话） |
-| 日志子页 | Y 打开：页头 + 32 行日志（24px、行距 37px、白色），打开时停在最新；底栏不画滚动提示（滚动条即提示） | ↑↓ 滚动、Y 关闭、B 返回 |
+| bluetooth (direct) | 页头 + 7 行值（会话、设备、通道强度上限 A/B、通道强度 A/B、已发包数）+ 两段说明（开环、启动的两步）；排不下时出滚动条。上限两行是**只读**的（它们在 `advanced (motion)` 页里改，见 `docs/ipc.md`），强度两行就是 Socket 与玩法页拨的那一对。**这一页还会把 sysmodule 的 PoC ring 落到 `logs/dglab-net.log`**——会话自己的日志（`ble session: …`）只在那条 ring 里，没有它就只能靠屏幕猜 | A 启动（内部先跑驱动级再连会话）、X 停止、↑↓ 调 A 通道强度、←→ 调 B 通道强度（0~100，步进 1，与 socket/motion 页同一对值与同一套连发）、Y 打开本页日志子页、B 返回（离开会自动停会话） |
+| 日志子页 | Y 打开：页头 + 32 行日志（24px、行距 37px、白色），打开时停在最新；底栏不画滚动提示（滚动条即提示）。socket 页的是 sysmodule 日志，bluetooth 页的是会话日志，**同一套绘制**（`dglabLogPageDraw()`），只有标题不同 | ↑↓ 滚动、Y 关闭、B 返回 |
 | motion (Joy-Con) | 页内提示行 + 5 行（连接、左/右 Joy-Con、通道强度 A/B） | 同 socket（A 启停、X 清空、ZL/ZR 测试、D-pad 调强度），多一个 `Y` 重新扫描手柄 |
-| advanced (motion) | 12 行 + 选中项的说明 note，按光标滚动 | ↑↓ 选择、←→ 改值（按住连发）、Y 恢复默认、B 返回 |
+| advanced (motion) | 16 行（体感参数 14 行 + 通道强度上限 A/B 两行）+ 选中项的说明 note，按光标滚动 | ↑↓ 选择、←→ 改值（按住连发）、Y 恢复默认、B 返回 |
 | about | 两个白色段落 + 发行版本行 + IPC 版本行 + 构建标识行 + 源码行 + 语言行 + 颜色主题行；页头右侧是 Sysmodule 状态；排不下时出滚动条，底栏不画滚动提示 | ↑↓ 滚动、←→ 切换语言、Y 切换主题、B 返回 |
 
 按键约定：**Console 页（BLE PoC console、启动/出错提示页）一律 `+` 退出**；

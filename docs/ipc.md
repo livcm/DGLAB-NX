@@ -31,7 +31,7 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 ## 版本
 
 `GET_VERSION` 返回的号来自 `common/include/dglab/ipc.h` 的
-`DGLAB_IPC_PROTOCOL_VERSION`（打包值 `0x000202u`），当前是 `0.2.2`。它是 **IPC 接口
+`DGLAB_IPC_PROTOCOL_VERSION`（打包值 `0x000203u`），当前是 `0.2.3`。它是 **IPC 接口
 版本**，`GET_VERSION` 是它唯一的出口（不进任何配置文件）。发行版本号是另一回事：
 它属于 NRO 的 NACP 与 About 页，也写进 sysmodule 安装目录的 `toolbox.json` 的
 `version` 字段，单一来源是仓库根 `VERSION`（见 `nro/AGENTS.md` 的"元信息与版本"、
@@ -42,7 +42,8 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 | 0.1.0 | `GET_VERSION`、`PING` |
 | 0.2.0 | 增加 `NET_*`（Wi-Fi + WebSocket 传输） |
 | 0.2.1 | 增加 `BLE_*`（sysmodule 直连设备；强度与波形仍走 `NET_SEND` / `NET_WAVEFORM`） |
-| 0.2.2 | 增加 `BLE_LIMIT`（会话运行时改软上限） |
+| 0.2.2 | 增加 `BLE_LIMIT`（会话运行时改上限） |
+| 0.2.3 | `BLE_START` / `BLE_LIMIT` 的上限从一个数（两通道共用）改成 **A/B 两个**（BF 本来就是两个） |
 
 ## 命令表
 
@@ -60,23 +61,34 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
 | `BLE_START` | 9 | `DglabBleStartRequest` | — | 启动 **BLE 会话**：sysmodule 自己连设备并驱动它（见下） |
 | `BLE_STOP` | 10 | — | — | 停止 BLE 会话（收尾会先写 BF=0 再把两通道归零） |
 | `BLE_STATUS` | 11 | — | `DglabBleStatus` | BLE 会话状态快照（**开环**：强度是"我们请求过多少"） |
-| `BLE_LIMIT` | 12 | `DglabBleLimitRequest` | — | 会话运行中改软上限（BF）；没有会话时被拒——那一路由 `BLE_START` 带 |
+| `BLE_LIMIT` | 12 | `DglabBleLimitRequest` | — | 会话运行中改两个通道强度上限（BF）；没有会话时被拒——那一路由 `BLE_START` 带 |
 
 ## BLE_*（sysmodule 直连设备）
 
-`BLE_START` 的入参是 `DglabBleStartRequest`：`soft_limit`（0~200，设备侧强制的上限——
-不主动要求的话就是 0，设备无法输出）+ `address[6]`（要驱动的设备；由客户端从
+`BLE_START` 的入参是 `DglabBleStartRequest`：`limit_a` / `limit_b`（两个**通道强度上限**
+0~200，设备侧强制、可以逐通道不同——不主动要求的话就是 0，那一通道无法输出）+
+`address[6]`（要驱动的设备；由客户端从
 `SD:/switch/DGLAB-NX/config/dglab-ble-address.txt` 读，那个文件由 sysmodule 的扫描自动
 写入，见 `docs/ble-poc.md`）。
+
+**上限不是强度，是两组变量。**上限是设备强制的天花板（BF 指令的"通道强度软上限"），强度是
+客户端拨的那个数（`NET_SEND` 的 `SetStrength` 等）。两者**各有一对 A/B**：`limit_a` /
+`limit_b` 是设备侧不允许越过的值，`strength_a` / `strength_b`（状态里那两个）是我们请求过
+的值。会话把请求的强度按对应通道的上限夹紧，而不是拿一个数管两个通道。
 
 **强度与波形沿用 Socket 模式那两个命令**（`NET_SEND` 的 `SetStrength` / `IncreaseStrength`
 / `DecreaseStrength`，以及 `NET_WAVEFORM`），BLE 会话激活时它们被路由到本地协议层而不是
 转发给 App——所以玩法的代码不需要为 BLE 改一行。
 
-`BLE_LIMIT` 是**会话运行中**改那个上限的办法（0.2.2 加的）。上限在 `BLE_START` 里带一次，
-但页面上的键是"随时可调"的：不补这一条，改完只有行在动、设备还停在上限 0 上，屏幕上则完全
-看不出区别（2026-09-26 那轮就是这样：会话连上、GATT 齐全、写了 172 包，BF 却是 `0000`，
-设备当然一点输出都没有）。上限一变，强度请求也跟着按新值夹紧。
+`BLE_LIMIT` 是**会话运行中**改那两个上限的办法（0.2.2 加的，0.2.3 起带两个数）。上限在
+`BLE_START` 里带一次；补上 `BLE_LIMIT` 是为了让"改上限"不必把会话停掉重连（重连会掉链路，
+而且这个固件一个开机周期只走得了一条 BLE 路径）。上限一变，之后请求的强度按新值夹紧。
+
+**会话自己会播一段波形。**`BLE_START` 之后两个通道就开始播"会话默认波形"（100ms、波形强度
+100，和 Socket 页的测试键同一形状），所以**强度、上限都是 0 时设备上的灯也会闪**——那是
+"输出开着"的样子（手机 App 的实测，见 `docs/ble-re.md`）。不播波形时设备收到的是全零波形
+数据，按官方文档"某通道只要有一个值超出有效范围就放弃该通道全部 4 组数据"，设备等于什么
+都没在播：灯不闪，强度加上去也没东西可放大。
 
 三条已知限制（都来自实机结论，见 `docs/ble-re.md`）：
 
