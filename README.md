@@ -188,7 +188,9 @@ BLE PoC 与启动出错提示——有效）。菜单有 7 项：`socket server`
 它有两条规矩：需要 exefs 补丁；**一个开机周期只走一条 BLE 路径**，跑完想再连一次（或再跑
 探针实验）就先重启。重启用在 BLE 那条路上——BT 栈/btm 被我们动过，混着来会崩整机；
 Socket 模式是手机连设备、Switch 只当 WebSocket 服务端，不碰这些，停掉会话后数据就自动回到
-Socket 转发，不需要为它重启。
+Socket 转发，不需要为它重启。这一页还负责把会话自己的日志（`ble session: …`）落到
+`sdmc:/switch/DGLAB-NX/logs/dglab-net.log`——那份日志只在 sysmodule 内存里，退出 NRO 之前
+不落盘，而拔卡就是关机，所以测试想留日志就别急着关机。
 
 | 按键 | 动作 |
 | --- | --- |

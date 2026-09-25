@@ -188,6 +188,13 @@ NRO 会把收到的 sysmodule 日志同步写到：
 NRO 会在连接 sysmodule 之前先输出 `console ready`、日志文件状态、`querying sysmodule...`，
 所以如果它卡住，屏幕上的最后一行就是卡住的位置。
 
+**这两个日志文件都只是 sysmodule 内存 ring 的副本**：ring 自己不落盘，只有在主机上跑着 NRO
+时才会被抽出来写进 SD。**拔卡就等于关主机**（卡里是虚拟系统，插拔必须在关机状态），ring 随
+之消失——所以"先拔卡、回头再读日志"是读不到的。要留下 BLE 会话或探针的日志，就得在**同一
+次开机里、关主机之前**让 NRO 把 ring 抽完：`bluetooth (direct)` 页每帧抽一次到
+`logs/dglab-net.log`，`BLE PoC console` 页抽到 `logs/dglab-ble-poc.log`。会话跑完先退出
+NRO，再关机拔卡。
+
 ## 每一步的预期
 
 1. 打开 NRO：显示 `state: idle`、IPC 版本号，说明 sysmodule 在运行。
