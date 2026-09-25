@@ -1199,6 +1199,27 @@ static void pocBtmLinkWrite(void* context, const u8* data, size_t size)
         transport->writes++;
 }
 
+// The hardware-visible test, run after the zero-strength baseline. A strength
+// request only opens the gate the device is allowed to use - the output itself
+// is the waveform data, so a channel with strength and no waveform produces
+// nothing whatsoever (user, 2026-09-25). The soft limit is enforced by the
+// device itself, so even a garbled packet cannot push a channel past it.
+//
+// Set POC_BTM_TEST_STRENGTH to 0 to skip the test and keep the old "the device
+// cannot output anything" behaviour.
+#define POC_BTM_TEST_SOFT_LIMIT 20u
+#define POC_BTM_TEST_STRENGTH 5u
+#define POC_BTM_TEST_DURATION_MS 6000u
+
+// A slow up-and-down envelope. Four entries fill exactly one B0 packet, so the
+// pattern repeats every 100ms and never parks at a high value.
+static const DglabCoyoteV3WaveformEntry g_poc_btm_test_waveform[] = {
+    { .frequency_ms = 100u, .strength = 0u },
+    { .frequency_ms = 100u, .strength = 30u },
+    { .frequency_ms = 100u, .strength = 60u },
+    { .frequency_ms = 100u, .strength = 30u },
+};
+
 // A GATT request that follows a read right away is answered with
 // Bluetooth/0x153 on this firmware: both write types fail and the packet is
 // dropped without a retry (2026-09-25, the two rounds that added the reads).
@@ -1519,6 +1540,79 @@ static void pocBtmTransportStop(void)
     pocLog("btm transport: done, writes=%u notify=%u b1=%u", g_btm_transport.writes,
         g_btm_transport.notifications, g_btm_transport.b1_count);
     g_btm_transport.connected = false;
+}
+
+// Re-announces BF with the given soft limit on both channels. OnConnected also
+// resets the strength bookkeeping and the waveform playback position, which is
+// what a phase change wants; the configured waveform data itself is kept.
+static void pocBtmTransportSetSoftLimits(u8 limit)
+{
+    g_btm_transport.session.bf.soft_limit_a = limit;
+    g_btm_transport.session.bf.soft_limit_b = limit;
+    dglabCoyoteV3SessionOnConnected(&g_btm_transport.session);
+}
+
+// Strength opens the gate, the waveform is the output: this is the only phase
+// whose result does not depend on a packet coming back, so it is the only phase
+// that can tell "the device ignores us" from "we never reach the device". It is
+// also the only phase where the device is allowed to output anything at all,
+// which is why the limits are tiny and are put back to zero before the
+// disconnect (see POC_BTM_TEST_* above).
+static void pocBtmTransportReactionTest(void)
+{
+    const size_t entries = sizeof(g_poc_btm_test_waveform) / sizeof(g_poc_btm_test_waveform[0]);
+
+    if (!g_btm_transport.connected)
+        return;
+
+    if (POC_BTM_TEST_STRENGTH == 0u) {
+        pocLog("btm transport: reaction test skipped (POC_BTM_TEST_STRENGTH is 0)");
+        return;
+    }
+
+    pocLog("btm transport: reaction test soft=%u strength=%u peak=%u for %ums",
+        (unsigned)POC_BTM_TEST_SOFT_LIMIT, (unsigned)POC_BTM_TEST_STRENGTH,
+        (unsigned)g_poc_btm_test_waveform[2].strength, (unsigned)POC_BTM_TEST_DURATION_MS);
+
+    pocBtmTransportSetSoftLimits((u8)POC_BTM_TEST_SOFT_LIMIT);
+
+    if (!dglabCoyoteV3SessionSetWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelA,
+            g_poc_btm_test_waveform, entries)) {
+        pocLog("btm transport: reaction test waveform rejected, capping again");
+        pocBtmTransportSetSoftLimits(0u);
+        return;
+    }
+
+    // Channel B stays idle: one channel is enough to see whether the device
+    // reacts at all.
+    dglabCoyoteV3SessionAdjustStrength(&g_btm_transport.session, DglabCoyoteV3ChannelA,
+        (int32_t)POC_BTM_TEST_STRENGTH);
+
+    pocBtmTransportPump(POC_BTM_TEST_DURATION_MS);
+
+    // Teardown, in this order: cap the device first (BF 0 makes everything that
+    // follows harmless), then stop the waveform and ask for an absolute zero,
+    // then give the zero one more second so it actually goes out before the
+    // disconnect.
+    pocLog("btm transport: reaction test done, capping and zeroing");
+    pocBtmTransportSetSoftLimits(0u);
+    dglabCoyoteV3SessionClearWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelA);
+    dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelA);
+    dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelB);
+    pocBtmTransportPump(1000u);
+}
+
+// One transport round: the zero-strength baseline first (soft limits 0, nothing
+// can come out of the device, B0 packets still carry sequence numbers the device
+// is supposed to answer), then the reaction test.
+static void pocBtmTransportRun(u32 handle)
+{
+    if (!pocBtmTransportStart(handle))
+        return;
+
+    pocBtmTransportPump(3000u);
+    pocBtmTransportReactionTest();
+    pocBtmTransportStop();
 }
 
 // Drains the user-side channel and prints every payload it holds. A payload with
@@ -3307,12 +3401,10 @@ static void pocRunBtmBleProbe(PocWorker* w)
             pocBtmLogGatt("btm probe", handle);
 
             // With the GATT table in hand, drive the device through the protocol
-            // layer for a few seconds: BF + a B0 stream (strength 0) and the B1
-            // answers, which is what a real transport has to do.
+            // layer: BF + a B0 stream and the B1 answers, which is what a real
+            // transport has to do, then the reaction test (see pocBtmTransportRun).
             if (g_btm_proto_ready) {
-                pocBtmTransportStart(handle);
-                pocBtmTransportPump(3000u);
-                pocBtmTransportStop();
+                pocBtmTransportRun(handle);
             } else {
                 pocLog("btm probe: protocol coordinates missing, transport not started");
             }
@@ -3339,9 +3431,7 @@ static void pocRunBtmBleProbe(PocWorker* w)
             pocBtmLogGatt("btm probe (configured)", handle);
 
             if (g_btm_proto_ready) {
-                pocBtmTransportStart(handle);
-                pocBtmTransportPump(3000u);
-                pocBtmTransportStop();
+                pocBtmTransportRun(handle);
             } else {
                 pocLog("btm probe: protocol coordinates missing, transport not started");
             }
@@ -3837,7 +3927,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v19 (hand-written CCCD write, settle after reads)");
+    pocLog("poc build: ble_poc v20 (reaction test: waveform + tiny strength)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before anything is opened or scanned. Collecting the
