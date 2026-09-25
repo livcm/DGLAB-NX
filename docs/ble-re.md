@@ -228,6 +228,7 @@ libnx 的 `btdrv.c` 最近一次改动是 2025-04（`btdrvTriggerConnection` 的
 | 观测到的 Result | module | description | 含义 |
 | --- | --- | --- | --- |
 | `0x00029E71` | 113 = `Bluetooth` | 0x14F | 蓝牙模块自己的通用失败（模块里有十几处 `mov w0,#0x9e71; movk w0,#0x2,lsl#16`）：`btdrvConnectGattServer` 与"注册放在 InitializeBle 之前"都拿到它 |
+| `0x0002A671` | 113 = `Bluetooth` | 0x153 | 2026-09-25 02:17 新见：`btLeClientWriteCharacteristic` 在**刚发过 GATT 读**（描述符/电量）之后被判失败——无响应写与有响应写都失败，那一包不会发出去。模块里没有这个字面量，可能来自同模块的 `bt` 服务一侧；语义未定（见「当前状态」的第三轮） |
 | `0x0005568F` | 143 = `Btm` | 0x2AB | btm 模块拒绝（libnx 的 `btmu*` 封装在 sysmodule 里填的 ARUID 无效） |
 | `0x0000060A` | 10 = `Sf` | 3 | **服务框架**直接拒了请求：我们按 libnx 形状自造、但填了 NRO 的真实 ARUID 的那条 `btmu StartBleScanForSmartDevice` 就走到了这里 |
 | `0x0000F601` | 1 = `Kernel` | 123 = `ConnectionClosed` | 会话被服务端关掉（cmd 40 那次） |
@@ -928,7 +929,7 @@ btm 的 worker 在受理连接之后为什么停住（状态机 `FUN_00033d70` �
 | 扫描 | ✅ btdrv 驱动级扫描稳定拿到设备（地址/rssi/AD） |
 | 连接 | ✅ btm 路径受理并建立连接（`GetConnectionState` handle=4、`bt` 事件 `status=0`） |
 | GATT 表 | ✅ 7 个服务，`0x180C`（写 `0x150A` handle 19，通知 `0x150B` handle 16）、`0x180A`、`0xFE59` |
-| 通知订阅 | ⚠️ `RegisterNotification rc=0`，但**至今没收到任何事件**：01:57 那轮连电量读取（`0x1500`，`rc=0`）都没有换来一条新记录 |
+| 通知订阅 | ⚠️ `RegisterNotification rc=0`，但**至今没收到任何事件**：02:17 那轮把整条事件 dump、CCCD 回读、managed 对照都跑了，`bt` 通道与 btdrv 的 managed 队列里都只有连接级记录（见下面的「第三轮」） |
 | 写入 | ✅ `BF`（7 字节）与 `B0`（20 字节）写入 `rc=0`；首条 B0 是 `B0 1F …`（序列号 1 + 两通道绝对设置），之后 100ms 一条 |
 | B1 回包 | ❓ 未观察到 |
 | 广播内容 | ✅ 定长 AD 数组：flags + 厂商数据（公司号 `0x000A`）+ 本地名 `47L121000`；**没有服务 UUID** |
@@ -946,30 +947,34 @@ btm 的 worker 在受理连接之后为什么停住（状态机 `FUN_00033d70` �
 
 **下一步（留给下一次对话）**
 
-1. **先确认通知/事件通路**：探针已增加一次**电量读取**（`0x180A` / `0x1500`，纯读、不会输出），
-   它的应答会走与 B1 相同的事件通道。若读电量也没有事件回来，问题在订阅（特征 `properties`
-   读出是 `0x00`，`RegisterNotification` 是否真的写了 CCCD 待查）；若有事件，说明只是
-   "0 → 0 的置零不算强度变化、设备按协议不必回 B1"；
-2. 若通知通路确认可用，再驱动一次**真正的强度变化**（例如相对 +1）去看 B1；
-3. 传输层稳定后，把它接到 NRO 的玩法（体感/触屏）上，替换现在不成功的 btdev 路径；
-4. 发布口径（用户已定）：**BLE 直连仅在安装该 exefs 补丁时可用**，补丁需要纳入发布产物。
+1. **把 CCCD 读回来的值拿到手**——这是现在唯一的缺口。`ReadDescriptor` 只回了 `rc=0`，值本
+   应走事件通道而通道里没有新记录。可以试：读完描述符后 `sleep` 一段再写（第三轮的两次写
+   失败都紧跟在读之后，见下），或换一条能拿到应答的时机；
+2. 若确认 CCCD 没被写：查 `RegisterNotification` 传的 `BtdrvGattId` 与连接上下文（它用
+   btm 给的连接句柄 + `0x180C`/`0x150B` 的 `BtdrvGattId`，都是探针自己拼的）；
+3. 通知通路确认可用后，再驱动一次**真正的强度变化**（例如相对 +1）去看 B1；
+4. 传输层稳定后，把它接到 NRO 的玩法（体感/触屏）上，替换现在不成功的 btdev 路径；
+5. 发布口径（用户已定）：**BLE 直连仅在安装该 exefs 补丁时可用**，补丁需要纳入发布产物。
 
-**第二轮（2026-09-25 01:57）的结果与下一轮的判据**：探针已经改成按**整条记录**（0x50 字节）
-比对并 dump 每一条变化，加了一次电量读取（`0x180A`/`0x1500`，`rc=0`）和 CCCD 回读。
-这一轮仍然 `notify=0 / b1=0`，**读电量之后没有任何新记录**，所以"设备没发通知"现在有两种
-解释，都还没被排除：
+**第三轮（2026-09-25 02:17）的结果**：上一轮留下的三条判据（`ev#N` 整条 dump、
+`ReadDescriptor` CCCD、`managed#N`）这一轮全部跑出来了（日志 322 行，见 `docs/ble-poc.md`
+的「第四十九次实机」）：
 
-1. **订阅没落到 CCCD 上**——`RegisterNotification` 只回"受理"，而特征属性字节整体不可信
-   （`0x180C` 与 `0x180A` 的七个特征 `properties` 全读出 `0x00`）；
-2. **通知/读应答不落到 `bt` 服务的这个事件状态**，而是落到 btdrv 的 managed 队列
-   （`btGetLeEventInfo` 与 `btdrvGetBleManagedEventInfo` 读的是两份不同的状态）。
+1. **`bt` 事件通道整轮只有两条连接级记录**：`result=0 conn=4`（尾全零）与同一头、
+   `+0x08=12` / `+0x0C=1000` 的 `connection_update`。写 28 包 B0、读电量、读 CCCD 之后
+   **没有第三条记录**；
+2. `ReadDescriptor(CCCD 0x2902 id=0) rc=0x00000000`，**值没有回来**；
+3. **managed 队列只有 1 条记录**，与第 1 条里那份 `connection_update` 逐字节相同。
 
-下一轮就看三条日志：`btm transport: ev#N`（有没有新记录）、
-`btm transport: ReadDescriptor(CCCD 0x2902 id=…) rc=…` 以及它回来的值、
-`btm transport: managed#N`（窗口结束时的 managed 队列里有没有同一批记录）。
-managed 那一读放在传输窗口之后、只读，不碰 `InitializeBle`/`EnableBle`/`RegisterGattClient`。
-注意 libnx 的 `BtmGattDescriptor` 只给 uuid 与 handle、没有 `instance_id`，探针是按
-`+0x1C` 猜的（和特征结构里 `instance_id` 的位置一致），日志里带原始字节可以对。
+所以上一轮列的两个候选解释各砍掉一半：通知既不落 `bt` 的这个状态，也不落 btdrv 的 managed
+队列。剩下最可能的解释就是**订阅没有真的落到 CCCD 上**（`RegisterNotification` 只回"受理"），
+但要拿到回读值才算坐实。
+
+这一轮顺带定论了两件事：`properties` 的真实位置在 **+0x20**（`0x150B`=`0x10` notify、
+`0x150A`=`0x04` write without response、`0x180A` 那五个是 `0x02`/`0x12`）——libnx 读出
+`0x00` 只是结构偏移不一致，"写类型/订阅目标弄错"因此被排除；以及新错误码
+`0x0002A671` = `Bluetooth/0x153`（见「错误码归属」），它只出现在"刚发过 GATT 读之后"的两次
+写上（无响应写与有响应写都失败，那一包没发出去），像忙拒，未证实。
 
 **顺带定论的一件事**：广播里**没有服务 UUID**。设备记录的 AD 是定长数组
 （`BtdrvBleAdvertisement`，不是紧凑链）：`0x01` flags、`0xFF` 厂商数据（公司号 `0x000A`）
@@ -1003,13 +1008,16 @@ managed 那一读放在传输窗口之后、只读，不碰 `InitializeBle`/`Ena
 
 已知遗留：
 
-- `BtmGattCharacteristic.properties` 读出来是 `0x00`（`0x150A` 应为可写、`0x150B` 应为
-  通知）——UUID 与 handle 都对，说明是 libnx 的 `BtmGattCharacteristic` 布局与固件在
-  properties 字段上有偏差，写数据前要按固件布局重新核对这一个字段；
+- 已定：属性字节在固件结构里位于 **+0x20**（+0x18 是 handle）。libnx 的
+  `BtmGattCharacteristic.properties` 读出 `0x00` 只是偏移不一致——要用这个字段就按 +0x20
+  取，不要相信 libnx 的字段；
 - 连接是"按地址直连"，设备没有先被 btm 扫描到（`btm` 的扫描仍然不出结果），
   目前看这不影响连接；
-- **设备侧通知一条都没回**：`RegisterNotification rc=0`、31 条 B0 全 `rc=0`，事件通道
-  里始终只有同一份 `connection_update` 记录（见上面的「下一轮的判据」），B1 未验证；
+- **设备侧通知一条都没回**：`RegisterNotification rc=0`、B0 全 `rc=0`，而 `bt` 事件通道与
+  btdrv 的 managed 队列里都只有连接级记录（见上面的「第三轮」），B1 未验证；
+- `btLeClientWriteCharacteristic` 在**刚发过 GATT 读**之后会回 `Bluetooth/0x153`
+  （`0x0002A671`，无响应写与有响应写都失败，那一包不会发出去）：读之后要留间隔，否则会
+  静默丢包（02:17 那轮就这样丢了 BF）；
 - 补丁还没纳入发布产物；`btm` 探针每次跑完都要重启，一个开机周期只走一条 BLE 路径。
 
 ### 早期收束结论（2026-09-22，已被上面的状态取代）

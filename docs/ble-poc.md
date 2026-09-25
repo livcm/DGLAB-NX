@@ -1118,8 +1118,9 @@ applet 探针的表现与之前完全相同：`btdevConnectToGattServer rc=0` �
 2. 先让 BLE 栈起来——btm 探针现在会在碰 btm 之前自己 `InitializeBle` + `EnableBle`，
    所以按一次 `StickR`（或空闲屏 `B`）即可；也可以先跑 `←` 驱动级探针。
 
-**已知遗留**：特征 `properties` 读出来是 `0x00`（UUID/handle 正确，写数据前要按固件布局
-核对这个字段）。（传输层在这之后接上了，见下面「传输层」与「第四十七次实机」。）
+**已知遗留**：特征 `properties` 读出来是 `0x00`——第四十九次实机查明真实字节在结构 **+0x20**
+（+0x18 是 handle），要用这个字段时按 +0x20 取。（传输层在这之后接上了，见下面「传输层」与
+「第四十七次实机」。）
 
 ### 第四十七次实机（2026-09-25 01:38）：一键两段会话，写入全通、通知未回
 
@@ -1252,8 +1253,8 @@ btm 会话的完整链路（原文见 SD `logs/dglab-ble-poc.log`，1241 行）�
 
 顺带确认的两件事：
 
-- **特征属性字节整体不可信**：`0x180C` 的两个特征和 `0x180A` 的五个特征，
-  `properties` 全部读出 `0x00`。所以"写出去了"只能靠设备回包证明，不能靠 `rc=0`；
+- **`properties` 全部读出 `0x00`**（当时判断"属性字节不可信"，下一轮查明只是**结构偏移**
+  问题——真实字节在 +0x20，见「第四十九次实机」）。所以那时"写出去了"只能靠设备回包证明；
 - `bt` 状态里那份记录的头是 `00 00 00 00 04 00 00 00`（`result=0`、`conn_id=4`），
   上一轮同样的位置出现过 `0C 00 00 00 E8 03 00 00`（间隔 12 / 超时 1000）。同样的头、
   不同的尾巴——这也正是上一轮"只比前 8 字节"会漏掉东西的原因（本轮已按整条记录比对）。
@@ -1269,13 +1270,50 @@ btm 会话的完整链路（原文见 SD `logs/dglab-ble-poc.log`，1241 行）�
 09-22 dump 的矛盾就此了结：按 UUID 过滤的 smart-device 扫描永远找不到这台设备，
 只有厂商数据（公司号 `0x000A`）过滤的 general 扫描能看到它。
 
-**下一轮要看的**（探针已按这三条改好，构建在 SD 上）：
+**下一轮要看的**（探针已按这三条改好，构建在 SD 上；三条在第四十九次实机里跑完了，
+结果见下节）：
 
 1. 事件记录**整条** dump：读电量、写 B0 之后有没有任何一条新记录（`btm transport: ev#N`）；
 2. `btm transport: ReadDescriptor(CCCD 0x2902 id=…) rc=…` 与它回来的值——订阅到底写没写；
 3. 传输窗口结束时的 `btm transport: managed#N` —— btdrv 的 managed 队列里有没有同一批
    记录（这是回答"通知是不是走另一个状态"的地方；它放在窗口之后，只读、不碰
    `InitializeBle`/`EnableBle`/`RegisterGattClient`）。
+
+### 第四十九次实机（2026-09-25 02:17）：三条判据跑完——通知不在任何一条队列里
+
+日志 322 行（`SD:/switch/DGLAB-NX/logs/dglab-ble-poc.log`），传输窗口的关键行：
+
+    btm transport: RegisterNotification(0x150B) rc=0x00000000
+    btm transport: ReadDescriptor(CCCD 0x2902 id=0) rc=0x00000000
+    btm transport: write without response failed (0x0002A671), with response rc=0x0002A671
+    btm transport: write 7 byte(s) BF000000000000 rc=0x0002A671     ← 这一包没发出去
+    btm transport: ev#1 ... conn@0x04=4 byte@0x08=0 word@0x0C=0
+    btm transport: write 20 byte(s) B01F000000000000000000000000000000000000 rc=0x00000000
+    btm transport: ReadCharacteristic(battery 0x1500) rc=0x00000000
+    btm transport: ev#2 ... size@0x48=0 conn@0x04=4 byte@0x08=12 word@0x0C=1000
+    btm transport: managed#1 type=0 ... 00000004 0000000C 000003E8   ← 与 ev#2 逐字节相同
+    btm transport: done, writes=28 notify=0 b1=0
+
+| 判据 | 结果 |
+| --- | --- |
+| `btm transport: ev#N`（整条 dump） | 整轮只有 `ev#1`（`result=0 conn=4`，尾全零）与 `ev#2`（同头，`+0x08=12` / `+0x0C=1000`）两条**连接级**记录；写 28 包 B0、读电量、读 CCCD 之后没有第三条 |
+| `ReadDescriptor(CCCD 0x2902 id=0) rc=…` | `rc=0`，但**没有值回来**（值本应走事件通道）→ 订阅是否落到 CCCD 仍未证实 |
+| `managed#N`（窗口之后只读） | 1 条记录，与 `ev#2` 逐字节相同 → 通知不走 btdrv 的 managed 队列 |
+
+**`properties` 之谜破了**：这一轮把特征结构整段 dump 出来，真实属性字节在 **+0x20**
+（+0x18 是 handle）：
+
+    char[0] uuid=0x150B handle=16 props=0x00  raw +014 00000000 00000010 00000000 00000010
+    char[1] uuid=0x150A handle=19 props=0x00  raw +014 00000000 00000013 00000000 00000004
+
+`0x150B` 的 +0x20 = `0x10`（notify）、`0x150A` 的 +0x20 = `0x04`（write without response），
+`0x180A` 那五个特征是 `0x02`（read）与 `0x12`（read + notify）——正好对得上。所以 libnx 读出
+`0x00` 是**结构偏移和固件不一致**：写类型用无响应写、订阅目标用 `0x150B` 都没弄错。
+
+**新错误码 `0x0002A671` = `Bluetooth/0x153`**（与 `0x29E71` = `Bluetooth/0x14F` 同模块）。
+整轮只出现两次，且都紧跟在一次 GATT 读请求之后（`ReadDescriptor` 之后的 BF、1 秒后
+`ReadCharacteristic` 之后的下一包 B0），两次都是无响应写与有响应写全部失败——那一包没有发出去；
+其余 27 包 B0 都是 `rc=0`。看起来像"同一连接已有请求在飞，写被判忙"，**未证实**。
 
 ### 早期状态：搁置（2026-09-22 收束，已被上面的结果取代）
 
@@ -1373,8 +1411,9 @@ base `btm` 扫描/连接**（`StickR`，v18）。
 
 实机（2026-09-25 起用的流程，一个按键）：
 
-1. `make -C sysmodule package` 后把 `build/<TITLE_ID>/` 覆盖到 SD 的
-   `atmosphere/contents/<TITLE_ID>/`，重启主机；
+1. `make`（或 `make -C sysmodule package`）后把 `build/<TITLE_ID>/` 覆盖到 SD 的
+   `atmosphere/contents/<TITLE_ID>/`，并把 `build/DGLAB-NX/` 覆盖到 `switch/DGLAB-NX/`
+   （NRO 与 `lang/` 要一起），重启主机；
 2. 确认 SD 上有 `atmosphere/exefs_patches/DGLAB-NX-BLE/`（没有就装上，跑完重启）；
 3. 按一次 `StickR`：NRO 自动先跑驱动级探针会话（打开 BLE 栈），再自动跑 btm 探针会话
    （连接 → GATT 表 → 传输层）；

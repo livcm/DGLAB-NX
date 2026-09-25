@@ -2204,3 +2204,51 @@ general 扫描能看到它。
 下一轮就看三条日志：`btm transport: ev#N`（有没有新记录）、
 `btm transport: ReadDescriptor(CCCD 0x2902 id=…) rc=…`（订阅写没写）、
 `btm transport: managed#N`（通知是不是走 btdrv 那份状态）。
+
+## 30. 追加（2026-09-25 02:17）：三条判据全部跑完——通知仍未到，但 `properties` 的位置与 `0x153` 定了
+
+上一节留下的三条判据（`ev#N` 整条 dump、CCCD 回读、managed 对照）在这一轮都跑出来了
+（日志 322 行，`SD:/switch/DGLAB-NX/logs/dglab-ble-poc.log`）：
+
+- **`bt` 事件通道**：整个传输窗口里只有两条记录，都是**连接级**的——`result=0 conn=4`
+  （尾部全零）与同一头、`+0x08=12` / `+0x0C=1000` 的 `connection_update`（间隔 12 /
+  超时 1000）。写完 28 包 B0、读过电量、读过 CCCD 之后**没有第三条记录**；
+- **CCCD 回读**：`ReadDescriptor(CCCD 0x2902 id=0) rc=0x00000000`，**没有值回来**（值本应走
+  事件通道）。所以"`RegisterNotification` 有没有真写到 CCCD"仍未证实；
+- **managed 队列**（窗口之后只读一次 `btdrvGetBleManagedEventInfo`）：只有 1 条记录，
+  内容与 `bt` 通道那条 `connection_update` 逐字节相同。
+
+于是上一节列的两个候选解释各被砍掉一半：通知既不落在 `bt` 的这个状态里，也不落在 btdrv 的
+managed 队列里——两处都只装着连接级记录。
+
+### 顺带定论的两件事
+
+1. **`properties` 的真实字节在 +0x20**（+0x18 是 handle）。探针把特征结构整段打出来之后：
+
+   | 特征 | handle | +0x20 | 含义 |
+   | --- | --- | --- | --- |
+   | `0x150B` | 16 | `0x10` | notify |
+   | `0x150A` | 19 | `0x04` | write without response |
+   | `0x1501` / `0x1502` / `0x2A25` | 22 / 24 / 26 | `0x02` | read |
+   | `0x1500` / `0x2A59` | 28 / 31 | `0x12` | read + notify |
+
+   也就是说 libnx 读出 `0x00` 是**结构偏移与固件不一致**，不是固件不给这个属性。"写类型猜错"
+   与"订阅目标找错"这两条因此都被排除；
+2. **新错误码 `0x0002A671` = `Bluetooth/0x153`**（module 113，description 0x153，与已知的
+   `0x29E71` = `Bluetooth/0x14F` 同模块）。整轮只出现两次，且**都紧跟在一次 GATT 读请求
+   之后**：`ReadDescriptor` 之后的 BF、1 秒后 `ReadCharacteristic` 之后的下一包 B0。两次都是
+   无响应写与有响应写全部失败，所以**那一包实际没发出去**（本轮 BF 没写成功——好在两个软上限
+   本来就是 0，设备不会被留在可输出状态）。这个模式像"同一连接上已有请求在飞 → 写被判忙"，
+   但**没有证实**：`0x2A671` 在解出来的 `bluetooth` 模块里没有字面量，可能来自同模块的 `bt`
+   服务那一侧。其余 27 包 B0 都是 `rc=0`。
+
+另外确认了一条老边界：`btGetLeEventInfo` 的 type 输出在这台固件上不可用（恒 0 或陈旧值），
+事件只能按形状分类——传输窗口那几行 `ev#N` 不带 type 字段不是漏打。
+
+### 收尾
+
+这一轮之后，缺口收敛到"订阅是否真的落到 CCCD"这一条：写路径可用，通知路径仍然没有证据。
+同一轮的构建（NRO 内嵌版本 `v0.3.0-54-g33a86a4`）已重新打包并覆盖 SD 上的
+`atmosphere/contents/<TITLE_ID>/`、`switch/DGLAB-NX/`（lang 一起）与
+`atmosphere/exefs_patches/DGLAB-NX-BLE/`，hash 逐项核对一致；下一轮实机的判据见
+`docs/ble-re.md` 的「当前状态（2026-09-25）」。
