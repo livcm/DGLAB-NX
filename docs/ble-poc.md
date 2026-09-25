@@ -1413,7 +1413,8 @@ base `btm` 扫描/连接**（`StickR`，v18）。
 
 1. `make`（或 `make -C sysmodule package`）后把 `build/<TITLE_ID>/` 覆盖到 SD 的
    `atmosphere/contents/<TITLE_ID>/`，并把 `build/DGLAB-NX/` 覆盖到 `switch/DGLAB-NX/`
-   （NRO 与 `lang/` 要一起），**卸载 SD 卡再拔**，然后重启主机；
+   （NRO 与 `lang/` 要一起），**卸载整块磁盘**（`diskutil unmountDisk /dev/diskN`）再拔，
+   然后重启主机；
 2. 确认 SD 上有 `atmosphere/exefs_patches/DGLAB-NX-BLE/`（没有就装上，跑完重启）；
 3. 按一次 `StickR`：NRO 自动先跑驱动级探针会话（打开 BLE 栈），再自动跑 btm 探针会话
    （连接 → GATT 表 → 传输层）；

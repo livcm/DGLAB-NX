@@ -195,8 +195,9 @@ headers/examples → 明确修改范围 → 采用最小必要修改。
 - **改了 sysmodule 就先 `make -C sysmodule package`、覆盖 SD 卡上的 `<TITLE_ID>/`、
   再重启主机**，否则后台跑的还是旧二进制，验证到的是旧代码（症状与代码 bug 一样，见
   `sysmodule/AGENTS.md` 的"改完必须重装"）。
-- **往 SD 卡拷完东西就卸载（`diskutil unmount` / 系统弹出的"推出"）再拔卡**：边写边拔
-  会让文件停在半写状态，表面上看着像代码 bug。
+- **往 SD 卡拷完东西就卸载整块磁盘再拔卡**：`diskutil unmountDisk /dev/diskN`，或
+  `diskutil eject /dev/diskN`（连读卡器一起弹出）。不要只 `diskutil unmount <某个卷>`——
+  那只卸分区，盘还挂着。边写边拔会让文件停在半写状态，表面上看着像代码 bug。
 
 不要声称“已测试”而实际上没有运行测试。
 
