@@ -1072,6 +1072,15 @@ btdrv 的 `ConnectGattServer`（cmd 65）**不用调用者传进来的 `client_i
 下一步：找出内部消息 `0x18 / kind == 1` 的发送者（哪条服务命令能触发它），这样我们就能在
 自己的会话里给设备地址分配到 `client_if=2`，让连接归我们。
 
+**配对支线（2026-09-25 晚）**：用户 iOS 实测说明设备**支持 bonding 但不强制**（App 的
+「设备绑定」开关才触发真配对，见 `docs/dglab-protocol.md`）。主机侧这条路的形状也查清了：
+配对请求走 **通用事件队列**（`btdrvGetEventInfo`）的 `BtdrvEventType_SspRequest`(3) 或
+`PairingPinCodeRequest`(2)，并且可以用 `btdrvRespondToSspRequest(addr, variant, accept,
+passkey)` 自己应答——主机上没人会替我们答。v26 因此试了「驱动级会话里 `CreateBond` + 自己
+应答」，并在 btm 会话的连接还活着时再试一次（见 `docs/ble-poc.md`）。判据是
+`GetPairedDeviceInfo` 回来的 `link_key_present`：非 0 才说明真的绑上了；绑上之后再看
+`ConnectGattServer(client_if=自己的)` 是否还回 `0x1806`。
+
 ### 早期收束结论（2026-09-22，已被上面的状态取代）
 
 1. **扫描可用**：btdrv 驱动级扫描稳定拿到设备（地址、rssi、AD 内容）。
