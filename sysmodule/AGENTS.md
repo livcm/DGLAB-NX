@@ -9,8 +9,9 @@
 - **WebSocket 模式**：与手机 DG-LAB App 的 WebSocket 会话（Switch 是服务端、App 扫码连入）、
   Socket 协议、把事件源的波形数据转发给 App（见 `docs/dglab-socket.md`）；
 - **BLE 模式**：直接连接 DG-LAB 设备（Coyote 协议）——**未实现**：连接与 GATT 表已实机
-  跑通（依赖 exefs 补丁），传输层写入可用，但设备侧通知未回、B1 未验证。见
-  `docs/ble-poc.md` 与 `docs/ble-re.md`；
+  跑通（依赖 exefs 补丁），传输层写入已由实机输出证明到达设备（2026-09-25），但设备侧
+  一条回包都没有（通知与读应答全哑、B1 未验证），所以协议要求的"确认后再改强度"还做不了。
+  见 `docs/ble-poc.md` 与 `docs/ble-re.md`；
 - DG-LAB 设备发现、连接、断开；
 - 设备状态管理；
 - Effect / Wave / Command 等协议层功能；

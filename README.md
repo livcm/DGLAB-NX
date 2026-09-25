@@ -10,7 +10,7 @@
 | 模式 | 连接方式 | 状态 |
 | --- | --- | --- |
 | WebSocket | sysmodule 与手机 DG-LAB App 建立 WebSocket 会话：Switch 当服务端，App 扫码连入（Switch 不主动外连）；手机负责与设备之间的 BLE，并把波形数据转发给设备 | 已实现（Socket V3） |
-| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | **扫描 + 连接 + GATT 表已实机跑通，但必须安装 exefs 补丁**（见下）：固件把 BLE 客户端在"控制器层"的激活留给了系统自身的配对流程，第三方客户端会被 `result=0x1A` 挡下；补丁跳过这道检查后，sysmodule 能连上设备并读到 `0x180C`/`0x150A`/`0x150B`（外加 `0x180A` 电量、`0xFE59` DFU）。传输层已接上协议层：BF 与 B0 写入稳定 `rc=0`，但**设备侧一条通知都没回来**，B1 与波形输出未验证。完整证据链与补丁说明见 `docs/ble-re.md`，实测记录见 `docs/ble-poc.md` |
+| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | **扫描 + 连接 + GATT 表已实机跑通，但必须安装 exefs 补丁**（见下）：固件把 BLE 客户端在"控制器层"的激活留给了系统自身的配对流程，第三方客户端会被 `result=0x1A` 挡下；补丁跳过这道检查后，sysmodule 能连上设备并读到 `0x180C`/`0x150A`/`0x150B`（外加 `0x180A` 电量、`0xFE59` DFU）。传输层已接上协议层：BF 与 B0 写入稳定 `rc=0`，且 2026-09-25 的反应测试**实机确认有输出——写入确实到达设备**；但**设备侧一条回包都没有**（通知与读应答全哑），B1 未验证。完整证据链与补丁说明见 `docs/ble-re.md`，实测记录见 `docs/ble-poc.md` |
 
 两种模式下 Switch 都不直接持有蓝牙连接（WebSocket 模式的 BLE 在手机上）。
 
