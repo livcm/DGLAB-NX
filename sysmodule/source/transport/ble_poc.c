@@ -306,7 +306,14 @@ static bool pocTakeAction(PocWorker* w, u32* out_action);
 // Pairing probe (defined next to the driver-level probe): the btm transport's
 // end-of-window peek runs it while the connection is still up, which is the
 // state the App pairs in. Accepting stays off - see the definition.
-#define POC_BTM_BOND_PROBE 1
+//
+// Off since 2026-09-25 evening: the user's follow-up test shows the binding is
+// enforced by the device itself (with binding on, cancelling the pairing prompt
+// makes the App report "this device is already bound" and refuse to connect), so
+// the device only ever pairs with the host it is being bound to and there is
+// nothing for a third-party console to pair with. The code stays for the day the
+// binding is cleared on a test device; on it costs up to 10s per call site.
+#define POC_BTM_BOND_PROBE 0
 #define POC_BTM_BOND_ACCEPT 0
 static void pocBtdrvProbeBond(const BtdrvAddress* addr, const char* label);
 
@@ -3044,7 +3051,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v28 (pairing probe on a live connection)");
+    pocLog("poc build: ble_poc v29 (pairing probe off, connection work resumes)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before any probe runs: both probes care about what has
