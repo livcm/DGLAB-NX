@@ -166,5 +166,7 @@ Mod、手柄传感器）用这个命令把波形槽位交给 sysmodule，由 sys
 ## 临时命令
 
 BLE 直连 PoC 的命令（`DGLAB_IPC_POC_*`）保留在 `common/include/dglab/ipc_poc.h`，
-用于 `docs/ble-poc.md` 里描述的实机诊断。BLE 路线已经搁置，这些命令不是稳定契约，
-正式设备控制命令会在需要时重新设计。
+用于 `docs/ble-poc.md` 里描述的两个探针（驱动级 / base `btm`）与它们的日志回读
+（`START` / `STOP` / `STATUS` / `LOG` / `ACTION`）。它们不是稳定契约，正式设备控制命令
+（连接、设强度、发波形）会在 BLE 传输定稿时重新设计；2026-09-25 那次清理已经把
+btdev 路线、身份探针与扫描过滤器这些诊断动作从这套临时命令里删掉了。
