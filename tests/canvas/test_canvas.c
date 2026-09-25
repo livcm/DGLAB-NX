@@ -296,6 +296,10 @@ static void testScreen(void)
 
         CHECK(labels + 24 + dglabCanvasTextWidth(&kFont, 1, "375/100") <= inside);
         CHECK(labels + 24 + dglabCanvasTextWidth(&kFont, 1, "A test  ok (A is 0)") <= inside);
+        // ... and the strength rows, which carry "value/ceiling": the widest one
+        // this front end can draw, next to the longest channel label.
+        CHECK(dglabCanvasTextWidth(&kFont, 1, "channel intensity A") + 24 +
+                  dglabCanvasTextWidth(&kFont, 1, "100/100") <= inside);
         CHECK(dglabCanvasTextWidth(&kFont, 1, "8f2a4c1e...5e6f7a8b9c0d") +
                   dglabCanvasTextWidth(&kFont, 1, "app id") + 24 <=
               inside);
@@ -315,9 +319,12 @@ static void testScreen(void)
     state.url = "https://www.dungeon-lab.com/app-download.php#DGLAB-SOCKET#"
                 "ws://10.0.0.2:9999/8f2a4c1e-9b77-4d21-8c3a-5e6f7a8b9c0d";
     state.url_ok = true;
-    // Both channels at the widest the value column has to hold.
+    // Both channels at the widest the value column has to hold: the strength rows
+    // are "value/ceiling" now, so that is 100/100.
     state.test_strength_a = 100;
     state.test_strength_b = 100;
+    state.limit_a = 100;
+    state.limit_b = 100;
     state.last_command = "A test  ok (A is 0)";
     state.last_command_tone = DglabCmdTone_Warn;
     state.log_lines = log_lines;
@@ -392,6 +399,8 @@ static void testMotionScreen(void)
     state.frequency_b = 100;
     state.channel_strength_a = 100;
     state.channel_strength_b = 0;
+    state.limit_a = 100;
+    state.limit_b = 30;
     state.link = "app connected";
     state.link_tone = DglabCmdTone_Ok;
     state.last_upload = "waveform A  ok";
@@ -1663,6 +1672,8 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             screen.url_ok = have_qr;
             screen.test_strength_a = 100;
             screen.test_strength_b = 100;
+            screen.limit_a = 100;
+            screen.limit_b = 30;
             screen.last_command = "waveform A  no app bound";
             screen.last_command_tone = DglabCmdTone_Warn;
             screen.auto_sleep_suppressed = suppressed;
@@ -1707,6 +1718,8 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             motion.frequency_b = 1000;
             motion.channel_strength_a = 100;
             motion.channel_strength_b = 0;
+            motion.limit_a = 100;
+            motion.limit_b = 30;
             motion.link = "app connected";
             motion.link_tone = DglabCmdTone_Ok;
             motion.last_upload = "waveform A  no app bound";
@@ -1732,6 +1745,8 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             memset(&touch, 0, sizeof(touch));
             touch.channel_strength_a = 60;
             touch.channel_strength_b = 100;
+            touch.limit_a = 80;
+            touch.limit_b = 100;
             touch.link = "app connected";
             touch.link_tone = DglabCmdTone_Ok;
             touch.last_upload = "waveform A  no app bound";
@@ -1853,9 +1868,11 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
         }
 
-        // The Bluetooth page: idle with no device known, streaming with a
-        // device, the channel strength ceilings and strengths (scrolled), and
-        // the header when the sysmodule cannot be reached.
+        // The Bluetooth page: idle with no device known, streaming with a device
+        // (the strengths show their ceilings after the value), and the header when
+        // the sysmodule cannot be reached. The page carries no text blocks and
+        // fits one screen - up and down are channel A's keys, so nothing can
+        // scroll it (docs/nro-ui.md).
         for (unsigned variant = 0; variant < 3; variant++) {
             DglabBlePageState ble;
             char name[96];
@@ -1878,7 +1895,6 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
                 ble.status.address[5] = 0x18;
                 ble.status.strength_a = 5u;
                 ble.status.packets = 1234u;
-                ble.offset = 400;
             }
 
             snprintf(name, sizeof(name), "%s ble %u", frames, variant);

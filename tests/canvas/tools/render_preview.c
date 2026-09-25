@@ -30,7 +30,6 @@
 //   /tmp/preview /tmp/font.bin /tmp/advdensity.bmp advanceddensity  (the density rows)
 //   /tmp/preview /tmp/font.bin /tmp/log.bmp log        (the sysmodule log page)
 //   /tmp/preview /tmp/font.bin /tmp/ble.bmp ble        (the Bluetooth page)
-//   /tmp/preview /tmp/font.bin /tmp/bleend.bmp bleend  (the Bluetooth page, notes)
 //   /tmp/preview /tmp/font.bin /tmp/blelog.bmp blelog  (the Bluetooth log page)
 //   /tmp/preview /tmp/font.bin /tmp/aboutlow.bmp aboutlow  (the About page, end)
 //   /tmp/preview /tmp/font.bin /tmp/dock.bmp menu dock (the docked 1080p frame)
@@ -160,7 +159,7 @@ int main(int argc, char** argv)
     if (argc < 3) {
         fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> [normal|nowifi|stopped|"
                         "log|menu|motion|touch|touchdock|touchclamp|touchfixed|advanced|"
-                        "advanceddensity|advancedlimit|about|aboutlow|ble|bleend|blelog]"
+                        "advanceddensity|advancedlimit|about|aboutlow|ble|blelog]"
                         " [dock]\n");
         return 2;
     }
@@ -231,6 +230,10 @@ int main(int argc, char** argv)
     state.status.app_feedback = DGLAB_NET_FEEDBACK_NONE;
     state.test_strength_a = 20;
     state.test_strength_b = 0;
+    // The ceiling half of the two strength rows: A from the App's own report,
+    // B from the parameters page (this run has no report for it).
+    state.limit_a = 80;
+    state.limit_b = 100;
     state.last_command = "A test  ok (A is 0)";
     state.last_command_tone = DglabCmdTone_Warn;
     state.log_lines = log_lines;
@@ -374,6 +377,8 @@ int main(int argc, char** argv)
         motion.frequency_b = 100;
         motion.channel_strength_a = 20;
         motion.channel_strength_b = 0;
+        motion.limit_a = 100;
+        motion.limit_b = 30;
         motion.link = dglabString(DglabString_StateConnected);
         motion.link_tone = DglabCmdTone_Ok;
         motion.last_upload = "\u6ce2\u5f62 A  \u6b63\u5e38";
@@ -407,6 +412,8 @@ int main(int argc, char** argv)
         touch.density_fixed = fixed;
         touch.channel_strength_a = 20;
         touch.channel_strength_b = 0;
+        touch.limit_a = 80;
+        touch.limit_b = 100;
         touch.link = dglabString(DglabString_StateConnected);
         touch.link_tone = DglabCmdTone_Ok;
         touch.last_upload = "\u6ce2\u5f62 A  \u6b63\u5e38";
@@ -453,10 +460,10 @@ int main(int argc, char** argv)
         state.log_offset = 0;
 
         dglabScreenDraw(&canvas, &g_fonts, &state);
-    } else if (argc >= 4 && (strcmp(argv[3], "ble") == 0 || strcmp(argv[3], "bleend") == 0)) {
-        // The Bluetooth page with a session running: the two channel strength
-        // ceilings (read only here), the two strengths the D-pad dials, and the
-        // packet count. `bleend` scrolls to the notes under the rows.
+    } else if (argc >= 4 && strcmp(argv[3], "ble") == 0) {
+        // The Bluetooth page with a session running: what the session is doing,
+        // the device, the two strengths with their ceilings, and the packet
+        // count. The page fits one screen and does not scroll.
         DglabBlePageState ble;
 
         memset(&ble, 0, sizeof(ble));
@@ -474,9 +481,6 @@ int main(int argc, char** argv)
         ble.status.address[3] = 0x22;
         ble.status.address[4] = 0x2C;
         ble.status.address[5] = 0x18;
-
-        if (strcmp(argv[3], "bleend") == 0)
-            ble.offset = 1000; // past the end: the page clamps it
 
         dglabBleDraw(&canvas, &g_fonts, &ble);
     } else if (argc >= 4 && strcmp(argv[3], "blelog") == 0) {

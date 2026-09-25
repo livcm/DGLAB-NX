@@ -249,7 +249,6 @@ static u32 g_last_command_tone;
 // its own value, and both start at 0: nothing comes out until the user dials a
 // channel up.
 #define TEST_STRENGTH_MIN 0u
-#define TEST_STRENGTH_MAX 100u
 #define TEST_STRENGTH_STEP 1u
 
 // Channel numbers on the wire, see DglabNetSendRequest::channel.
@@ -536,17 +535,20 @@ static Result testChannel(Service* dglab, u32 channel, u32 strength)
 
 // Steps one channel's strength and sends it straight away - there is no separate
 // "send strength" button. Clamped instead of wrapping: at 0 a decrease does
-// nothing, at 100 an increase does nothing, and a clamped step sends nothing (so
-// there is nothing to report either).
-static bool adjustStrength(Service* dglab, u32 channel, u32* value, int delta, Result* out)
+// nothing, at the channel's ceiling an increase does nothing, and a clamped step
+// sends nothing (so there is nothing to report either). The ceiling is the Y the
+// row shows (dglabChannelCeiling()), so the keys stop exactly where the screen
+// says they do.
+static bool adjustStrength(Service* dglab, u32 channel, u32* value, u32 ceiling, int delta,
+    Result* out)
 {
     int next = (int)*value + delta;
 
     if (next < (int)TEST_STRENGTH_MIN)
         next = (int)TEST_STRENGTH_MIN;
 
-    if (next > (int)TEST_STRENGTH_MAX)
-        next = (int)TEST_STRENGTH_MAX;
+    if ((u32)next > ceiling)
+        next = (int)ceiling;
 
     if ((u32)next == *value)
         return false;
@@ -560,31 +562,62 @@ static bool adjustStrength(Service* dglab, u32 channel, u32* value, int delta, R
 // The D-pad is the mixer: up and down dial channel A, left and right dial channel
 // B, one step per press and, at a slower rate, while held. The socket and motion
 // pages share it, because they show the same two strengths.
-static void adjustStrengthFromDirections(Service* dglab, u64 buttons)
+static void adjustStrengthFromDirections(Service* dglab, u64 buttons, u32 limit_a, u32 limit_b)
 {
     Result rc;
 
     if (buttons & HidNpadButton_Up &&
-        adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, (int)TEST_STRENGTH_STEP, &rc))
+        adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, limit_a,
+            (int)TEST_STRENGTH_STEP, &rc))
         noteCommand(dglabString(DglabString_CmdUpA), rc, NULL);
 
     if (buttons & HidNpadButton_Down &&
-        adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, -(int)TEST_STRENGTH_STEP, &rc))
+        adjustStrength(dglab, TEST_CHANNEL_A, &g_test_strength_a, limit_a,
+            -(int)TEST_STRENGTH_STEP, &rc))
         noteCommand(dglabString(DglabString_CmdDownA), rc, NULL);
 
     if (buttons & HidNpadButton_Right &&
-        adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, (int)TEST_STRENGTH_STEP, &rc))
+        adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, limit_b,
+            (int)TEST_STRENGTH_STEP, &rc))
         noteCommand(dglabString(DglabString_CmdUpB), rc, NULL);
 
     if (buttons & HidNpadButton_Left &&
-        adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, -(int)TEST_STRENGTH_STEP, &rc))
+        adjustStrength(dglab, TEST_CHANNEL_B, &g_test_strength_b, limit_b,
+            -(int)TEST_STRENGTH_STEP, &rc))
         noteCommand(dglabString(DglabString_CmdDownB), rc, NULL);
+}
+
+// Keeps the two strengths inside the ceilings the page is showing.
+//
+// This runs every frame rather than only when a page opens: the Socket page
+// learns the App's own limit from a status poll that comes later, and the App's
+// limit can move while the page is up. A row that says "20/30" must not be
+// sitting on a device value of 80. `send` tells the far end about the clamp -
+// the three App facing pages do (that is the value the App will apply), the
+// Bluetooth page does not: there is no App to tell there, and a session drives
+// both channels to 0 before it streams anyway.
+static void clampStrengthsToCeilings(Service* dglab, u32 limit_a, u32 limit_b, bool send)
+{
+    u32* const values[2] = { &g_test_strength_a, &g_test_strength_b };
+    const u32 limits[2] = { limit_a, limit_b };
+    const u32 channels[2] = { TEST_CHANNEL_A, TEST_CHANNEL_B };
+
+    for (int i = 0; i < 2; i++) {
+        if (*values[i] <= limits[i])
+            continue;
+
+        *values[i] = limits[i];
+
+        if (send)
+            sendTestCommand(dglab, DglabNetCommand_SetStrength, channels[i], *values[i]);
+    }
 }
 
 // Repeats a held direction: nothing for the first TEST_STRENGTH_HOLD_NS, then one
 // step every TEST_STRENGTH_REPEAT_NS. The press itself is handled from `down`, so
 // a short tap always changes the value exactly once.
-static void repeatStrengthFromDirections(Service* dglab, u64 held, u64 now_ns)
+static void repeatStrengthFromDirections(Service* dglab, u64 held, u64 now_ns, u32 limit_a,
+    u32 limit_b)
 {
     if (!(held & (HidNpadButton_Up | HidNpadButton_Down | HidNpadButton_Right |
             HidNpadButton_Left))) {
@@ -608,7 +641,7 @@ static void repeatStrengthFromDirections(Service* dglab, u64 held, u64 now_ns)
 
     g_strength_last_repeat_ns = now_ns;
 
-    adjustStrengthFromDirections(dglab, held);
+    adjustStrengthFromDirections(dglab, held, limit_a, limit_b);
 }
 
 // Starts or stops the server: what A does on the socket page and on the motion
@@ -667,6 +700,11 @@ typedef struct {
     char url[DGLAB_NET_QR_MAX];
     u32 test_strength_a;
     u32 test_strength_b;
+    // The ceiling half of those two rows, drawn next to the values, so it is part
+    // of what the page shows (nro/AGENTS.md: everything the screen draws belongs
+    // in the redraw decision).
+    u32 limit_a;
+    u32 limit_b;
     char last_command[sizeof(g_last_command)];
     u32 last_command_tone;
     // Swaps the row of warning text under the server row, so it belongs in the
@@ -691,6 +729,8 @@ static void snapshotFromState(DglabScreenSnapshot* out, const DglabScreenState* 
     out->url_ok = state->url_ok;
     out->test_strength_a = state->test_strength_a;
     out->test_strength_b = state->test_strength_b;
+    out->limit_a = state->limit_a;
+    out->limit_b = state->limit_b;
     out->last_command_tone = state->last_command_tone;
     out->auto_sleep_suppressed = state->auto_sleep_suppressed;
     out->log_count = state->log_count;
@@ -766,6 +806,12 @@ static int logScrollFromDirections(int offset, int max_offset, u64 down, u64 hel
 
 // The socket page and its log page. B goes back to the menu; every action here
 // is a shortcut key, so there is nothing to focus and nothing to navigate.
+//
+// It reads the motion parameters too: the ceiling half of its two strength rows
+// is the channel limit from that file while the App has not reported its own
+// (dglabChannelCeiling()). The loader itself lives with the gameplay modes below.
+static void motionSettingsLoad(DglabMotionFeedConfig* config);
+
 static void runSocketView(Service* dglab, PadState* pad)
 {
     DglabScreenSnapshot snapshot;
@@ -780,8 +826,13 @@ static void runSocketView(Service* dglab, PadState* pad)
     bool log_open = false;
     int log_offset = 0;
     u32 frame = 0;
+    // The channel limits from the parameters page: the fallback ceiling for the
+    // two strength rows while the App has not reported its own (see
+    // dglabChannelCeiling()).
+    DglabMotionFeedConfig config;
 
     url[0] = '\0';
+    motionSettingsLoad(&config);
 
     while (appletMainLoop()) {
         DglabScreenState state;
@@ -829,6 +880,18 @@ static void runSocketView(Service* dglab, PadState* pad)
                 state.status.state == DglabNetState_Paired);
         appAutoSleepFollow(server_running);
 
+        // The ceiling the two strength rows show and the D-pad stops at: the
+        // App's own limit once it has reported one, the parameters page's
+        // channel limit until then. Both are recomputed from this frame's poll,
+        // so the screen and the keys can never disagree.
+        state.limit_a = dglabChannelCeiling(
+            state.status_ok && state.status.reports_received != 0, state.status.app_limit_a,
+            config.channel_limit_a);
+        state.limit_b = dglabChannelCeiling(
+            state.status_ok && state.status.reports_received != 0, state.status.app_limit_b,
+            config.channel_limit_b);
+        clampStrengthsToCeilings(dglab, state.limit_a, state.limit_b, true);
+
         if (down & HidNpadButton_B)
             return;
 
@@ -845,8 +908,9 @@ static void runSocketView(Service* dglab, PadState* pad)
                 toggleServer(dglab, server_running);
 
             testChannelButtons(dglab, down);
-            adjustStrengthFromDirections(dglab, down);
-            repeatStrengthFromDirections(dglab, held, armTicksToNs(armGetSystemTick()));
+            adjustStrengthFromDirections(dglab, down, state.limit_a, state.limit_b);
+            repeatStrengthFromDirections(dglab, held, armTicksToNs(armGetSystemTick()),
+                state.limit_a, state.limit_b);
         }
 
         state.log_open = log_open;
@@ -1091,12 +1155,22 @@ static void runMotionView(Service* dglab, PadState* pad)
         // disagree. The panel still refreshes at its own rate below.
         {
             DglabNetStatus status;
-            bool status_ok = R_SUCCEEDED(
-                serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, status));
+            bool status_ok;
 
+            memset(&status, 0, sizeof(status));
+            status_ok = R_SUCCEEDED(
+                serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, status));
             state.server_running = status_ok &&
                 (status.state == DglabNetState_Listening ||
                     status.state == DglabNetState_Paired);
+
+            // The ceiling the two strength rows show and the D-pad stops at: the
+            // App's own limit while it reports one, the parameters page's
+            // channel limit otherwise (dglabChannelCeiling()).
+            state.limit_a = dglabChannelCeiling(status_ok && status.reports_received != 0,
+                status.app_limit_a, config.channel_limit_a);
+            state.limit_b = dglabChannelCeiling(status_ok && status.reports_received != 0,
+                status.app_limit_b, config.channel_limit_b);
 
             // The motion page is the other place the server can be started, so
             // it has to keep the console's sleep timer in step with it too.
@@ -1132,9 +1206,10 @@ static void runMotionView(Service* dglab, PadState* pad)
         }
 
         testChannelButtons(dglab, down);
-        adjustStrengthFromDirections(dglab, down);
+        clampStrengthsToCeilings(dglab, state.limit_a, state.limit_b, true);
+        adjustStrengthFromDirections(dglab, down, state.limit_a, state.limit_b);
         repeatStrengthFromDirections(dglab, padGetButtons(pad),
-            armTicksToNs(armGetSystemTick()));
+            armTicksToNs(armGetSystemTick()), state.limit_a, state.limit_b);
 
         // Which sides this mode can read at all, from the pad the buttons come
         // from: the six-axis handles keep handing over readings for a Joy-Con
@@ -1417,14 +1492,23 @@ static void runTouchView(Service* dglab, PadState* pad)
         // the D-pad dials the two channel strengths.
         {
             DglabNetStatus status;
-            bool status_ok = R_SUCCEEDED(
-                serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, status));
+            bool status_ok;
 
+            memset(&status, 0, sizeof(status));
+            status_ok = R_SUCCEEDED(
+                serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_STATUS, status));
             state.server_running = status_ok &&
                 (status.state == DglabNetState_Listening ||
                     status.state == DglabNetState_Paired);
 
             appAutoSleepFollow(state.server_running);
+
+            // The ceiling rule is the socket and motion pages' one: the App's own
+            // limit while it reports one, the parameters page's otherwise.
+            state.limit_a = dglabChannelCeiling(status_ok && status.reports_received != 0,
+                status.app_limit_a, config.channel_limit_a);
+            state.limit_b = dglabChannelCeiling(status_ok && status.reports_received != 0,
+                status.app_limit_b, config.channel_limit_b);
 
             if (!status_ok) {
                 state.link = dglabString(DglabString_StateIpcFailed);
@@ -1443,9 +1527,10 @@ static void runTouchView(Service* dglab, PadState* pad)
             toggleServer(dglab, state.server_running);
 
         testChannelButtons(dglab, down);
-        adjustStrengthFromDirections(dglab, down);
+        clampStrengthsToCeilings(dglab, state.limit_a, state.limit_b, true);
+        adjustStrengthFromDirections(dglab, down, state.limit_a, state.limit_b);
         repeatStrengthFromDirections(dglab, padGetButtons(pad),
-            armTicksToNs(armGetSystemTick()));
+            armTicksToNs(armGetSystemTick()), state.limit_a, state.limit_b);
 
         // The panel, then the mapping, then the slots: the same three steps the
         // motion mode takes with a sensor sample, which is what lets the two modes
@@ -1654,10 +1739,10 @@ static bool bleStateIsActive(u32 state)
 // driving the device with nobody watching.
 //
 // The D-pad dials the two channel strengths exactly like the socket and motion
-// pages do (they share g_test_strength_a/b and the two helpers), and the two
-// channel strength *ceilings* are settings the advanced parameters page owns -
-// this page shows them and hands them to the session at start, which is why
-// there are two more numbers on it than there used to be instead of two keys.
+// pages do (they share g_test_strength_a/b and the two helpers). The two channel
+// strength *ceilings* are settings the advanced parameters page owns: they are
+// the ceiling half of the two strength rows (value/ceiling) and go to the session
+// in BLE_START, but nothing on this page changes them.
 static void runBleView(Service* dglab, PadState* pad)
 {
     DglabBlePageState state;
@@ -1665,8 +1750,6 @@ static void runBleView(Service* dglab, PadState* pad)
     bool have_drawn = false;
     u32 drawn_generation = 0;
     u32 drawn_log_generation = 0;
-    int offset = 0;
-    int drawn_offset = 0;
     DglabMotionFeedConfig config;
 
     memset(&state, 0, sizeof(state));
@@ -1716,8 +1799,9 @@ static void runBleView(Service* dglab, PadState* pad)
             // up/down dial channel A, left/right channel B, one step per press
             // and a walk while held. A running session follows them because the
             // sysmodule routes NET_SEND to it while it is active.
-            adjustStrengthFromDirections(dglab, down);
-            repeatStrengthFromDirections(dglab, held, armTicksToNs(armGetSystemTick()));
+            adjustStrengthFromDirections(dglab, down, state.limit_a, state.limit_b);
+            repeatStrengthFromDirections(dglab, held, armTicksToNs(armGetSystemTick()),
+                state.limit_a, state.limit_b);
 
             if (down & HidNpadButton_X)
                 serviceDispatch(dglab, DGLAB_IPC_CMD_BLE_STOP);
@@ -1786,20 +1870,16 @@ static void runBleView(Service* dglab, PadState* pad)
             }
         }
 
-        state.offset = offset;
-        offset = dglabListScrollClamp(offset,
-            dglabBleContentHeight(&g_fonts, &state) -
-                (DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP));
-        state.offset = offset;
-
         // The two rows the D-pad dials come from the same pair the socket and
-        // motion pages show, so the number on screen and the number that went
-        // out cannot be two different things.
+        // motion pages show, so the number on screen and the number that went out
+        // cannot be two different things. The page does not scroll (up and down
+        // are channel A here), so there is no offset to clamp.
+        clampStrengthsToCeilings(dglab, state.limit_a, state.limit_b, false);
         state.strength_a = g_test_strength_a;
         state.strength_b = g_test_strength_b;
 
         if (have_drawn && memcmp(&drawn, &state, sizeof(state)) == 0 &&
-            drawn_offset == offset && drawn_generation == g_display_generation &&
+            drawn_generation == g_display_generation &&
             drawn_log_generation == g_log_generation)
             continue;
 
@@ -1820,7 +1900,6 @@ static void runBleView(Service* dglab, PadState* pad)
             dglabFramebufferEnd();
 
             drawn = state;
-            drawn_offset = offset;
             drawn_generation = g_display_generation;
             drawn_log_generation = g_log_generation;
             have_drawn = true;

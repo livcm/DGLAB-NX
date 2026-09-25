@@ -63,6 +63,13 @@ typedef struct {
     u32 test_strength_a;
     u32 test_strength_b;
 
+    // The ceiling each strength row shows next to its value, one per channel: the
+    // App's own limit while it reports one, the parameters page's channel limit
+    // otherwise (dglabChannelCeiling() in dglab/nro/motion_settings.h). The D-pad
+    // stops there, so the rows never show a value above its ceiling.
+    u32 limit_a;
+    u32 limit_b;
+
 
     // What the buttons last sent and what the sysmodule answered, e.g.
     // "A test  ok (A is 0)" or "clear  no app bound". Built in main.c, where

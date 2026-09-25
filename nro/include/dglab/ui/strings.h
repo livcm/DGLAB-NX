@@ -53,8 +53,6 @@ typedef enum {
     DglabString_BleDevice,
     DglabString_BleDeviceNone,
     DglabString_BlePackets,
-    DglabString_BleOpenLoop,
-    DglabString_BleProcedure,
     DglabString_BleLogTitle,
     DglabString_DescSocket,
     DglabString_DescMotion,

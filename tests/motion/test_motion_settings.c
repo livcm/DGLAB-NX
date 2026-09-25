@@ -289,6 +289,23 @@ static void testChannelLimits(void)
     CHECK(read.channel_limit_b == 99);
 }
 
+// The ceiling a strength row shows after the value, and the value the D-pad
+// stops at (nro/source/main.c). Two sources, in this order: the App's own limit
+// while it reports one - that is what enforces the cap in Socket mode - and the
+// parameters page's channel limit otherwise. Either way the answer stays inside
+// the range this front end dials, because the row reads "value/ceiling" and has
+// to describe what the keys can do.
+static void testChannelCeiling(void)
+{
+    CHECK(dglabChannelCeiling(true, 20u, 100u) == 20u);   // the App is the cap
+    CHECK(dglabChannelCeiling(true, 0u, 100u) == 0u);     // an App reporting 0 means 0
+    CHECK(dglabChannelCeiling(false, 20u, 100u) == 100u); // no report: our setting
+    CHECK(dglabChannelCeiling(false, 20u, 30u) == 30u);
+    CHECK(dglabChannelCeiling(true, 200u, 30u) == DGLAB_STRENGTH_MAX);
+    CHECK(dglabChannelCeiling(false, 0u, 200u) == DGLAB_STRENGTH_MAX);
+    CHECK(DGLAB_STRENGTH_MAX == 100u);
+}
+
 int main(void)
 {
     testDefaultsMatchTheMode();
@@ -300,6 +317,7 @@ int main(void)
     testOlderFileLeavesTheNewKeysAlone();
     testBadLinesAreIgnored();
     testChannelLimits();
+    testChannelCeiling();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
 

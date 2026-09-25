@@ -23,6 +23,11 @@ typedef struct {
     // mode's waveform is multiplied with, so they belong on screen.
     unsigned channel_strength_a;
     unsigned channel_strength_b;
+    /// The ceiling each strength row shows after the value (value/ceiling), one
+    /// per channel, and the value the D-pad stops at: the App's own limit while
+    /// it reports one, the parameters page's otherwise.
+    unsigned limit_a;
+    unsigned limit_b;
 
     // What the last upload answered, drawn like the socket screen's "last cmd".
     const char* link;      ///< e.g. "app connected" or "no app bound"

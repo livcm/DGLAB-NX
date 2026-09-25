@@ -36,6 +36,22 @@ typedef enum {
     DglabMotionSetting_Count,
 } DglabMotionSetting;
 
+/// The strength range this front end dials. The device accepts 0..200, but every
+/// page here sends at most 100 (the official documentation reserves more for
+/// special cases), so the channel limit and the D-pad both live inside it - which
+/// is what makes "value/limit" on screen describe what the keys can do.
+#define DGLAB_STRENGTH_MAX 100u
+
+/// The ceiling one channel's strength row shows and the D-pad dials up to.
+///
+/// Two sources, in this order: the App's own limit while it reports one (that is
+/// what enforces the cap in Socket mode, see DglabNetStatus::app_limit_a), and
+/// the channel limit from this page otherwise (the one the Bluetooth session
+/// sends to the device). Either way the answer is clamped into
+/// DGLAB_STRENGTH_MAX, so a caller can render it as "value/ceiling" and clamp
+/// the value with it.
+u32 dglabChannelCeiling(bool app_reported, u32 app_limit, u32 configured_limit);
+
 /// Loads the values this project ships with. Same numbers as
 /// dglabMotionFeedDefaultConfig(), which is what the motion mode used before the
 /// parameters became editable.

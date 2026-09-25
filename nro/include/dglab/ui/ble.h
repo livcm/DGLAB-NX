@@ -7,9 +7,15 @@
 // Starting is two steps because the transport needs two: the driver-level probe
 // brings the Bluetooth stack up, then the session connects (docs/ble-poc.md).
 //
-// What the page shows about strength is honest about being open loop: the device
-// never reports back on this firmware (docs/ble-re.md, "连接所有权在服务层是封的"),
-// so the row shows the value this side asked for and the note says so.
+// The page is the two channel strengths and what the session is doing, nothing
+// else: the two channel ceilings are settings (the parameters page owns them) and
+// they are already readable as the ceiling half of each strength row, so the page
+// does not repeat them as rows, and it carries no text blocks - the two
+// adjustment hints are the line above the rows, the same line every other
+// gameplay page has, and the page fits one screen because up and down belong to
+// channel A rather than to a scroll. What the rows cannot say (the device never
+// reports back on this firmware, so these are the values this side asked for, see
+// docs/ble-re.md) is in the mode's description on the menu.
 //
 // Strength is dialled here exactly the way the socket and gameplay pages dial
 // it (up/down channel A, left/right channel B, hold to walk), because the
@@ -31,7 +37,8 @@ typedef struct {
     bool driver_running;   ///< step 1 of the start sequence is still running
     bool starting;         ///< ...and step 2 has not been sent yet
     /// The two channel strength ceilings the session is started with, read from
-    /// the shared settings (0..100). Not the strengths below them.
+    /// the shared settings (0..100). Not the strengths below them: they are the
+    /// ceiling half of those two rows, and the value the D-pad stops at.
     u32 limit_a;
     u32 limit_b;
     /// The two strengths, the same pair the socket and gameplay pages dial.
@@ -41,12 +48,7 @@ typedef struct {
     /// page's log is (docs/nro-ui.md).
     bool log_open;
     int log_offset;
-    int offset;            ///< first row shown, clamped by content height
 } DglabBlePageState;
 
 void dglabBleDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     const DglabBlePageState* state);
-
-/// How tall the page's rows measure, so the caller can clamp its scroll offset
-/// the same way the about page does.
-int dglabBleContentHeight(const DglabFontSet* fonts, const DglabBlePageState* state);

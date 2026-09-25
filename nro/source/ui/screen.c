@@ -258,8 +258,12 @@ static void drawInfoColumn(DglabCanvas* canvas, const DglabFontSet* fonts,
             dglabTextWidth(fonts->body, dglabString(DglabString_LabelAppId)) - 24,
         (const char*)status->peer_id, app_id, sizeof(app_id));
 
-    snprintf(strength_a, sizeof(strength_a), "%u/100", (unsigned)state->test_strength_a);
-    snprintf(strength_b, sizeof(strength_b), "%u/100", (unsigned)state->test_strength_b);
+    // value/ceiling: the number the D-pad dials, over the number it stops at
+    // (dglabChannelCeiling()).
+    snprintf(strength_a, sizeof(strength_a), "%u/%u", (unsigned)state->test_strength_a,
+        (unsigned)state->limit_a);
+    snprintf(strength_b, sizeof(strength_b), "%u/%u", (unsigned)state->test_strength_b,
+        (unsigned)state->limit_b);
     snprintf(command, sizeof(command), "%s",
         (state->last_command && state->last_command[0]) ? state->last_command : "-");
 

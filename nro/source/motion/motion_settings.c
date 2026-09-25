@@ -182,6 +182,16 @@ static void setSetting(DglabMotionFeedConfig* config, unsigned setting, float va
     fixRelations(config);
 }
 
+u32 dglabChannelCeiling(bool app_reported, u32 app_limit, u32 configured_limit)
+{
+    u32 ceiling = app_reported ? app_limit : configured_limit;
+
+    if (ceiling > DGLAB_STRENGTH_MAX)
+        ceiling = DGLAB_STRENGTH_MAX;
+
+    return ceiling;
+}
+
 void dglabMotionSettingsDefault(DglabMotionFeedConfig* config)
 {
     if (!config)

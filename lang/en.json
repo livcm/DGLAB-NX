@@ -143,8 +143,6 @@
     "ble_device": "Device",
     "ble_device_none": "Not known yet",
     "ble_packets": "Packets sent",
-    "ble_open_loop": "Open loop: this firmware never reports back, so the strengths above are the values this side asked for, not what the device is doing. The channel limits are enforced by the device itself - set them on the advanced parameters page, and they are written once when a session starts.",
-    "ble_procedure": "Starting runs the two steps the transport needs: the driver-level step brings the Bluetooth stack up, then the session connects. Needs the exefs patch. One BLE path per boot: reboot before the next attempt. Socket mode is not affected - stop the session and the gameplay pages drive the App again. A running session keeps playing a default waveform on both channels, which is why the device's light flashes even with the strengths at 0; up/down and left/right are the amplitude it plays at.",
     "ble_log_title": "Bluetooth log"
   }
 }

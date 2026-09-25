@@ -73,8 +73,12 @@ void dglabMotionScreenDraw(DglabCanvas* canvas, const DglabFontSet* fonts,
     bool connected_b;
     int x = DGLAB_PAGE_CONTENT_X;
 
-    snprintf(strength_a, sizeof(strength_a), "%u/100", state->channel_strength_a);
-    snprintf(strength_b, sizeof(strength_b), "%u/100", state->channel_strength_b);
+    // value/ceiling: the number the D-pad dials, over the number it stops at
+    // (dglabChannelCeiling()).
+    snprintf(strength_a, sizeof(strength_a), "%u/%u", state->channel_strength_a,
+        state->limit_a);
+    snprintf(strength_b, sizeof(strength_b), "%u/%u", state->channel_strength_b,
+        state->limit_b);
     // The two strengths this waveform is scaled by, one row each.
     snprintf(label_a, sizeof(label_a), "%s A", dglabString(DglabString_MotionVolume));
     snprintf(label_b, sizeof(label_b), "%s B", dglabString(DglabString_MotionVolume));
