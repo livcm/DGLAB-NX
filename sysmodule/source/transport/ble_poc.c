@@ -1883,7 +1883,13 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     // user does not have to time anything), then keep watching for 20 seconds.
     // Whether the target's advertisements stop and come back is what separates
     // "the stack refuses" from "the device refuses" (docs/ble-poc.md).
-    if (g_poc.use_target_address && !pocStopRequested()) {
+    //
+    // It also runs when no address is configured: that is where the device is
+    // recognised from its advertisement and written out (pocSaveDiscoveredAddress),
+    // and gating it on a configured address made discovery impossible - the round
+    // of 2026-09-26 00:12 skipped this whole block and ended with "no address to
+    // connect to".
+    if (!pocStopRequested()) {
         BtdrvAddress phone_target;
         BtdrvAddress seen[4];
         u32 seen_count = 0u;
@@ -2016,6 +2022,13 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                         pocAdIsCoyote(info.scan_result.ad_list, 10u)) {
                         g_poc.address_discovered = true;
                         pocSaveDiscoveredAddress(&info.scan_result.address);
+
+                        // Let the rest of this session use it too: the connects
+                        // after the window fall back to the configured address.
+                        memcpy(g_poc.target_address, info.scan_result.address.address, 6);
+                        g_poc.use_target_address = true;
+                        scanned_address = info.scan_result.address;
+                        have_address = true;
                     }
                 }
             }
@@ -3223,7 +3236,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v34 (automatic address discovery)");
+    pocLog("poc build: ble_poc v35 (discovery window runs without a configured address)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before any probe runs: both probes care about what has
