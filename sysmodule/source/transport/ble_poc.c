@@ -1199,6 +1199,17 @@ static void pocBtmLinkWrite(void* context, const u8* data, size_t size)
         transport->writes++;
 }
 
+// A GATT request that follows a read right away is answered with
+// Bluetooth/0x153 on this firmware: both write types fail and the packet is
+// dropped without a retry (2026-09-25, the two rounds that added the reads).
+// The periodic B0 writes come back a tick later anyway, but the single-shot
+// packets do not, so every read gets a moment of quiet before the next request.
+static void pocBtmSettle(const char* reason)
+{
+    pocLog("btm transport: settle 300ms %s", reason);
+    svcSleepThread(300000000ull);
+}
+
 static bool pocBtmTransportStart(u32 handle)
 {
     DglabCoyoteV3Link link = { pocBtmLinkWrite, &g_btm_transport };
@@ -1241,8 +1252,26 @@ static bool pocBtmTransportStart(u32 handle)
 
         pocLog("btm transport: ReadDescriptor(CCCD 0x2902 id=%u) rc=0x%08X",
             (unsigned)g_btm_cccd.instance_id, (u32)cccd_rc);
+        pocBtmSettle("after the CCCD read");
     } else {
         pocLog("btm transport: no CCCD entry from btm, subscription cannot be read back");
+    }
+
+    // The subscription itself, done by hand. RegisterNotification only says
+    // "accepted", and the read-back above cannot prove anything either: the
+    // value it returns would arrive through the very channel that has stayed
+    // silent. Writing 0x0001 into the CCCD under 0x150B is the one step whose
+    // outcome is a plain return code - if the device still says nothing
+    // afterwards, the subscription is not what is missing.
+    if (g_btm_cccd_ready) {
+        u8 cccd[2] = { 0x01, 0x00 };
+        Result cccd_write = btLeClientWriteDescriptor(handle, true,
+            &g_btm_transport.service, &g_btm_transport.notify_char, &g_btm_cccd,
+            cccd, sizeof(cccd), BtdrvGattAuthReqType_None);
+
+        pocLog("btm transport: WriteDescriptor(CCCD 0x2902 = 0100) rc=0x%08X",
+            (u32)cccd_write);
+        pocBtmSettle("after the CCCD write");
     }
 
     g_btm_transport.connected = true;
@@ -1409,6 +1438,7 @@ static void pocBtmTransportPump(u32 duration_ms)
                 rc = btLeClientReadCharacteristic(g_btm_transport.handle, true, &service_id,
                     &char_id, BtdrvGattAuthReqType_None);
                 pocLog("btm transport: ReadCharacteristic(battery 0x1500) rc=0x%08X", (u32)rc);
+                pocBtmSettle("after the battery read");
             }
         }
 
@@ -3807,7 +3837,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v18 (base btm probe on StickR)");
+    pocLog("poc build: ble_poc v19 (hand-written CCCD write, settle after reads)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before anything is opened or scanned. Collecting the

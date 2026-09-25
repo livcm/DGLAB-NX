@@ -973,7 +973,7 @@ base `btm` 的请求里根本没有 ARUID 字段——它用 `RegisterAppletReso
 重启。2026-09-24/25 的成功轮都是这条路径。`sysmodule/source/transport/ble_poc.c` 里
 `pocBtmProbe` 开头那段注释还写着"盲连已经去掉"，与下面的代码矛盾，下一轮顺手改掉。）
 
-每次会话开头都会打印 `poc build: ble_poc v18 (base btm probe on StickR)`：拿到日志先看
+每次会话开头都会打印 `poc build: ble_poc v19 (hand-written CCCD write, settle after reads)`：拿到日志先看
 这一行，就能确认 SD 上装的是不是带 btm 探针的那个构建。
 
 这个探针**现在是手动触发、开机不跑**：它曾经被改成"开机后第一次会话自动执行"，2026-09-22
