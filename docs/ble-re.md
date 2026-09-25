@@ -1085,7 +1085,7 @@ passkey)` 自己应答——主机上没人会替我们答。v26 因此试了「
 才走"触发配对请求但立刻自动取消"的方案（即 `POC_BTM_BOND_ACCEPT = 0`，不要把设备绑到主机上
 ——App 里写明绑定后只有被绑定的主机能连，绑定信息只能在 App 或设备重置里清除）。
 
-**实测结果（2026-09-25 18:43，v26）：配对支线关闭**。
+**实测结果（2026-09-25 18:43，v26）：在"设备绑定"关闭的状态下，设备不理配对请求**。
 
     btdrv probe: AddPairedDeviceInfo(EA:A8:...:18) rc=0x00000000
     btdrv probe: GetPairedDeviceInfo rc=0x00000000 name=""      ← 记录没写进去
@@ -1094,10 +1094,16 @@ passkey)` 自己应答——主机上没人会替我们答。v26 因此试了「
     btdrv probe: ConnectGattServer(client_if=0x02, after paired write) rc=0x00300C71
 
 即：`CreateBond` 被受理，但**整轮没有任何配对事件**（没有 `SspRequest` / `PairingPinCodeRequest`），
-设备也没有被绑上（`link_key_present=0`，所以不会影响手机 App）。这与 iOS 的观察一致——
-设备只在 App 的「设备绑定」模式下才肯配对，主机侧推不动这一步；`AddPairedDeviceInfo` 写的记录
+设备也没有被绑上（`link_key_present=0`，所以不会影响手机 App）。`AddPairedDeviceInfo` 写的记录
 也留不下（读回来是空的），说明那套存储要靠真配对产生的 link key。btm 会话里那次尝试因为
-传输窗口末尾的 peek 已经 `btdrvExit` 而拿到 `Kernel/InvalidHandle`，没真正执行（不影响结论）。
+传输窗口末尾的 peek 已经 `btdrvExit` 而拿到 `Kernel/InvalidHandle`，没真正执行。
+
+**注意这轮的前提**：用户当时**没有开 App 里的「设备绑定」**。按 iOS 上的行为，设备只在那个模式
+下才发起配对，所以这一轮**只证明"默认状态下它不配对"，没有证明配对支线不可用**。要判定这条支线，
+必须先让设备进入可绑定状态（由 App 控制），再在**连接还活着**的时候试——iOS 也是在连着的时候
+才弹配对框。v28 因此把配对探测改成：驱动级会话一次，**以及 btm 会话窗口结束后、连接还没断时
+再由 peek 跑一次**（修掉 v26 那次 `InvalidHandle` 的顺序问题）；仍然是"收到请求就取消"
+（`POC_BTM_BOND_ACCEPT = 0`），不会真的绑定。
 
 顺带得到一个新观测点：连接尝试失败后，btdrv 的 managed 队列里出现了一条**带设备地址**的记录
 （重复出现）：

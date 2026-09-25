@@ -302,6 +302,14 @@ static void pocSetMilestone(u32 bits)
 
 // Forward declarations: actions are handled from inside the scan poll loop too.
 static bool pocTakeAction(PocWorker* w, u32* out_action);
+
+// Pairing probe (defined next to the driver-level probe): the btm transport's
+// end-of-window peek runs it while the connection is still up, which is the
+// state the App pairs in. Accepting stays off - see the definition.
+#define POC_BTM_BOND_PROBE 1
+#define POC_BTM_BOND_ACCEPT 0
+static void pocBtdrvProbeBond(const BtdrvAddress* addr, const char* label);
+
 static bool pocHandleAction(PocWorker* w, u32 action);
 static u32 pocDrainBleEvents(const char* label, u32 duration_ms, u8* out_client_if);
 // Defined next to the btm probe, used by the driver-level probe's device dump.
@@ -424,6 +432,11 @@ static bool g_btm_cccd_ready;
 // lives in .bss like g_ble_event.
 #define POC_BTM_EVENT_DUMP_MAX 6u
 static BtdrvBleEventInfo g_managed_event;
+
+// The btm probe's target address, so the end-of-window peek can run the pairing
+// probe while the connection is still up - which is the state the App pairs in.
+static BtdrvAddress g_btm_bond_address;
+static bool g_btm_bond_address_valid;
 static u8 g_managed_last[0x50];
 
 // The other two queues btdrv keeps: the LE HID one and the general one. Both are
@@ -854,6 +867,11 @@ static void pocBtmEventPeek(void)
     pocLog("btm transport: peek, btdrvInitialize rc=0x%08X", (u32)rc);
     if (R_FAILED(rc))
         return;
+
+    // Pairing probe first: it watches the general queue for a pairing request,
+    // and that queue is also one of the three dumped below.
+    if (POC_BTM_BOND_PROBE && g_btm_bond_address_valid)
+        pocBtdrvProbeBond(&g_btm_bond_address, "btm transport");
 
     pocBtmPeekBleQueue("managed", btdrvGetBleManagedEventInfo, &g_managed_event, g_managed_last);
     pocBtmPeekBleQueue("lehid", btdrvGetLeHidEventInfo, &g_leh_event, g_leh_last);
@@ -1330,6 +1348,62 @@ static void pocControlConnect(const char* label)
     pocLog("%s: control connect client_if=0xFF rc=0x%08X", label, (u32)rc);
 }
 
+// Pairing probe. The device only offers pairing while its own App-driven
+// "device binding" mode is on (on iOS the toggle makes the phone show a pairing
+// prompt; with it off the connection simply stays transient), so a run of this
+// only means something if that mode was enabled beforehand. The request arrives
+// on the *general* btdrv event queue (SspRequest = 3, PairingPinCodeRequest = 2)
+// and nothing else on this console will answer it - so the probe answers by
+// cancelling (POC_BTM_BOND_ACCEPT is declared with the forward declarations,
+// next to the other tunables).
+static void pocBtdrvProbeBond(const BtdrvAddress* addr, const char* label)
+{
+    SetSysBluetoothDevicesSettings settings;
+    Result rc = btdrvCreateBond(*addr, 0);
+
+    pocLog("%s: CreateBond(type=0) rc=0x%08X", label, (u32)rc);
+
+    for (u32 i = 0; i < 40u; i++) {
+        BtdrvEventType type = (BtdrvEventType)0;
+        bool answered = false;
+
+        memset(&g_general_event, 0, sizeof(g_general_event));
+        rc = btdrvGetEventInfo(&g_general_event, sizeof(g_general_event), &type);
+
+        if (R_SUCCEEDED(rc)) {
+            const u8* raw = (const u8*)&g_general_event;
+
+            if ((u32)type == (u32)BtdrvEventType_SspRequest ||
+                (u32)type == (u32)BtdrvEventType_PairingPinCodeRequest) {
+                Result answer;
+
+                pocLog("%s: pairing event type=%u from %02X:%02X:...:%02X", label, (u32)type,
+                    raw[0], raw[1], raw[5]);
+
+                if (POC_BTM_BOND_ACCEPT) {
+                    answer = btdrvRespondToSspRequest(*addr, 0, true, 0);
+                    pocLog("%s: RespondToSspRequest(accept=1) rc=0x%08X", label, (u32)answer);
+                } else {
+                    answer = btdrvCancelBond(*addr);
+                    pocLog("%s: bond canceled (accept=0) rc=0x%08X", label, (u32)answer);
+                }
+
+                answered = true;
+            }
+        }
+
+        if (answered)
+            break;
+
+        svcSleepThread(250000000ull); // 250ms, up to 10s
+    }
+
+    memset(&settings, 0, sizeof(settings));
+    rc = btdrvGetPairedDeviceInfo(*addr, &settings);
+    pocLog("%s: paired readback rc=0x%08X link_key_present=%u", label, (u32)rc,
+        (u32)settings.link_key_present);
+}
+
 static void pocRunBtdrvScanProbe(PocWorker* w)
 {
     static const u16 kInterval[4] = { 0x0060u, 0x0060u, 0x0060u, 0x0030u };
@@ -1422,6 +1496,16 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
     pocBtEventsOpen();
     pocBtEventsDrain("btdrv probe before register", 16u, NULL);
     pocControlConnect("after bt open");
+
+    // Pairing probe (see pocBtdrvProbeBond): only meaningful when the device's
+    // "device binding" mode was enabled in the App first.
+    if (POC_BTM_BOND_PROBE && g_poc.use_target_address) {
+        BtdrvAddress bond_address;
+
+        memset(&bond_address, 0, sizeof(bond_address));
+        memcpy(bond_address.address, g_poc.target_address, sizeof(bond_address.address));
+        pocBtdrvProbeBond(&bond_address, "btdrv probe");
+    }
 
     registered_if = pocRegisterGattClientStep(client_if);
 
@@ -2836,7 +2920,10 @@ static void pocRunBtmBleProbe(PocWorker* w)
             // layer: BF + a B0 stream and the B1 answers, which is what a real
             // transport has to do, then the reaction test (see pocBtmTransportRun).
             if (g_btm_proto_ready) {
+                g_btm_bond_address = address;
+                g_btm_bond_address_valid = true;
                 pocBtmTransportRun(handle);
+                g_btm_bond_address_valid = false;
             } else {
                 pocLog("btm probe: protocol coordinates missing, transport not started");
             }
@@ -2863,7 +2950,10 @@ static void pocRunBtmBleProbe(PocWorker* w)
             pocBtmLogGatt("btm probe (configured)", handle);
 
             if (g_btm_proto_ready) {
+                g_btm_bond_address = configured;
+                g_btm_bond_address_valid = true;
                 pocBtmTransportRun(handle);
+                g_btm_bond_address_valid = false;
             } else {
                 pocLog("btm probe: protocol coordinates missing, transport not started");
             }
@@ -2954,7 +3044,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v27 (pairing branch removed, back to the connection)");
+    pocLog("poc build: ble_poc v28 (pairing probe on a live connection)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before any probe runs: both probes care about what has
