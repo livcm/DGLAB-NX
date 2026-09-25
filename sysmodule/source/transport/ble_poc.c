@@ -317,6 +317,11 @@ static bool pocTakeAction(PocWorker* w, u32* out_action);
 #define POC_BTM_BOND_ACCEPT 0
 static void pocBtdrvProbeBond(const BtdrvAddress* addr, const char* label);
 
+// Raw `bt` service read (definition next to the transport): the service returns
+// what libnx's wrappers throw away, and the CCCD experiment above uses it.
+static void pocBtRawRead(u32 handle, u32 cmd, const BtdrvGattId* serv,
+    const BtdrvGattId* chr, const BtdrvGattId* desc, const char* label);
+
 static bool pocHandleAction(PocWorker* w, u32 action);
 static u32 pocDrainBleEvents(const char* label, u32 duration_ms, u8* out_client_if);
 // Defined next to the btm probe, used by the driver-level probe's device dump.
@@ -570,6 +575,52 @@ static void pocBtmSettle(const char* reason)
     svcSleepThread(300000000ull);
 }
 
+// The CCCD read/write experiment. The raw read gives back a record that names the
+// attribute it resolved (service and characteristic UUID, connection 4) and has
+// one field that differs between the battery read and the CCCD read: 0 for the
+// characteristic and 1 for the descriptor. That field could be the value it read
+// (a CCCD of 1 = subscribed), or it could just say "this was a descriptor".
+// Rewriting the CCCD and reading it back between the two writes tells them
+// apart: 0 -> 1 -> 0 means the field follows the value, which would also prove
+// that a hand-written subscription really reaches the device.
+static void pocBtmCccdExperiment(u32 handle)
+{
+    static const u8 subscribe[2] = { 0x01, 0x00 };
+    static const u8 unsubscribe[2] = { 0x00, 0x00 };
+    Result rc;
+
+    if (!g_btm_cccd_ready) {
+        pocLog("btm transport: no CCCD entry, experiment skipped");
+        return;
+    }
+
+    pocLog("btm transport: CCCD experiment: read -> unsubscribe -> read -> subscribe -> read");
+
+    pocBtRawRead(handle, 1u, &g_btm_transport.service, &g_btm_transport.notify_char,
+        &g_btm_cccd, "btm transport: CCCD read #1 (as registered)");
+    pocBtmSettle("after CCCD read #1");
+
+    rc = btLeClientWriteDescriptor(handle, true, &g_btm_transport.service,
+        &g_btm_transport.notify_char, &g_btm_cccd, unsubscribe, sizeof(unsubscribe),
+        BtdrvGattAuthReqType_None);
+    pocLog("btm transport: CCCD write 0000 rc=0x%08X", (u32)rc);
+    pocBtmSettle("after the unsubscribe write");
+
+    pocBtRawRead(handle, 1u, &g_btm_transport.service, &g_btm_transport.notify_char,
+        &g_btm_cccd, "btm transport: CCCD read #2 (after writing 0000)");
+    pocBtmSettle("after CCCD read #2");
+
+    rc = btLeClientWriteDescriptor(handle, true, &g_btm_transport.service,
+        &g_btm_transport.notify_char, &g_btm_cccd, subscribe, sizeof(subscribe),
+        BtdrvGattAuthReqType_None);
+    pocLog("btm transport: CCCD write 0100 rc=0x%08X", (u32)rc);
+    pocBtmSettle("after the subscribe write");
+
+    pocBtRawRead(handle, 1u, &g_btm_transport.service, &g_btm_transport.notify_char,
+        &g_btm_cccd, "btm transport: CCCD read #3 (after writing 0100)");
+    pocBtmSettle("after CCCD read #3");
+}
+
 // Reading through the `bt` service. libnx's read wrappers (bt.c cmd 0 = read
 // characteristic, cmd 1 = read descriptor) pass no buffer and have no out
 // parameter, so whatever the service returns is dropped on the floor - and the
@@ -732,11 +783,7 @@ static bool pocBtmTransportStart(u32 handle)
         pocBtmSettle("after the raw battery read");
     }
 
-    if (g_btm_cccd_ready) {
-        pocBtRawRead(handle, 1u, &g_btm_transport.service, &g_btm_transport.notify_char,
-            &g_btm_cccd, "btm transport: raw CCCD");
-        pocBtmSettle("after the raw CCCD read");
-    }
+    pocBtmCccdExperiment(handle);
 
     g_btm_transport.connected = true;
     g_btm_transport.last_tick_ms = pocNowMs();
@@ -3150,7 +3197,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v31 (raw reads: battery first, then the CCCD)");
+    pocLog("poc build: ble_poc v32 (CCCD read/write/read experiment)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before any probe runs: both probes care about what has
