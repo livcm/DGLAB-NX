@@ -48,10 +48,13 @@ u32 blePocReadLog(u32 cursor, char* out, u32 out_size);
 // session. There is no readback on this firmware (docs/ble-re.md, "连接所有权在
 // 服务层是封的"), so the status reports what this side asked for.
 
-// Starts a session with the given soft limit (0..200; 0 means the device cannot
-// output anything). The worker thread runs the usual bring-up - the caller has
-// to have run the driver-level probe in an earlier session of this boot, see
-// docs/ble-poc.md - then connects, subscribes and streams until stopped.
+// Starts a session with the two channel strength ceilings from the request
+// (0..200 each; 0 means that channel cannot output anything). The worker thread
+// runs the usual bring-up - the caller has to have run the driver-level probe in
+// an earlier session of this boot, see docs/ble-poc.md - then connects,
+// subscribes and streams until stopped. The session also plays its own waveform,
+// which is what puts the device into its "outputting" state (and lights its
+// light) even while both strengths are 0.
 Result blePocSessionStart(const DglabBleStartRequest* request);
 
 // Requests a stop; the worker caps the device and disconnects on its own.
@@ -73,8 +76,9 @@ Result blePocSessionUploadWaveform(const DglabNetWaveformRequest* request);
 // local session instead of being forwarded to a phone.
 Result blePocSessionSend(const DglabNetSendRequest* request);
 
-// Moves the session's ceiling (0..200). The worker writes the new BF soft limit
-// on its next step, so a running session follows immediately and strength the
-// caller asks for afterwards is clamped to the new value. Rejected while no
-// session is running - the start request is what sets it for a fresh session.
-Result blePocSessionSetSoftLimit(u32 soft_limit);
+// Moves the session's channel strength ceilings (0..200 each). The worker writes
+// the new BF on its next step, so a running session follows immediately and
+// strength the caller asks for afterwards is clamped to the new values, per
+// channel. Rejected while no session is running - the start request is what sets
+// them for a fresh session.
+Result blePocSessionSetChannelLimits(u32 limit_a, u32 limit_b);

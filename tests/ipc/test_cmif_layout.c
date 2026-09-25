@@ -170,7 +170,8 @@ static void testRequestPayloads(void)
     // the Socket mode uses, so those payload sizes are part of the contract too.
     {
         const DglabBleStartRequest ble = {
-            .soft_limit = 20u,
+            .limit_a = 20u,
+            .limit_b = 30u,
             .address = { 0xEA, 0xA8, 0xAC, 0x22, 0x2C, 0x18 },
         };
         const DglabNetSendRequest strength = {
@@ -178,7 +179,7 @@ static void testRequestPayloads(void)
             .channel = 1u,
             .value = 5u,
         };
-        const DglabBleLimitRequest limit = { .soft_limit = 30u };
+        const DglabBleLimitRequest limit = { .limit_a = 30u, .limit_b = 40u };
 
         checkRequestRoundTrip("ble start", DGLAB_IPC_CMD_BLE_START, &ble, sizeof(ble));
         checkRequestRoundTrip("strength", DGLAB_IPC_CMD_NET_SEND, &strength,
@@ -192,7 +193,7 @@ static void testRequestPayloads(void)
     CHECK(DGLAB_IPC_CMD_BLE_LIMIT == 12);
     // The version a client sees: the BLE commands are an additive change, so the
     // minor moves and the major stays.
-    CHECK(DGLAB_IPC_PROTOCOL_VERSION == 0x000202u);
+    CHECK(DGLAB_IPC_PROTOCOL_VERSION == 0x000203u);
 }
 
 // A command without a payload must not satisfy a check for one, otherwise the

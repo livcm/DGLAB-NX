@@ -485,13 +485,18 @@ static Mutex g_ble_mutex;
 static DglabBleStatus g_ble_status;
 static bool g_ble_active;
 static u8 g_ble_address[6];
-static u32 g_ble_soft_limit;
+// The two channel strength ceilings (the BF soft limits) the client asked for.
+// Separate from the strengths in g_ble_status: the ceiling is the cap, the
+// strength is what the client dials.
+static u32 g_ble_limit_a;
+static u32 g_ble_limit_b;
 static bool g_ble_waveform_pending;
 static DglabNetWaveformRequest g_ble_waveform;
 static PocBleStrengthOp g_ble_strength[POC_BLE_STRENGTH_QUEUE];
 static u32 g_ble_strength_count;
 static bool g_ble_limit_pending;
-static u32 g_ble_limit;
+static u32 g_ble_limit_pending_a;
+static u32 g_ble_limit_pending_b;
 static u8 g_managed_last[0x50];
 
 // The other two queues btdrv keeps: the LE HID one and the general one. Both are
@@ -555,8 +560,9 @@ static void pocBtmLinkWrite(void* context, const u8* data, size_t size)
 // The hardware-visible test, run after the zero-strength baseline. A strength
 // request only opens the gate the device is allowed to use - the output itself
 // is the waveform data, so a channel with strength and no waveform produces
-// nothing whatsoever (user, 2026-09-25). The soft limit is enforced by the
-// device itself, so even a garbled packet cannot push a channel past it.
+// nothing whatsoever (user, 2026-09-25). The channel strength ceiling is
+// enforced by the device itself, so even a garbled packet cannot push a channel
+// past it.
 //
 // Set POC_BTM_TEST_STRENGTH to 0 to skip the test and keep the old "the device
 // cannot output anything" behaviour.
@@ -573,8 +579,8 @@ static void pocBtmLinkWrite(void* context, const u8* data, size_t size)
 //
 // Two conditions come out of the official example and the user's phone test
 // (2026-09-25): the channel has to be outputting, so a waveform must play, and
-// the soft limit is what keeps that output small. The device is brought to
-// strength 0 by the baseline phase before this one starts.
+// the channel strength ceiling is what keeps that output small. The device is
+// brought to strength 0 by the baseline phase before this one starts.
 //
 // Set POC_BTM_WHEEL_DURATION_MS to 0 to skip the phase.
 #define POC_BTM_WHEEL_SOFT_LIMIT 10u
@@ -598,13 +604,32 @@ static const DglabCoyoteV3WaveformEntry g_poc_btm_test_waveform[] = {
 };
 
 // A gentler envelope for the wheel phase: the wheel can push the channel up to
-// the soft limit on its own, so the peak amplitude is halved to keep the ceiling
-// at roughly what the reaction test reaches.
+// the ceiling on its own, so the peak amplitude is halved to keep the output at
+// roughly what the reaction test reaches.
 static const DglabCoyoteV3WaveformEntry g_poc_btm_wheel_waveform[] = {
     { .frequency_ms = 100u, .strength = 0u },
     { .frequency_ms = 100u, .strength = 15u },
     { .frequency_ms = 100u, .strength = 30u },
     { .frequency_ms = 100u, .strength = 15u },
+};
+
+// What a BLE session plays on both channels from the moment it connects.
+//
+// This is the App's own "output on" in packet form: the App starts streaming its
+// waveform, and the device's light follows that stream - the user's phone test
+// (2026-09-26) shows the light flashing with the channel strength ceiling and the
+// strength both at 0, so the light tracks the waveform, not the amplitude.
+//
+// A session that sends no waveform data is not the same thing: its four waveform
+// slots carry frequency 0, which is outside the documented 10..240 range, and
+// the device drops that channel's whole group (official README, "通道波形频率 /
+// 通道波形强度"). That is what the 2026-09-26 console run streamed: writes went
+// out with rc=0 and the device showed nothing at all.
+//
+// The shape is the socket page's test waveform (100ms, full waveform strength),
+// so the channel strength alone decides how strong a session feels.
+static const DglabCoyoteV3WaveformEntry g_ble_session_waveform[] = {
+    { .frequency_ms = 100u, .strength = 100u },
 };
 
 // A GATT request that follows a read right away is answered with
@@ -687,7 +712,7 @@ static void pocBtRawRead(u32 handle, u32 cmd, const BtdrvGattId* serv, const Btd
     serviceClose(&service);
 }
 
-static bool pocBtmTransportStart(u32 handle, u8 soft_limit)
+static bool pocBtmTransportStart(u32 handle, u8 limit_a, u8 limit_b)
 {
     DglabCoyoteV3Link link = { pocBtmLinkWrite, &g_btm_transport };
     DglabCoyoteV3SessionConfig config;
@@ -703,15 +728,13 @@ static bool pocBtmTransportStart(u32 handle, u8 soft_limit)
     g_btm_transport.notify_char.instance_id = (u8)g_btm_proto_notify.instance_id;
     g_btm_transport.notify_char.uuid = g_btm_proto_notify.uuid;
 
-    // BF test values: both soft limits are written as 0, which caps every
-    // channel at strength 0 - the device cannot output anything while this
-    // transport is being verified, whatever a B0 packet asks for. The official
-    // app rewrites BF on every connect, so this does not leave the device in a
-    // state the user cannot get out of. The real implementation takes these from
-    // the app's own configuration.
+    // BF: the two channel strength ceilings. At 0 the device caps that channel
+    // at strength 0 and cannot output anything, whatever a B0 packet asks for.
+    // The official app rewrites BF on every connect, so this does not leave the
+    // device in a state the user cannot get out of.
     memset(&config, 0, sizeof(config));
-    config.bf.soft_limit_a = soft_limit;
-    config.bf.soft_limit_b = soft_limit;
+    config.bf.soft_limit_a = limit_a;
+    config.bf.soft_limit_b = limit_b;
     dglabCoyoteV3SessionInit(&g_btm_transport.session, &link, &config);
 
     if (POC_BTM_NOTIFY_REGISTER) {
@@ -796,6 +819,23 @@ static bool pocBtmTransportStart(u32 handle, u8 soft_limit)
     dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelB);
 
     return true;
+}
+
+// Puts the session's own waveform on both channels, replacing whatever the
+// previous phase or client left there. A client that uploads waveform data
+// through NET_WAVEFORM replaces it again - this is only what "a session is
+// running" means for a client that has nothing of its own to play.
+static void pocBleSessionPlayOwnWaveform(void)
+{
+    const size_t entries = sizeof(g_ble_session_waveform) / sizeof(g_ble_session_waveform[0]);
+
+    if (!g_btm_transport.connected)
+        return;
+
+    dglabCoyoteV3SessionSetWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelA,
+        g_ble_session_waveform, entries);
+    dglabCoyoteV3SessionSetWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelB,
+        g_ble_session_waveform, entries);
 }
 
 // Drains the user-side channel and ticks the session for duration_ms.
@@ -1080,13 +1120,14 @@ static void pocBtmTransportStop(void)
     g_btm_transport.connected = false;
 }
 
-// Re-announces BF with the given soft limit on both channels. OnConnected also
+// Re-announces BF with the given channel strength ceilings. OnConnected also
 // resets the strength bookkeeping and the waveform playback position, which is
-// what a phase change wants; the configured waveform data itself is kept.
-static void pocBtmTransportSetSoftLimits(u8 limit)
+// what a phase change (and a ceiling change) wants; the configured waveform data
+// itself is kept.
+static void pocBtmTransportSetChannelLimits(u8 limit_a, u8 limit_b)
 {
-    g_btm_transport.session.bf.soft_limit_a = limit;
-    g_btm_transport.session.bf.soft_limit_b = limit;
+    g_btm_transport.session.bf.soft_limit_a = limit_a;
+    g_btm_transport.session.bf.soft_limit_b = limit_b;
     dglabCoyoteV3SessionOnConnected(&g_btm_transport.session);
 }
 
@@ -1112,12 +1153,12 @@ static void pocBtmTransportReactionTest(void)
         (unsigned)POC_BTM_TEST_SOFT_LIMIT, (unsigned)POC_BTM_TEST_STRENGTH,
         (unsigned)g_poc_btm_test_waveform[2].strength, (unsigned)POC_BTM_TEST_DURATION_MS);
 
-    pocBtmTransportSetSoftLimits((u8)POC_BTM_TEST_SOFT_LIMIT);
+    pocBtmTransportSetChannelLimits((u8)POC_BTM_TEST_SOFT_LIMIT, (u8)POC_BTM_TEST_SOFT_LIMIT);
 
     if (!dglabCoyoteV3SessionSetWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelA,
             g_poc_btm_test_waveform, entries)) {
         pocLog("btm transport: reaction test waveform rejected, capping again");
-        pocBtmTransportSetSoftLimits(0u);
+        pocBtmTransportSetChannelLimits(0u, 0u);
         return;
     }
 
@@ -1133,7 +1174,7 @@ static void pocBtmTransportReactionTest(void)
     // then give the zero one more second so it actually goes out before the
     // disconnect.
     pocLog("btm transport: reaction test done, capping and zeroing");
-    pocBtmTransportSetSoftLimits(0u);
+    pocBtmTransportSetChannelLimits(0u, 0u);
     dglabCoyoteV3SessionClearWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelA);
     dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelA);
     dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelB);
@@ -1161,34 +1202,35 @@ static void pocBtmTransportWheelPhase(void)
         (unsigned)POC_BTM_WHEEL_SOFT_LIMIT, (unsigned)g_poc_btm_wheel_waveform[2].strength,
         (unsigned)POC_BTM_WHEEL_DURATION_MS);
 
-    pocBtmTransportSetSoftLimits((u8)POC_BTM_WHEEL_SOFT_LIMIT);
+    pocBtmTransportSetChannelLimits((u8)POC_BTM_WHEEL_SOFT_LIMIT,
+        (u8)POC_BTM_WHEEL_SOFT_LIMIT);
 
     if (!dglabCoyoteV3SessionSetWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelA,
             g_poc_btm_wheel_waveform, entries)) {
         pocLog("btm transport: wheel phase waveform rejected, capping again");
-        pocBtmTransportSetSoftLimits(0u);
+        pocBtmTransportSetChannelLimits(0u, 0u);
         return;
     }
 
     pocBtmTransportPump(POC_BTM_WHEEL_DURATION_MS);
 
     pocLog("btm transport: wheel phase done, capping and zeroing");
-    pocBtmTransportSetSoftLimits(0u);
+    pocBtmTransportSetChannelLimits(0u, 0u);
     dglabCoyoteV3SessionClearWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelA);
     dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelA);
     dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelB);
     pocBtmTransportPump(1000u);
 }
 
-// One transport round: the zero-strength baseline first (soft limits 0, nothing
-// can come out of the device, B0 packets still carry sequence numbers the device
-// is supposed to answer), then the wheel phase (a change the device makes on its
-// own) and the reaction test (a change we make).
+// One transport round: the zero-strength baseline first (channel limits 0,
+// nothing can come out of the device, B0 packets still carry sequence numbers
+// the device is supposed to answer), then the wheel phase (a change the device
+// makes on its own) and the reaction test (a change we make).
 static void pocBtmTransportRun(u32 handle)
 {
-    // The probes always start with the soft limits at 0: nothing can come out of
-    // the device until a phase raises the limit on purpose.
-    if (!pocBtmTransportStart(handle, 0u))
+    // The probes always start with the channel limits at 0: nothing can come out
+    // of the device until a phase raises them on purpose.
+    if (!pocBtmTransportStart(handle, 0u, 0u))
         return;
 
     pocBtmTransportPump(3000u);
@@ -1223,7 +1265,8 @@ static void pocBleSessionApplyInputs(void)
     DglabNetWaveformRequest waveform;
     PocBleStrengthOp ops[POC_BLE_STRENGTH_QUEUE];
     u32 count = 0u;
-    u32 limit = 0u;
+    u32 limit_a = 0u;
+    u32 limit_b = 0u;
     bool have_waveform = false;
     bool have_limit = false;
 
@@ -1233,12 +1276,15 @@ static void pocBleSessionApplyInputs(void)
     mutexLock(&g_ble_mutex);
 
     if (g_ble_limit_pending) {
-        limit = g_ble_limit;
+        limit_a = g_ble_limit_pending_a;
+        limit_b = g_ble_limit_pending_b;
         have_limit = true;
         g_ble_limit_pending = false;
-        // Take it into the session state here: everything below that clamps a
-        // strength reads this, and it has to already be the new ceiling.
-        g_ble_soft_limit = limit;
+        // Take the pair into the session state here: everything below that
+        // clamps a strength reads these, and they have to already be the new
+        // ceilings.
+        g_ble_limit_a = limit_a;
+        g_ble_limit_b = limit_b;
     }
 
     if (g_ble_waveform_pending) {
@@ -1258,10 +1304,12 @@ static void pocBleSessionApplyInputs(void)
     g_ble_strength_count = 0u;
     mutexUnlock(&g_ble_mutex);
 
-    // The new ceiling goes out first: it is what caps the strength applied below.
+    // The new ceilings go out first: they are what cap the strengths applied
+    // below.
     if (have_limit) {
-        pocLog("ble session: soft limit -> %u", (unsigned)limit);
-        pocBtmTransportSetSoftLimits((u8)limit);
+        pocLog("ble session: channel limits -> A=%u B=%u", (unsigned)limit_a,
+            (unsigned)limit_b);
+        pocBtmTransportSetChannelLimits((u8)limit_a, (u8)limit_b);
     }
 
     if (have_waveform) {
@@ -1295,6 +1343,7 @@ static void pocBleSessionApplyInputs(void)
         {
             u8* tracked = (ops[i].channel == 2u) ? &g_ble_status.strength_b
                                                  : &g_ble_status.strength_a;
+            u32 ceiling = (ops[i].channel == 2u) ? g_ble_limit_b : g_ble_limit_a;
             int32_t current = (int32_t)*tracked;
 
             if (ops[i].mode == POC_BLE_STRENGTH_DECREASE)
@@ -1311,8 +1360,8 @@ static void pocBleSessionApplyInputs(void)
             if (next < 0)
                 next = 0;
 
-            if ((u32)next > g_ble_soft_limit)
-                next = (int32_t)g_ble_soft_limit;
+            if ((u32)next > ceiling)
+                next = (int32_t)ceiling;
 
             *tracked = (u8)next;
         }
@@ -1327,15 +1376,22 @@ static void pocBtmTransportSession(u32 handle)
 {
     u32 deadline = pocNowMs() + POC_BLE_SESSION_MAX_MS;
 
-    if (!pocBtmTransportStart(handle, (u8)g_ble_soft_limit)) {
+    if (!pocBtmTransportStart(handle, (u8)g_ble_limit_a, (u8)g_ble_limit_b)) {
         pocLog("ble session: transport did not start");
         pocBleSessionSetState(DglabBleState_Failed, false);
         return;
     }
 
+    // From here on the device is "outputting": the two channel strength ceilings
+    // are written (BF, inside the start) and both channels play the session's own
+    // waveform, which is what makes the device's light come on - at strength 0
+    // too, exactly like the App's output switch (see g_ble_session_waveform).
+    pocBleSessionPlayOwnWaveform();
+
     pocBleSessionSetState(DglabBleState_Connected, true);
-    pocLog("ble session: streaming, soft limit %u (open loop: this firmware gives "
-        "the readback to btm, see docs/ble-re.md)", (unsigned)g_ble_soft_limit);
+    pocLog("ble session: streaming, channel limits A=%u B=%u (open loop: this "
+        "firmware gives the readback to btm, see docs/ble-re.md)",
+        (unsigned)g_ble_limit_a, (unsigned)g_ble_limit_b);
 
     while (!pocStopRequested() && (s32)(deadline - pocNowMs()) > 0 &&
         g_btm_transport.connected) {
@@ -1354,7 +1410,7 @@ static void pocBtmTransportSession(u32 handle)
     // Same teardown order as the probes: cap the device first, then stop the
     // waveform and ask for zero.
     pocLog("ble session: stopping, capping and zeroing");
-    pocBtmTransportSetSoftLimits(0u);
+    pocBtmTransportSetChannelLimits(0u, 0u);
     dglabCoyoteV3SessionClearWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelA);
     dglabCoyoteV3SessionClearWaveform(&g_btm_transport.session, DglabCoyoteV3ChannelB);
     dglabCoyoteV3SessionSetStrengthZero(&g_btm_transport.session, DglabCoyoteV3ChannelA);
@@ -1426,7 +1482,7 @@ Result blePocSessionStart(const DglabBleStartRequest* request)
     if (request == NULL)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
-    if (request->soft_limit > 200u)
+    if (request->limit_a > 200u || request->limit_b > 200u)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
     mutexLock(&g_ble_mutex);
@@ -1437,7 +1493,8 @@ Result blePocSessionStart(const DglabBleStartRequest* request)
     }
 
     g_ble_active = true;
-    g_ble_soft_limit = request->soft_limit;
+    g_ble_limit_a = request->limit_a;
+    g_ble_limit_b = request->limit_b;
     memcpy(g_ble_address, request->address, sizeof(g_ble_address));
     memset(&g_ble_status, 0, sizeof(g_ble_status));
     memcpy(g_ble_status.address, request->address, sizeof(g_ble_status.address));
@@ -1558,9 +1615,9 @@ Result blePocSessionSend(const DglabNetSendRequest* request)
     return 0;
 }
 
-Result blePocSessionSetSoftLimit(u32 soft_limit)
+Result blePocSessionSetChannelLimits(u32 limit_a, u32 limit_b)
 {
-    if (soft_limit > 200u)
+    if (limit_a > 200u || limit_b > 200u)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
     mutexLock(&g_ble_mutex);
@@ -1571,8 +1628,9 @@ Result blePocSessionSetSoftLimit(u32 soft_limit)
     }
 
     // Staged like the strength ops: the worker is the only thread that may touch
-    // the transport, so the new ceiling is applied between its pump steps.
-    g_ble_limit = soft_limit;
+    // the transport, so the new ceilings are applied between its pump steps.
+    g_ble_limit_pending_a = limit_a;
+    g_ble_limit_pending_b = limit_b;
     g_ble_limit_pending = true;
 
     mutexUnlock(&g_ble_mutex);

@@ -12,7 +12,7 @@
 //
 // This is the interface version, not the application's release version (that
 // one lives in the NRO's NACP, see AGENTS.md priority 13).
-#define DGLAB_IPC_PROTOCOL_VERSION 0x000202u
+#define DGLAB_IPC_PROTOCOL_VERSION 0x000203u
 
 // Commands implemented by the sysmodule. Command IDs are part of the public IPC
 // contract and must not be renumbered once released.
@@ -26,19 +26,18 @@ enum {
     DGLAB_IPC_CMD_NET_SEND    = 6,
     DGLAB_IPC_CMD_NET_LOG     = 7,
     DGLAB_IPC_CMD_NET_WAVEFORM = 8,
-    // BLE mode (sysmodule drives the device itself). BLE_START takes a soft
-    // limit - the ceiling the device enforces - so "no output" is what a client
-    // gets unless it asks for more. Strength and waveform arrive through the
-    // same two commands the Socket mode uses, so a client's gameplay code does
-    // not change when it switches transport.
+    // BLE mode (sysmodule drives the device itself). BLE_START takes the two
+    // channel strength ceilings - the pair the device enforces - so "no output"
+    // is what a client gets unless it asks for more, per channel. Strength and
+    // waveform arrive through the same two commands the Socket mode uses, so a
+    // client's gameplay code does not change when it switches transport.
     DGLAB_IPC_CMD_BLE_START   = 9,  // in: DglabBleStartRequest
     DGLAB_IPC_CMD_BLE_STOP    = 10, // no payload
     DGLAB_IPC_CMD_BLE_STATUS  = 11, // out: DglabBleStatus
-    // Changes the ceiling while the session runs. The keys on the page are live,
-    // so a client does not have to stop and start the session (which would drop
-    // the link and, on this firmware, spend another BLE path) just to move it.
-    // Without a running session there is nothing to move: the start request
-    // carries the value.
+    // Changes the two ceilings while the session runs, so a client does not have
+    // to stop and start the session (which would drop the link and, on this
+    // firmware, spend another BLE path) just to move them. Without a running
+    // session there is nothing to move: the start request carries them.
     DGLAB_IPC_CMD_BLE_LIMIT   = 12, // in: DglabBleLimitRequest
 };
 
@@ -201,11 +200,13 @@ typedef enum {
 } DglabBleState;
 
 typedef struct {
-    // The ceiling the device itself enforces (BF soft limit, 0..200). Start
-    // with a small value: anything the client asks for later is clamped to it,
-    // and 0 means the device cannot output at all. The probe's reaction test
-    // uses 20; the value is the caller's call, this is only the contract.
-    u32 soft_limit;
+    // The two channel strength ceilings the device itself enforces (the BF
+    // command's 强度软上限, 0..200). Anything the client asks for later is
+    // clamped to them, and 0 means that channel cannot output at all. They are
+    // not the strengths: strength is what the client dials (NET_SEND), the
+    // ceiling is the cap it may not pass, one variable per channel.
+    u32 limit_a;
+    u32 limit_b;
     // The device to drive. The console discovers this itself (see
     // docs/ble-poc.md, "设备地址：自动发现") and hands it over; all zeroes is
     // rejected rather than guessed.
@@ -228,7 +229,9 @@ typedef struct {
 } DglabBleStatus;
 
 typedef struct {
-    /// The new ceiling (BF soft limit, 0..200). Out of range is rejected rather
-    /// than clamped: a client that asks for 0xFFFFFFFF wants to know.
-    u32 soft_limit;
+    /// The new ceilings (BF soft limit, 0..200), one per channel. Out of range
+    /// is rejected rather than clamped: a client that asks for 0xFFFFFFFF wants
+    /// to know.
+    u32 limit_a;
+    u32 limit_b;
 } DglabBleLimitRequest;

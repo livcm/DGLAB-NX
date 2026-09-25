@@ -257,9 +257,9 @@ static bool dglabHandleRequest(void)
             break;
         }
 
-        // BLE mode: the sysmodule drives the device itself. The soft limit is
-        // the ceiling the device enforces, so a client that does not ask for
-        // more gets a device that cannot output.
+        // BLE mode: the sysmodule drives the device itself. The two channel
+        // strength ceilings are what the device enforces, so a client that does
+        // not ask for more gets a device that cannot output.
         case DGLAB_IPC_CMD_BLE_START: {
             DglabBleStartRequest request = { 0 };
 
@@ -297,7 +297,7 @@ static bool dglabHandleRequest(void)
 
             memcpy(&request, dglabRequestPayload(in), sizeof(request));
             dglabMakeResponse(CmifCommandType_Request, token,
-                blePocSessionSetSoftLimit(request.soft_limit), NULL, 0);
+                blePocSessionSetChannelLimits(request.limit_a, request.limit_b), NULL, 0);
             break;
         }
 
