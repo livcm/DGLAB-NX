@@ -628,9 +628,25 @@ static const DglabCoyoteV3WaveformEntry g_poc_btm_wheel_waveform[] = {
 //
 // The shape is the socket page's test waveform (100ms, full waveform strength),
 // so the channel strength alone decides how strong a session feels.
+//
+// One entry per slot on purpose. The playback takes one entry per slot and pads
+// whatever is left of the packet with the previous frequency and strength 0
+// (coyote_v3_session.c, fillChannelWaveform), which is the documented way to
+// keep a channel quiet without invalidating its data - and that padding is
+// exactly what a short definition would get: a single entry would put one full
+// pulse in every 100ms packet and leave the other three slots silent, a quarter
+// of the output the same waveform spelled out across the packet has. The count
+// is asserted below so this cannot come back.
 static const DglabCoyoteV3WaveformEntry g_ble_session_waveform[] = {
     { .frequency_ms = 100u, .strength = 100u },
+    { .frequency_ms = 100u, .strength = 100u },
+    { .frequency_ms = 100u, .strength = 100u },
+    { .frequency_ms = 100u, .strength = 100u },
 };
+
+_Static_assert(sizeof(g_ble_session_waveform) / sizeof(g_ble_session_waveform[0]) ==
+        DGLAB_COYOTE_V3_WAVEFORM_SLOTS,
+    "the session's own waveform has to carry one entry per B0 slot");
 
 // A GATT request that follows a read right away is answered with
 // Bluetooth/0x153 on this firmware: both write types fail and the packet is

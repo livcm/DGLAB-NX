@@ -261,6 +261,54 @@ static void testWaveformCycleIsPacketAligned(void)
     CHECK_U8(packet.waveform_a[0].strength, 10);
 }
 
+// Playback takes one entry per slot and pads whatever is left of the packet with
+// the previous frequency and strength 0. The number of entries is therefore a
+// shape decision, not a detail: the waveform a BLE session plays on its own has
+// to spell out all four slots, or three quarters of every packet go out silent
+// (the channel is still "playing" - the frequencies stay in range - but at a
+// quarter of the amplitude the same waveform written across the packet has).
+static void testOwnWaveformHasToFillThePacket(void)
+{
+    static const DglabCoyoteV3WaveformEntry one_slot[] = { { 100, 100 } };
+    static const DglabCoyoteV3WaveformEntry four_slots[] = {
+        { 100, 100 }, { 100, 100 }, { 100, 100 }, { 100, 100 },
+    };
+    Recorder recorder = { 0 };
+    DglabCoyoteV3Session session;
+    const DglabCoyoteV3SessionConfig config = defaultConfig();
+
+    // One entry: legal, in range, and quiet in three slots out of four.
+    makeSession(&session, &recorder, &config);
+    CHECK(dglabCoyoteV3SessionSetWaveform(&session, DglabCoyoteV3ChannelA, one_slot, 1));
+    dglabCoyoteV3SessionOnConnected(&session);
+    dglabCoyoteV3SessionTick(&session, 100);
+
+    DglabCoyoteV3B0 packet = decodeB0Write(&recorder, 1);
+
+    CHECK(dglabCoyoteV3IsChannelWaveformValid(packet.waveform_a));
+    CHECK_U8(packet.waveform_a[0].strength, 100);
+    CHECK_U8(packet.waveform_a[1].strength, 0);
+    CHECK_U8(packet.waveform_a[2].strength, 0);
+    CHECK_U8(packet.waveform_a[3].strength, 0);
+
+    // One entry per slot: every packet is full, and a repetition starts on the
+    // next packet boundary without padding anything.
+    memset(&recorder, 0, sizeof(recorder));
+    makeSession(&session, &recorder, &config);
+    CHECK(dglabCoyoteV3SessionSetWaveform(&session, DglabCoyoteV3ChannelA, four_slots, 4));
+    dglabCoyoteV3SessionOnConnected(&session);
+
+    for (size_t tick = 0; tick < 3; tick++) {
+        dglabCoyoteV3SessionTick(&session, 100);
+        packet = decodeB0Write(&recorder, tick + 1);
+
+        for (size_t slot = 0; slot < DGLAB_COYOTE_V3_WAVEFORM_SLOTS; slot++) {
+            CHECK_U8(packet.waveform_a[slot].frequency, 100);
+            CHECK_U8(packet.waveform_a[slot].strength, 100);
+        }
+    }
+}
+
 static void testClearedWaveformGoesIdle(void)
 {
     static const DglabCoyoteV3WaveformEntry entries[] = { { 100, 50 } };
@@ -419,6 +467,7 @@ int main(void)
     testTickAndInputAreIgnoredWhileDisconnected();
     testB0Payload();
     testWaveformCycleIsPacketAligned();
+    testOwnWaveformHasToFillThePacket();
     testClearedWaveformGoesIdle();
     testSetWaveformValidation();
     testNotificationsOtherThanB1AreIgnored();
