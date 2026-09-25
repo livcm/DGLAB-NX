@@ -32,6 +32,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -110,6 +111,7 @@ typedef struct {
     u64 aruid;
     u32 pending_action;
     bool use_target_address;
+    bool address_discovered; // The driver-level scan already wrote one out.
     u8 target_address[6];
 
     // Worker owned.
@@ -324,6 +326,12 @@ static void pocBtRawRead(u32 handle, u32 cmd, const BtdrvGattId* serv,
 
 static bool pocHandleAction(PocWorker* w, u32 action);
 static u32 pocDrainBleEvents(const char* label, u32 duration_ms, u8* out_client_if);
+
+// Automatic address discovery (definitions next to the advertisement dump): the
+// driver-level scan writes the address out for the btm session that follows.
+static bool pocAdIsCoyote(const BtdrvBleAdvertisement* list, u32 count);
+static void pocSaveDiscoveredAddress(const BtdrvAddress* addr);
+
 // Defined next to the btm probe, used by the driver-level probe's device dump.
 static void pocLogAdStructures(const char* label, const u8* data, size_t size);
 static void pocLogAdArray(const char* label, const BtdrvBleAdvertisement* list, u32 count);
@@ -2000,6 +2008,15 @@ static void pocRunBtdrvScanProbe(PocWorker* w)
                         memcmp(info.scan_result.address.address, g_poc.target_address, 6) == 0) {
                         pocLogAdArray("btdrv probe", info.scan_result.ad_list, 10u);
                     }
+
+                    // No address configured yet? Recognise the device from its
+                    // advertisement and write it out for the btm session that
+                    // follows (see pocSaveDiscoveredAddress).
+                    if (!g_poc.use_target_address && !g_poc.address_discovered &&
+                        pocAdIsCoyote(info.scan_result.ad_list, 10u)) {
+                        g_poc.address_discovered = true;
+                        pocSaveDiscoveredAddress(&info.scan_result.address);
+                    }
                 }
             }
 
@@ -2286,6 +2303,63 @@ static void pocLogAdStructures(const char* label, const u8* data, size_t size)
 // that has three entries in it (2026-09-25 runs: flags, manufacturer data with
 // company 0x000A, and the local name). Decoding the array is what settles
 // whether this device advertises a service UUID at all.
+// Automatic address discovery. The driver-level scan is the only scan that ever
+// sees this device (btm's own scans have never returned a result), and a connect
+// needs an address, so the console should not have to be told one by hand: when a
+// scan result carries the device's advertisement (local name "47L121000" or
+// manufacturer data from company 0x000A) and no address is configured yet, that
+// address is written to the same file the NRO reads before every session - which
+// means the btm session of the same one-key sequence picks it up on its own.
+#define POC_ADDRESS_PATH "sdmc:/switch/DGLAB-NX/config/dglab-ble-address.txt"
+
+static bool pocAdIsCoyote(const BtdrvBleAdvertisement* list, u32 count)
+{
+    static const char name[] = "47L121000";
+
+    for (u32 i = 0; i < count; i++) {
+        if (list[i].size < 2u || list[i].size > (1u + sizeof(list[i].data)))
+            break;
+
+        if (list[i].type == 0x09u && list[i].size - 1u >= sizeof(name) - 1u &&
+            memcmp(list[i].data, name, sizeof(name) - 1u) == 0)
+            return true;
+
+        if (list[i].type == 0xFFu && list[i].size >= 3u && list[i].data[0] == 0x0Au &&
+            list[i].data[1] == 0x00u)
+            return true;
+    }
+
+    return false;
+}
+
+static void pocSaveDiscoveredAddress(const BtdrvAddress* addr)
+{
+    FILE* file;
+
+    fsInitialize();
+    fsdevMountSdmc();
+
+    mkdir("sdmc:/switch", 0777);
+    mkdir("sdmc:/switch/DGLAB-NX", 0777);
+    mkdir("sdmc:/switch/DGLAB-NX/config", 0777);
+
+    file = fopen(POC_ADDRESS_PATH, "w");
+
+    if (file == NULL) {
+        pocLog("btdrv probe: device %02X:%02X:...:%02X but %s is not writable",
+            addr->address[0], addr->address[1], addr->address[5], POC_ADDRESS_PATH);
+        return;
+    }
+
+    fprintf(file, "%02X:%02X:%02X:%02X:%02X:%02X\n", addr->address[0], addr->address[1],
+        addr->address[2], addr->address[3], addr->address[4], addr->address[5]);
+    fclose(file);
+
+    pocLog("btdrv probe: discovered the device at %02X:%02X:%02X:%02X:%02X:%02X, saved to %s",
+        addr->address[0], addr->address[1], addr->address[2], addr->address[3],
+        addr->address[4], addr->address[5], POC_ADDRESS_PATH);
+}
+
 static void pocLogAdArray(const char* label, const BtdrvBleAdvertisement* list, u32 count)
 {
     u32 entries = 0;
@@ -3149,7 +3223,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v33 (open loop: readback route closed)");
+    pocLog("poc build: ble_poc v34 (automatic address discovery)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before any probe runs: both probes care about what has
