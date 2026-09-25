@@ -136,7 +136,7 @@ build/DGLAB-NX/            →  SD:/switch/DGLAB-NX/      （整个目录一起�
 ```
 
 sysmodule 带 `flags/boot2.flag`（`toolbox.json` 里也是 `requires_reboot: true`），
-随系统启动加载，复制完先卸载**整块磁盘**（`diskutil unmountDisk /dev/diskN`，或直接"推出"）
+随系统启动加载，复制完先**弹出整块磁盘**（`diskutil eject /dev/diskN`，或 Finder 里"推出"）
 再拔卡、然后重启主机。
 `toolbox.json` 的 `version` 是这份包的发行版本
 （根 `VERSION`），模块管理器类应用会显示它；IPC 接口版本不在这里，它由模块在运行时
