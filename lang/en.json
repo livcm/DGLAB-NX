@@ -129,6 +129,20 @@
     "cmd_rejected": "Rejected",
     "cmd_socket_error": "Socket error",
     "cmd_channel_zero_a": "A is 0",
-    "cmd_channel_zero_b": "B is 0"
+    "cmd_channel_zero_b": "B is 0",
+    "ble_title": "Bluetooth (direct)",
+    "desc_ble": "Drive the device directly over Bluetooth instead of through the phone app. The console finds the device by itself, connects, and then the motion and touch screens drive it the same way they drive the app. This firmware gives the readback to the system, so the strength shown is what this side asked for, not what the device reports.",
+    "ble_state": "Session",
+    "ble_state_idle": "Not running",
+    "ble_state_connecting": "Connecting",
+    "ble_state_connected": "Streaming",
+    "ble_state_failed": "Failed",
+    "ble_device": "Device",
+    "ble_device_none": "Not known yet",
+    "ble_soft_limit": "Soft limit",
+    "ble_strength": "Strength asked for",
+    "ble_packets": "Packets sent",
+    "ble_open_loop": "Open loop: the device never reports back on this firmware, so the strength above is the value this side asked for. The soft limit is enforced by the device itself.",
+    "ble_procedure": "Starting runs the two steps the transport needs: the driver-level step brings the Bluetooth stack up, then the session connects. Needs the exefs patch, and the console should be rebooted before the socket mode is used again."
   }
 }

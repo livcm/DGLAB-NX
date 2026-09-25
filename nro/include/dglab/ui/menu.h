@@ -10,6 +10,7 @@
 
 typedef enum {
     DglabMenu_ItemSocket = 0, ///< server, QR code, test buttons, log
+    DglabMenu_ItemBle,        ///< drive the device directly over Bluetooth
     DglabMenu_ItemMotion,     ///< Joy-Con driven waveform
     DglabMenu_ItemTouch,      ///< touch panel driven waveform
     DglabMenu_ItemAdvanced,   ///< the motion parameters

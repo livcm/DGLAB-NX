@@ -129,6 +129,20 @@
     "cmd_rejected": "被拒绝",
     "cmd_socket_error": "Socket 错误",
     "cmd_channel_zero_a": "A 为 0",
-    "cmd_channel_zero_b": "B 为 0"
+    "cmd_channel_zero_b": "B 为 0",
+    "ble_title": "蓝牙（直连）",
+    "desc_ble": "不经过手机 App，直接用蓝牙驱动设备。控制台自己找到设备并连接，之后体感页和触屏页就像驱动 App 那样驱动它。这版固件把回读留给了系统，所以下面显示的强度是\"我们请求过的值\"，不是设备回报的值。",
+    "ble_state": "会话",
+    "ble_state_idle": "未运行",
+    "ble_state_connecting": "连接中",
+    "ble_state_connected": "输出中",
+    "ble_state_failed": "失败",
+    "ble_device": "设备",
+    "ble_device_none": "尚未发现",
+    "ble_soft_limit": "软上限",
+    "ble_strength": "请求的强度",
+    "ble_packets": "已发包数",
+    "ble_open_loop": "开环：这版固件不会把回读给我们，所以上面的强度是\"我们请求过的值\"。软上限由设备自己强制。",
+    "ble_procedure": "开始时按传输层需要的两步走：先驱动级步骤把蓝牙栈打开，再建立会话。需要 exefs 补丁；本轮跑完想回 Socket 模式要先重启主机。"
   }
 }

@@ -20,6 +20,7 @@
 
 static const DglabString kItemKeys[DglabMenu_ItemCount] = {
     [DglabMenu_ItemSocket] = DglabString_SocketTitle,
+    [DglabMenu_ItemBle] = DglabString_BleTitle,
     [DglabMenu_ItemMotion] = DglabString_MotionTitle,
     [DglabMenu_ItemTouch] = DglabString_TouchTitle,
     [DglabMenu_ItemAdvanced] = DglabString_AdvancedTitle,
@@ -29,6 +30,7 @@ static const DglabString kItemKeys[DglabMenu_ItemCount] = {
 
 static const DglabString kDescKeys[DglabMenu_ItemCount] = {
     [DglabMenu_ItemSocket] = DglabString_DescSocket,
+    [DglabMenu_ItemBle] = DglabString_DescBle,
     [DglabMenu_ItemMotion] = DglabString_DescMotion,
     [DglabMenu_ItemTouch] = DglabString_DescTouch,
     [DglabMenu_ItemAdvanced] = DglabString_DescAdvanced,

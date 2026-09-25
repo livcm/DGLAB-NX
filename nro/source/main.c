@@ -16,6 +16,7 @@
 #include <switch.h>
 
 #include <dglab/ipc.h>
+#include <dglab/ipc_poc.h>
 // This NRO's own release version and build stamp. Not the IPC version: that one
 // is DGLAB_IPC_PROTOCOL_VERSION in the header above, and the two are shown side
 // by side on the About page.
@@ -25,6 +26,7 @@
 #include <dglab/nro/joycon.h>
 #include <dglab/platform/font.h>
 #include <dglab/ui/about.h>
+#include <dglab/ui/ble.h>
 #include <dglab/ui/language.h>
 #include <dglab/ui/strings.h>
 #include <dglab/ui/text.h>
@@ -68,6 +70,7 @@
 typedef enum {
     DglabMenuResult_Exit = 0,
     DglabMenuResult_Socket,
+    DglabMenuResult_Ble,
     DglabMenuResult_Motion,
     DglabMenuResult_Touch,
     DglabMenuResult_Advanced,
@@ -916,6 +919,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
 
         if (down & HidNpadButton_A) {
             switch (g_menu_selected) {
+                case DglabMenu_ItemBle: return DglabMenuResult_Ble;
                 case DglabMenu_ItemMotion: return DglabMenuResult_Motion;
                 case DglabMenu_ItemTouch: return DglabMenuResult_Touch;
                 case DglabMenu_ItemAdvanced: return DglabMenuResult_Advanced;
@@ -1549,6 +1553,163 @@ static void runTouchView(Service* dglab, PadState* pad)
 // there is nothing to draw anyway, and an empty window tells the user nothing.
 
 // ---------------------------------------------------------------------------
+// The Bluetooth page
+// ---------------------------------------------------------------------------
+
+#define BLE_ADDRESS_PATH CONFIG_DIR "/dglab-ble-address.txt"
+
+// The address the sysmodule discovered and wrote out (docs/ble-poc.md,
+// "设备地址：自动发现"). Nothing to connect to without it, and the page says so
+// rather than guessing.
+static bool loadBleAddress(u8 out[6])
+{
+    FILE* file = fopen(BLE_ADDRESS_PATH, "r");
+    char line[64];
+    unsigned int bytes[6];
+
+    if (file == NULL)
+        return false;
+
+    if (fgets(line, sizeof(line), file) == NULL) {
+        fclose(file);
+        return false;
+    }
+
+    fclose(file);
+
+    if (sscanf(line, "%x:%x:%x:%x:%x:%x", &bytes[0], &bytes[1], &bytes[2], &bytes[3],
+            &bytes[4], &bytes[5]) != 6)
+        return false;
+
+    for (int i = 0; i < 6; i++)
+        out[i] = (u8)bytes[i];
+
+    return true;
+}
+
+static bool bleStateIsActive(u32 state)
+{
+    return state == DglabBleState_Connecting || state == DglabBleState_Connected;
+}
+
+// The Bluetooth page. Starting is two steps because the transport needs two:
+// the driver-level probe brings the stack up (it is the only thing that may call
+// InitializeBle/EnableBle, docs/history.md §28), and the session then connects
+// and streams. Leaving the page stops the session: one left running would keep
+// driving the device with nobody watching.
+static void runBleView(Service* dglab, PadState* pad)
+{
+    DglabBlePageState state;
+    DglabBlePageState drawn;
+    bool have_drawn = false;
+    u32 drawn_generation = 0;
+    int offset = 0;
+    int drawn_offset = 0;
+
+    memset(&state, 0, sizeof(state));
+    memset(&drawn, 0, sizeof(drawn));
+    state.soft_limit = 20u;
+
+    while (appletMainLoop()) {
+        DglabCanvas canvas;
+        DglabBleStatus status;
+        DglabPocStatus poc_status;
+        Result status_rc;
+        u64 down;
+
+        padUpdate(pad);
+        down = padGetButtonsDown(pad);
+
+        if (down & HidNpadButton_B) {
+            serviceDispatch(dglab, DGLAB_IPC_CMD_BLE_STOP);
+            return;
+        }
+
+        // Up and down set the ceiling the device enforces; the row shows it, so
+        // there is no hint for it in the bottom bar.
+        if (down & HidNpadButton_Up)
+            state.soft_limit = (state.soft_limit + 5u > 200u) ? 200u : state.soft_limit + 5u;
+
+        if (down & HidNpadButton_Down)
+            state.soft_limit = (state.soft_limit >= 5u) ? state.soft_limit - 5u : 0u;
+
+        if (down & HidNpadButton_X)
+            serviceDispatch(dglab, DGLAB_IPC_CMD_BLE_STOP);
+
+        if ((down & HidNpadButton_A) && !state.starting && !bleStateIsActive(state.status.state)) {
+            u8 address[6];
+
+            if (loadBleAddress(address)) {
+                DglabPocStartRequest request = { 0 };
+                DglabPocActionRequest action = { .action = DglabPocAction_ProbeBtdrvScan };
+
+                request.flags = DGLAB_POC_START_FLAG_TARGET_ADDRESS;
+                memcpy(request.target_address, address, sizeof(request.target_address));
+                memcpy(state.status.address, address, sizeof(state.status.address));
+
+                if (R_SUCCEEDED(serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_START, request)) &&
+                    R_SUCCEEDED(serviceDispatchIn(dglab, DGLAB_IPC_POC_CMD_ACTION, action)))
+                    state.starting = true;
+            }
+        }
+
+        memset(&status, 0, sizeof(status));
+        status_rc = serviceDispatchOut(dglab, DGLAB_IPC_CMD_BLE_STATUS, status);
+        state.sysmodule_ok = R_SUCCEEDED(status_rc);
+
+        if (R_SUCCEEDED(status_rc)) {
+            u8 address[6];
+
+            memcpy(address, state.status.address, sizeof(address));
+            state.status = status;
+            memcpy(state.status.address, address, sizeof(address));
+        }
+
+        // Step 1 of the start sequence: wait for the driver-level session to
+        // finish, then send step 2. The PoC status is the only place that says
+        // whether a session is still running.
+        if (state.starting) {
+            u8 address[6];
+
+            memset(&poc_status, 0, sizeof(poc_status));
+            state.driver_running = R_SUCCEEDED(
+                serviceDispatchOut(dglab, DGLAB_IPC_POC_CMD_STATUS, poc_status)) &&
+                poc_status.state == DglabPocState_Initializing;
+
+            if (!state.driver_running && loadBleAddress(address)) {
+                DglabBleStartRequest request = { 0 };
+
+                state.starting = false;
+                request.soft_limit = state.soft_limit;
+                memcpy(request.address, address, sizeof(request.address));
+                memcpy(state.status.address, address, sizeof(state.status.address));
+                serviceDispatchIn(dglab, DGLAB_IPC_CMD_BLE_START, request);
+            }
+        }
+
+        state.offset = offset;
+        offset = dglabListScrollClamp(offset,
+            dglabBleContentHeight(&g_fonts, &state) -
+                (DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP));
+        state.offset = offset;
+
+        if (have_drawn && memcmp(&drawn, &state, sizeof(state)) == 0 &&
+            drawn_offset == offset && drawn_generation == g_display_generation)
+            continue;
+
+        if (dglabFramebufferBegin(&canvas)) {
+            dglabBleDraw(&canvas, &g_fonts, &state);
+            dglabFramebufferEnd();
+
+            drawn = state;
+            drawn_offset = offset;
+            drawn_generation = g_display_generation;
+            have_drawn = true;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The about screen
 // ---------------------------------------------------------------------------
 
@@ -1908,6 +2069,11 @@ int main(int argc, char* argv[])
 
         if (selection == DglabMenuResult_Socket) {
             runSocketView(&dglab, &pad);
+            continue;
+        }
+
+        if (selection == DglabMenuResult_Ble) {
+            runBleView(&dglab, &pad);
             continue;
         }
 

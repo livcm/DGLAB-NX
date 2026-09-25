@@ -40,6 +40,23 @@ typedef enum {
     // page, so a list entry and the page it opens can never drift apart. The BLE
     // PoC console is the exception - it has no page of its own in this UI.
     DglabString_ItemBlePoc,
+    // The Bluetooth page: the dedicated screen for driving the device directly
+    // (docs/ble-poc.md). Its rows are the session the sysmodule reports and the
+    // two numbers this side controls.
+    DglabString_BleTitle,
+    DglabString_DescBle,
+    DglabString_BleState,
+    DglabString_BleStateIdle,
+    DglabString_BleStateConnecting,
+    DglabString_BleStateConnected,
+    DglabString_BleStateFailed,
+    DglabString_BleDevice,
+    DglabString_BleDeviceNone,
+    DglabString_BleSoftLimit,
+    DglabString_BleStrength,
+    DglabString_BlePackets,
+    DglabString_BleOpenLoop,
+    DglabString_BleProcedure,
     DglabString_DescSocket,
     DglabString_DescMotion,
     DglabString_DescTouch,
