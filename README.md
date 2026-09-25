@@ -181,8 +181,11 @@ NRO 的运行期文件都在这一个目录下，并且固定分层：
 / `socket error`），红色是失败、黄色是"命令发出去了但听不到"（那一路强度还是 0）。
 
 菜单本身：`D-pad` 上下选择、`A` 进入；**`B` 退出 NRO**（`+` 只在 console 页——
-BLE PoC 与启动出错提示——有效）。菜单有 6 项：`socket server`、`motion (Joy-Con)`、
-`touch (screen)`、`advanced (motion)`、`about`、`BLE PoC console`。
+BLE PoC 与启动出错提示——有效）。菜单有 7 项：`socket server`、`bluetooth (direct)`、
+`motion (Joy-Con)`、`touch (screen)`、`advanced (motion)`、`about`、`BLE PoC console`。
+其中 **bluetooth (direct)** 是 BLE 模式的正式入口（起会话、看状态、调软上限；玩法页照旧用，
+数据会自动走 sysmodule 的 BLE 会话；注意它需要 exefs 补丁，而且跑完要重启才能回到 Socket 模式，
+见 `docs/ble-poc.md` 与 `docs/ipc.md` 的 `BLE_*`）。
 
 | 按键 | 动作 |
 | --- | --- |

@@ -9,6 +9,7 @@
 #include <dglab/ui/canvas.h>
 #include <dglab/ui/about.h>
 #include <dglab/ui/advanced.h>
+#include <dglab/ui/ble.h>
 #include <dglab/ui/button.h>
 #include <dglab/ui/list.h>
 #include <dglab/ui/menu.h>
@@ -1770,6 +1771,37 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             snprintf(name, sizeof(name), "%s about %u", frames, variant);
             beginPage(&canvas, blue);
             dglabAboutDraw(&canvas, fonts, &about);
+            checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
+        }
+
+        // The Bluetooth page: idle with no device known, streaming with a
+        // device, strengths and a packet count (scrolled), and the header when
+        // the sysmodule cannot be reached.
+        for (unsigned variant = 0; variant < 3; variant++) {
+            DglabBlePageState ble;
+            char name[96];
+
+            memset(&ble, 0, sizeof(ble));
+            ble.sysmodule_ok = variant < 2;
+            ble.soft_limit = 20u;
+
+            if (variant == 1) {
+                ble.status.state = DglabBleState_Connected;
+                ble.status.connected = 1;
+                ble.status.address[0] = 0xEA;
+                ble.status.address[1] = 0xA8;
+                ble.status.address[2] = 0xAC;
+                ble.status.address[3] = 0x22;
+                ble.status.address[4] = 0x2C;
+                ble.status.address[5] = 0x18;
+                ble.status.strength_a = 5u;
+                ble.status.packets = 1234u;
+                ble.offset = 400;
+            }
+
+            snprintf(name, sizeof(name), "%s ble %u", frames, variant);
+            beginPage(&canvas, blue);
+            dglabBleDraw(&canvas, fonts, &ble);
             checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
         }
     }
