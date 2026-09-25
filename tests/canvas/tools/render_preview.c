@@ -29,6 +29,9 @@
 //   /tmp/preview /tmp/font.bin /tmp/advanced.bmp advanced  (the motion parameters)
 //   /tmp/preview /tmp/font.bin /tmp/advdensity.bmp advanceddensity  (the density rows)
 //   /tmp/preview /tmp/font.bin /tmp/log.bmp log        (the sysmodule log page)
+//   /tmp/preview /tmp/font.bin /tmp/ble.bmp ble        (the Bluetooth page)
+//   /tmp/preview /tmp/font.bin /tmp/bleend.bmp bleend  (the Bluetooth page, notes)
+//   /tmp/preview /tmp/font.bin /tmp/blelog.bmp blelog  (the Bluetooth log page)
 //   /tmp/preview /tmp/font.bin /tmp/aboutlow.bmp aboutlow  (the About page, end)
 //   /tmp/preview /tmp/font.bin /tmp/dock.bmp menu dock (the docked 1080p frame)
 //   sips -s format png /tmp/preview.bmp --out /tmp/preview.png
