@@ -1558,6 +1558,47 @@ static void runTouchView(Service* dglab, PadState* pad)
 
 #define BLE_ADDRESS_PATH CONFIG_DIR "/dglab-ble-address.txt"
 
+// The BLE session logs into the sysmodule's PoC ring, and only the front end can
+// drain that ring to the SD card. The BLE PoC console page does it for the probe
+// experiments; this page has to do it for the session, otherwise a failed
+// connect leaves nothing behind to read (the ring is in memory only and the
+// sysmodule has no file of its own for it). Same file the rest of the front end
+// mirrors, so one file carries the whole run.
+static void bleLogPoll(Service* dglab)
+{
+    static u32 cursor = 0;
+
+    for (int i = 0; i < LOG_POLL_ROUNDS; i++) {
+        DglabPocLogRequest request = { 0 };
+        DglabPocLogChunk chunk;
+        Result rc;
+
+        request.cursor = cursor;
+        memset(&chunk, 0, sizeof(chunk));
+
+        rc = serviceDispatchInOut(dglab, DGLAB_IPC_POC_CMD_LOG, request, chunk);
+        if (R_FAILED(rc))
+            return;
+
+        if (chunk.size) {
+            u32 size = chunk.size;
+
+            if (size > sizeof(chunk.text))
+                size = sizeof(chunk.text);
+
+            logAppend(chunk.text, size);
+        }
+
+        if (chunk.next_cursor == cursor)
+            break;
+
+        cursor = chunk.next_cursor;
+
+        if (chunk.size == 0)
+            break;
+    }
+}
+
 // The address the sysmodule discovered and wrote out (docs/ble-poc.md,
 // "设备地址：自动发现"). Nothing to connect to without it, and the page says so
 // rather than guessing.
@@ -1621,6 +1662,10 @@ static void runBleView(Service* dglab, PadState* pad)
 
         padUpdate(pad);
         down = padGetButtonsDown(pad);
+
+        // The session's own log goes to the card while this page is open, so a
+        // failed connect can be read back instead of only seen on screen.
+        bleLogPoll(dglab);
 
         if (down & HidNpadButton_B) {
             serviceDispatch(dglab, DGLAB_IPC_CMD_BLE_STOP);

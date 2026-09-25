@@ -78,7 +78,11 @@ serviceDispatchOut(&dglab, DGLAB_IPC_CMD_NET_STATUS, status);
    UI 不应把它当成真实强度显示；
 2. **需要 exefs 补丁**，且要按 `docs/ble-poc.md` 的顺序启动（先驱动级探针把 BLE 栈打开，
    再起 BLE 会话）；
-3. 一个开机周期只走一条 BLE 路径：BLE 会话跑完要重启才能回到 Socket 模式。
+3. **一个开机周期只走一条 BLE 路径**：会话跑完，这一周期里就不要再走第二条 BLE 路径
+   （想再连一次、或再跑探针，先重启主机）。这条规矩管的是 BLE 自己——BT 栈与 btm 被我们
+   动过，同一个周期里混着用会崩整机（`docs/ble-re.md` 的「`0x668F` 与 btm 的崩溃路径」）。
+   **Socket 模式不受它影响**：那条路是手机连设备、Switch 只跑 WebSocket，会话停掉
+   （`BLE_STOP`）后 `NET_SEND` / `NET_WAVEFORM` 立刻回到 Socket 转发，不用重启。
 
 ## NET_STATUS
 
