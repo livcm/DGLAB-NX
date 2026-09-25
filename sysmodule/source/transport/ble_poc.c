@@ -570,6 +570,75 @@ static void pocBtmSettle(const char* reason)
     svcSleepThread(300000000ull);
 }
 
+// Reading through the `bt` service. libnx's read wrappers (bt.c cmd 0 = read
+// characteristic, cmd 1 = read descriptor) pass no buffer and have no out
+// parameter, so whatever the service returns is dropped on the floor - and the
+// firmware's handlers do build a reply (btdrv's case 0x5a/0x5b copy the
+// attribute value and id into a reply buffer after FUN_00077e70 succeeds). This
+// issues the same CMIF command by hand with an out buffer attached, so the value
+// is finally visible. A CCCD read of 0x0001 would answer the question this
+// project has been stuck on: whether RegisterNotification / the hand-written
+// descriptor write really reached the device.
+static void pocBtRawRead(u32 handle, u32 cmd, const BtdrvGattId* serv, const BtdrvGattId* chr,
+    const BtdrvGattId* desc, const char* label)
+{
+    struct {
+        u8 is_primary;
+        u8 auth_req;
+        u8 pad[2];
+        u32 connection_handle;
+        BtdrvGattId serv_id;
+        BtdrvGattId char_id;
+        BtdrvGattId desc_id;
+        u64 aruid;
+    } in;
+    u8 payload[0x200];
+    u8 reply[0x40];
+    Service service;
+    Result rc;
+    u32 i;
+
+    memset(&in, 0, sizeof(in));
+    memset(payload, 0, sizeof(payload));
+    memset(reply, 0, sizeof(reply));
+
+    in.is_primary = 1;
+    in.connection_handle = handle;
+    in.serv_id = *serv;
+    in.char_id = *chr;
+    if (desc != NULL)
+        in.desc_id = *desc;
+    in.aruid = appletGetAppletResourceUserId();
+
+    rc = smGetService(&service, "bt");
+    if (R_FAILED(rc)) {
+        pocLog("%s: open 'bt' rc=0x%08X", label, (u32)rc);
+        return;
+    }
+
+    rc = serviceDispatchInOut(&service, cmd, in, reply,
+        .buffer_attrs = { SfBufferAttr_HipcPointer | SfBufferAttr_Out },
+        .buffers = { { payload, sizeof(payload) } },
+        .in_send_pid = true);
+
+    {
+        char hex[3u * 0x20u + 1u];
+
+        pocHex(hex, sizeof(hex), reply, 0x10u);
+        pocLog("%s: rc=0x%08X reply %s", label, (u32)rc, hex);
+        pocHex(hex, sizeof(hex), payload, 0x20u);
+        pocLog("%s: out %s", label, hex);
+    }
+
+    for (i = 0; i < 0x20u; i++) {
+        if (payload[i] != 0)
+            break;
+    }
+
+    pocLog("%s: payload nonzero=%u", label, (unsigned)(i < 0x20u));
+    serviceClose(&service);
+}
+
 static bool pocBtmTransportStart(u32 handle)
 {
     DglabCoyoteV3Link link = { pocBtmLinkWrite, &g_btm_transport };
@@ -637,6 +706,31 @@ static bool pocBtmTransportStart(u32 handle)
         pocBtmSettle("after the CCCD write");
     } else {
         pocLog("btm transport: CCCD hand write off, RegisterNotification owns the subscription");
+    }
+
+    // Ask the service for the values libnx drops (see pocBtRawRead). The CCCD
+    // right after subscribing is the one that matters: 0x0001 means the
+    // subscription really is in place and the device has a reason to notify.
+    pocBtmSettle("before the raw reads");
+
+    if (g_btm_cccd_ready) {
+        pocBtRawRead(handle, 1u, &g_btm_transport.service, &g_btm_transport.notify_char,
+            &g_btm_cccd, "btm transport: raw CCCD");
+    }
+
+    if (g_btm_battery_ready) {
+        BtdrvGattId battery_service;
+        BtdrvGattId battery_char;
+
+        memset(&battery_service, 0, sizeof(battery_service));
+        battery_service.instance_id = (u8)g_btm_battery_service.instance_id;
+        battery_service.uuid = g_btm_battery_service.uuid;
+        memset(&battery_char, 0, sizeof(battery_char));
+        battery_char.instance_id = (u8)g_btm_battery_char.instance_id;
+        battery_char.uuid = g_btm_battery_char.uuid;
+
+        pocBtRawRead(handle, 0u, &battery_service, &battery_char, NULL,
+            "btm transport: raw battery");
     }
 
     g_btm_transport.connected = true;
@@ -3051,7 +3145,7 @@ static void pocThreadFunc(void* arg)
     pocLog("poc start aruid_low=0x%08X", (u32)g_poc.aruid);
     // Printed by every session so a log says which sysmodule build produced it;
     // the probe versions below only appear when their key is pressed.
-    pocLog("poc build: ble_poc v29 (pairing probe off, connection work resumes)");
+    pocLog("poc build: ble_poc v30 (read the CCCD and battery through the raw CMIF call)");
 
     // The NRO sends START and the first ACTION back to back, so give that action
     // a moment to arrive before any probe runs: both probes care about what has
