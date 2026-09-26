@@ -2411,3 +2411,35 @@ sysmodule 日志都这样。根因不在 sysmodule（它的日志行最多 160~1
 省略号；两个日志子页的渲染检查从 `PageRegion_Rows` 改成 `PageRegion_Wide`，fixture 里也放进了
 这条长行。预览工具两条 fixture 各多出一条明确标注的"比任何真实日志都长"的行，出图能直接看到
 行尾三点。
+
+## 36. 追加（2026-09-26 深夜）：dev 包全自动，正式版半自动
+
+用户问"现在是手动打 tag 发 release 吗"，然后定下：**dev 包自动打，release 半自动**。
+
+现状（改动前）：`release.yml` 只在 `push: tags: ['v*']` 上发版，`workflow_dispatch` 是
+dry run；tag 得人本地打（README 的三步），`ci.yml` 在编译前比对 tag 与 `VERSION`。也就是说
+除了打 tag 这一步，整条链路早就自动化了——缺的是"谁决定版本号"。
+
+1. **`dev.yml`（新）**：`push main`（或手动触发）→ 复用 `ci.yml` 构建+跑全部主机测试+组装
+   `dist/` → 打成 `DGLAB-NX-dev-sd.zip` + `SHA256SUMS` → 传 artifact（保留 30 天）→ 更新一个
+   **滚动 pre-release**（固定 tag `dev`、固定资产名 `--clobber`，说明里写 build stamp / commit /
+   run 链接）。它**不碰 `VERSION`**，产物里 `dev` 只出现在 release 标题和说明里。
+   关键取舍：`dev` 用**轻量 tag**（`git push --force origin "$GITHUB_SHA:refs/tags/dev"` 把
+   commit 直接推进 `refs/tags/`）。Makefile 的 build stamp 是 `git describe --always --dirty`，
+   而 `git describe` **只看 annotated tag**，所以这个会移动的 tag 永远不会让某个构建自称 "dev"
+   ——后来被正式 tag 的那个 commit 依然 stamp 成 `v<version>`。
+2. **`tag-release.yml`（新，半自动）**：`workflow_dispatch` 带 `version`（只允许 `x.y.z`），
+   校验从分支触发 → 若 `VERSION` 不等于它就先写 `VERSION` 并提交推送 → 打 **annotated**
+   `v<version>` 并推 → 用 `gh workflow run release.yml --ref v<version>` 触发发版。
+   `release.yml` **一个字没改**：它仍然只认 tag，tag-vs-VERSION 的检查（`ci.yml`）照常跑，
+   打包/发布逻辑仍是唯一一份。请求一个**已存在**的 tag 时不改任何东西，只再触发一次
+   `release.yml`——它的 `--clobber` 逻辑会把已发版本的资产替换掉，这正是"CI 修完重发"的路径。
+
+踩点与前提（都写进两个 workflow 的头注释）：workflow token 造出来的事件**不会级联触发**别的
+workflow（`workflow_dispatch` 例外），所以"打 tag 再等 release.yml 自己跑"必须靠 `gh workflow
+run` 这条 dispatch 路径，而不是普通 push；`VERSION` 必须先在 tag 所指的提交里（否则 `ci.yml`
+编译前就红）；tag 要用 annotated（否则 About 页的 stamp 变成短 SHA）；bot 需要能直接推分支，
+`main` 开保护时必须给例外，否则 push 会以 git 自己的报错结束、什么都没打上。
+
+README 的「发布」一节这一轮**没动**（用户当时正在改 README，工作区里有未提交改动），
+流程说明写进了 `AGENTS.md` §8.1 与两个 workflow 的头注释。

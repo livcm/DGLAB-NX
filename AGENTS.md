@@ -256,6 +256,13 @@ headers/examples → 明确修改范围 → 采用最小必要修改。
 - 发布由 GitHub Actions 的 tag 触发：tag 必须等于仓库根 `VERSION`（形如 `v<VERSION>`），
   不一致时 CI 在编译前失败；CI 的组装脚本同样从 `build/` 推导 `<TITLE_ID>`，不得另写一份。
   流程与产物见 `.github/workflows/release.yml` 与 `README.md` 的「发布」；
+- 发版有三条入口，但**只有一条规则**（tag == `VERSION`，annotated）：
+  `.github/workflows/tag-release.yml`（`workflow_dispatch` 带版本号）负责写 `VERSION`、
+  打 tag、推 tag，再触发 `.github/workflows/release.yml`——后者仍然只认 tag，本地手工
+  `git tag -a` 推上去完全等效；`.github/workflows/dev.yml` 是**开发包**：每次 push `main`
+  自动打包并更新一个滚动 pre-release（固定资产名，tag 是**轻量** `dev`——`git describe
+  --always --dirty` 只看 annotated tag，所以它移动不会污染任何构建的 build stamp）。dev 包
+  **不决定版本号、不创建正式 Release**，正式版仍然是"人决定版本号"的那一步；
 - `build/` 属于构建产物，不提交到 Git。
 
 如果当前没有自动化测试，应至少进行：

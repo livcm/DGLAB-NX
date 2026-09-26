@@ -1,0 +1,144 @@
+#---------------------------------------------------------------------------------
+# Cut a release: one button, no tag to push by hand.
+#
+#   Actions -> tag-release -> Run workflow, with the version to release (0.4.0)
+#
+#   1. checks the request: must run from a branch, and the version must be x.y.z
+#      (digits and dots), because the tag has to equal the root VERSION file -
+#      the rule AGENTS.md §8.1 states and ci.yml enforces before it compiles;
+#   2. writes VERSION if it does not already say that number, commits it on the
+#      branch the workflow was dispatched from, and pushes;
+#   3. creates an *annotated* tag v<version> and pushes it - annotated because
+#      the Makefiles stamp the binaries with `git describe`, which is what makes
+#      the About page say "v0.4.0" instead of a commit hash;
+#   4. dispatches release.yml on that tag, which builds, tests, packages and
+#      publishes the release. release.yml stays the only thing that knows how a
+#      release is assembled, and its own tag-vs-VERSION check still runs (the
+#      dispatched run's ref is the tag).
+#
+# Asking for a version that is already tagged does not bump anything: it just
+# dispatches release.yml again, which replaces the assets of the existing release
+# (that is how a release is repaired after a CI fix).
+#
+# Needs a token allowed to push to the branch and to dispatch workflows. If the
+# branch is protected, the push fails with git's own message and nothing is
+# tagged. The VERSION commit does not trigger ci.yml (events from the workflow
+# token never do) - the release run builds and tests that commit itself.
+#---------------------------------------------------------------------------------
+name: tag-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, no leading v (has to equal the root VERSION after the bump, e.g. 0.4.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write # dispatching release.yml
+
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: tag + dispatch the release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the branch to tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Check the request
+        shell: bash
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          case "$GITHUB_REF" in
+            refs/heads/*) ;;
+            *) echo "::error::run this from a branch, not $GITHUB_REF"; exit 1 ;;
+          esac
+
+          case "$VERSION_INPUT" in
+            *[!0-9.]*|'') echo "::error::'$VERSION_INPUT' is not a version: digits and dots only (e.g. 0.4.0)"; exit 1 ;;
+          esac
+
+          case "$VERSION_INPUT" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::'$VERSION_INPUT' is not x.y.z"; exit 1 ;;
+          esac
+
+          echo "TAG=v$VERSION_INPUT" >> "$GITHUB_ENV"
+          echo "request: tag v$VERSION_INPUT on $GITHUB_REF_NAME, VERSION file says $(cat VERSION)"
+
+      - name: Re-release an existing tag instead
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The remote's own answer: a tag that exists only in this checkout, or
+          # that was never pushed, must not count as released.
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists: re-releasing it instead of tagging again"
+            gh workflow run release.yml --ref "$TAG"
+            echo "EXISTING=1" >> "$GITHUB_ENV"
+            {
+              echo "### $TAG was already tagged"
+              echo
+              echo "release.yml was dispatched again for it; its assets are replaced."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Bump VERSION
+        if: env.EXISTING != '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$(cat VERSION)" = "${TAG#v}" ]; then
+            echo "VERSION already says ${TAG#v}: nothing to commit"
+            exit 0
+          fi
+
+          printf '%s\n' "${TAG#v}" > VERSION
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "chore(release): ${TAG#v}"
+          git push origin "HEAD:$GITHUB_REF_NAME"
+
+      - name: Tag and dispatch the release
+        if: env.EXISTING != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Annotated: `git describe --always --dirty` only sees annotated tags,
+          # and that is what the NRO and the sysmodule stamp themselves with.
+          git tag -a "$TAG" -m "DGLAB-NX ${TAG#v}"
+          git push origin "$TAG"
+
+          gh workflow run release.yml --ref "$TAG"
+
+          {
+            echo "### $TAG dispatched"
+            echo
+            echo "release.yml is building and publishing it now - watch the Actions tab."
+            echo "The binaries inside carry the build stamp \`$TAG\`."
+          } >> "$GITHUB_STEP_SUMMARY"

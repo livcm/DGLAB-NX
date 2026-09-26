@@ -1,0 +1,125 @@
+#---------------------------------------------------------------------------------
+# The dev package: a ready to install SD card zip for every push to main.
+#
+#   push to main       build + test (via ci.yml) -> SD card zip -> rolling pre-release
+#   manual dispatch    the same, for a branch someone wants a package of
+#
+# Nothing here picks a version. The zip is DGLAB-NX-dev-sd.zip, the release notes
+# and the run summary carry the build stamp (`git describe`), and the release is
+# marked pre-release, so it can never be mistaken for the released version of
+# anything. Tagged releases stay a deliberate act: see tag-release.yml (cuts the
+# tag) and release.yml (publishes it).
+#
+# The "dev" tag is lightweight on purpose. The Makefiles stamp the binaries with
+# `git describe --always --dirty`, which only looks at *annotated* tags, so a tag
+# that moves with every push cannot make a build report itself as "dev": a commit
+# that later gets a release tag still stamps as v<version>.
+#---------------------------------------------------------------------------------
+name: dev
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # One definition of "build and test": the same reusable workflow PRs and
+  # releases run (it also assembles dist/, the SD card layout).
+  build:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  package:
+    name: dev package
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the rolling pre-release, and the tag it hangs on
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          # The stamp this job writes into the notes has to be the one inside the
+          # binaries, so the tags come along even though the build itself already
+          # happened in ci.yml.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download the SD card layout
+        uses: actions/download-artifact@v8
+        with:
+          name: dist-sd
+          path: dist
+
+      - name: Package the zip and the checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          stamp=$(git describe --always --dirty)
+          version=$(cat VERSION)
+          echo "STAMP=$stamp" >> "$GITHUB_ENV"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+          # One fixed asset name: a rolling pre-release replaces its assets
+          # instead of collecting one zip per push.
+          #
+          # The zip's root is the SD card root - atmosphere/ and switch/ with no
+          # wrapper directory - so it extracts straight onto the card.
+          (cd dist && zip -r -X ../DGLAB-NX-dev-sd.zip .)
+          sha256sum DGLAB-NX-dev-sd.zip > SHA256SUMS
+          cat SHA256SUMS
+          unzip -l DGLAB-NX-dev-sd.zip
+
+          {
+            echo "### dev build \`$stamp\`"
+            echo
+            echo "- version inside the binaries: \`$version\`"
+            echo "- commit: \`$GITHUB_SHA\`"
+            echo "- \`DGLAB-NX-dev-sd.zip\` is the SD card root: extract it onto the card"
+            echo "- this is not a release; the tagged one is on the Releases page"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v7
+        with:
+          name: DGLAB-NX-dev-sd
+          path: |
+            DGLAB-NX-dev-sd.zip
+            SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish the rolling pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          notes=$(printf 'Rolling dev build of `main`, replaced on every push.\n\n- build stamp: `%s`\n- version inside the binaries: `%s`\n- commit: `%s`\n- workflow run: %s/%s/actions/runs/%s\n\nNot a release: install it to run what main is doing right now.\n' \
+            "$STAMP" "$VERSION" "$GITHUB_SHA" \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
+
+          # Pushing the commit straight into refs/tags/dev creates a *lightweight*
+          # tag, which `git describe` ignores - that is what lets this one move
+          # with every push without ever changing a build's own stamp.
+          git push --force origin "$GITHUB_SHA:refs/tags/dev"
+
+          if gh release view dev >/dev/null 2>&1; then
+            gh release edit dev --prerelease --title "dev build ($STAMP)" --notes "$notes"
+            gh release upload dev DGLAB-NX-dev-sd.zip SHA256SUMS --clobber
+          else
+            gh release create dev --prerelease --verify-tag \
+              --title "dev build ($STAMP)" --notes "$notes" \
+              DGLAB-NX-dev-sd.zip SHA256SUMS
+          fi
