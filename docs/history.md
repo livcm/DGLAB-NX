@@ -2387,3 +2387,27 @@ managed 队列里——两处都只装着连接级记录。
 顺带把 `TEST_STRENGTH_MAX` 接到 `DGLAB_STRENGTH_MAX`（一个来源），并给 `tests/canvas` 补了
 "值/上限"最宽形态（`100/100`）的行宽检查。预览工具新增/调整了 `ble`、`blelog`、
 `advancedlimit`（删掉只会显示那两段文字的 `bleend`）。
+
+## 35. 追加（2026-09-26 夜）：日志行不再按字符数提前截断，日志页改用整幅宽
+
+用户看渲染图后报的第二件事：**日志行在还没到安全区边缘时就被截断了**——蓝牙日志和
+sysmodule 日志都这样。根因不在 sysmodule（它的日志行最多 160~192 字节，落盘文件一直是完整的），
+而在前端自己的屏幕环形缓冲：`DGLAB_SCREEN_LOG_LINE_LEN` 只有 40，`logPushLine()` 每行只留 39
+个字符。那个数字和屏幕宽度没有任何关系——它能且只能对一种字体、一种字号成立。
+
+改法（用户选的口径：**按真实宽度截断 + 省略号**，且**日志页换成整幅宽**）：
+
+1. 新增 `dglabTextFitLine()`（`ui/text.c`）：整行放得下就原样；放不下就取"最长能放下的前缀
+   + `...`"（省略号宽度先留出来），返回前缀字节数。省略号用 ASCII 三点，因为 libnx 位图兜底
+   字体没有 U+2026 的字形（上一条同样的理由在 `formatAppId()` 里已经用过一次）；
+2. 日志页 `dglabLogPageDraw()` 改用整幅宽（x=80..1190、`dglabPageClipWide()`，和 socket 页同一
+   带宽），每行先 fit 再画；标题、行距 37、滚动条、一次按键一行的滚动都不变；
+3. `DGLAB_SCREEN_LOG_LINE_LEN` 40 → 192：这是**存储**上限（覆盖 sysmodule 的 160/192），
+   屏幕上怎么裁由字体和带宽决定。环形缓冲从 32×40 变成 32×192（约 6KB `.bss`）。
+
+验证：`tests/canvas` 新增 `dglabTextFitLine()` 的用例（短行原样、长行带 `...` 且宽度不越界、
+窄于省略号时直接裁、`out_size` 过小时不越界），并用**sysmodule 真实存在的最长一行**
+（`btm transport: raw battery: out` + 64 个 hex，96 字符）断言结果长于 39 字符且在宽幅内补上
+省略号；两个日志子页的渲染检查从 `PageRegion_Rows` 改成 `PageRegion_Wide`，fixture 里也放进了
+这条长行。预览工具两条 fixture 各多出一条明确标注的"比任何真实日志都长"的行，出图能直接看到
+行尾三点。

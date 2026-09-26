@@ -248,6 +248,81 @@ size_t dglabTextWrapLine(DglabGlyphSource* source, const char* text, int max_wid
     return break_at;
 }
 
+// What a shortened line ends with. Three dots and no U+2026: the bitmap font the
+// console falls back to has no glyph for the real ellipsis (text.h).
+#define ELLIPSIS "..."
+
+size_t dglabTextFitLine(DglabGlyphSource* source, const char* text, int max_width, char* out,
+    size_t out_size)
+{
+    int ellipsis_width;
+    int room;
+    int width = 0;
+    size_t offset = 0;
+    size_t used = 0;
+
+    if (!source || !text || !out || out_size == 0)
+        return 0;
+
+    out[0] = '\0';
+
+    if (max_width <= 0)
+        return 0;
+
+    // The whole line fits: copy it, and the ellipsis never comes up.
+    if (dglabTextWidth(source, text) <= max_width) {
+        size_t length = strlen(text);
+
+        if (length >= out_size)
+            length = out_size - 1;
+
+        memcpy(out, text, length);
+        out[length] = '\0';
+
+        return length;
+    }
+
+    // It does not fit, so the ellipsis gets its room first - unless the column is
+    // narrower than the ellipsis itself, in which case the line is just cut.
+    ellipsis_width = dglabTextWidth(source, ELLIPSIS);
+    room = (max_width > ellipsis_width) ? max_width - ellipsis_width : max_width;
+
+    while (text[offset]) {
+        uint32_t codepoint = decodeUtf8(text + offset, &used);
+        DglabGlyph glyph;
+        int advance;
+
+        if (used == 0)
+            break;
+
+        memset(&glyph, 0, sizeof(glyph));
+        advance = source->lookup(source, codepoint, &glyph) ? glyph.advance
+                                                            : missingAdvance(source);
+
+        if (width + advance > room)
+            break;
+
+        width += advance;
+        offset += used;
+    }
+
+    // A caller whose buffer is tighter than the column gets a shorter line rather
+    // than a buffer overrun; one that is not (the log page) always gets the whole
+    // fitted prefix.
+    if (offset >= out_size)
+        offset = out_size - 1;
+
+    memcpy(out, text, offset);
+    out[offset] = '\0';
+
+    if (max_width > ellipsis_width && offset + 3 < out_size) {
+        memcpy(out + offset, ELLIPSIS, 3);
+        out[offset + 3] = '\0';
+    }
+
+    return offset;
+}
+
 int dglabTextCountLines(DglabGlyphSource* source, const char* text, int max_width)
 {
     int lines = 0;

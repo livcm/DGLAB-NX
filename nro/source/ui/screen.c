@@ -371,6 +371,13 @@ int dglabLogPageMaxOffset(int count)
 // Both the socket page (the sysmodule log) and the Bluetooth page (the session
 // log) show one, so it takes its content and its title and knows nothing about
 // either.
+//
+// It is the one single column page that uses the wide band: log lines are long
+// (packet bytes, addresses), and there is nothing on this page to line up with
+// the 220..1060 column the other prose pages keep. A line that is still too long
+// for the band is cut at its real width with dglabTextFitLine(), rather than at
+// some fixed number of characters - the buffer that holds the line does not know
+// how wide the band is in the font this build ended up with.
 void dglabLogPageDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabLogPage* log)
 {
     const DglabTheme* theme = dglabThemeGet();
@@ -389,13 +396,15 @@ void dglabLogPageDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const Dgla
     dglabPageBegin(canvas);
     dglabPageHeader(canvas, &title, log->title);
     dglabPageHeaderStatus(canvas, fonts->value, log->sysmodule_ok);
-    dglabPageClipContent(canvas);
+    dglabPageClipWide(canvas);
 
     for (int i = 0; i < log->count; i++) {
         int y = DGLAB_PAGE_CONTENT_TOP - page.offset + i * DGLAB_SCREEN_LOG_PITCH;
+        char fitted[DGLAB_SCREEN_LOG_LINE_LEN];
 
-        dglabTextDraw(canvas, fonts->body, DGLAB_PAGE_CONTENT_X, y, log->lines[i],
-            theme->text);
+        dglabTextFitLine(fonts->body, log->lines[i] ? log->lines[i] : "", DGLAB_PAGE_WIDE_WIDTH,
+            fitted, sizeof(fitted));
+        dglabTextDraw(canvas, fonts->body, DGLAB_PAGE_WIDE_X, y, fitted, theme->text);
     }
 
     dglabCanvasClearClip(canvas);

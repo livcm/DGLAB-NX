@@ -20,7 +20,12 @@
 /// whole content, and the page scrolls, so it is worth more than one screenful
 /// (the SD card mirror keeps everything).
 #define DGLAB_SCREEN_LOG_LINES 32
-#define DGLAB_SCREEN_LOG_LINE_LEN 40
+/// How much of one line the ring keeps. This is a storage bound, not the screen's
+/// cut: it is the longest line the sysmodule can hand over (its PoC ring caps a
+/// line at 160 bytes, the socket log at 192), and the log page shortens what it
+/// draws to the width of the band in the font it has - a fixed character count
+/// could only ever be right for one font (see dglabTextFitLine()).
+#define DGLAB_SCREEN_LOG_LINE_LEN 192
 /// The log page's line pitch: the console's long text pages use a wider one than
 /// a list row (docs/nro-ui.md).
 #define DGLAB_SCREEN_LOG_PITCH 37

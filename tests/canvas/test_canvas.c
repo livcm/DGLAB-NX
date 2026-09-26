@@ -254,6 +254,7 @@ static void testScreen(void)
     static const char* log_lines[DGLAB_SCREEN_LOG_LINES] = {
         "listening on port 9999", "app bound", "socket server core ready",
         "accept from 10.0.0.9", "websocket from 10.0.0.9, target '/8f2a4c1e'",
+        "btm transport: raw battery: out 0000000000000000000000000000000000000000000000000000000000000000",
         "app 3c71d0b2-4e55-4a9f-9f1b-2b3c4d5e6f70 bound", "tx heartbeat", "rx ping #1",
         "waveform ch A, 48 slots", "tx clear-A", "tx waveform ch A, 32 slots", "tx waveform ch A, 16 slots",
     };
@@ -799,6 +800,63 @@ static void testWrap(void)
         CHECK(strcmp(line, "one two") == 0);
         CHECK(text[taken] == ' ');
     }
+}
+
+// dglabTextFitLine(): the log page's one-line cut. A line that fits comes back
+// whole; a longer one is cut at the width it was given and ends with three dots,
+// which is what replaced a fixed 39 character cut - one that had nothing to do
+// with the band the page draws in, or with the font it draws with.
+static void testFitLine(void)
+{
+    DglabGlyphSource* source = blockSource();
+    char line[192];
+    size_t taken;
+
+    // Fits: copied whole, no dots, and the return value is the whole string.
+    taken = dglabTextFitLine(source, "short line", 120, line, sizeof(line));
+    CHECK(taken == strlen("short line"));
+    CHECK(strcmp(line, "short line") == 0);
+
+    // Too long: the longest prefix that leaves room for the dots. A character is
+    // 12 pixels in this source, so 120 pixels are ten of them, the dots take
+    // three, and seven are drawn.
+    taken = dglabTextFitLine(source, "0123456789abcdef", 120, line, sizeof(line));
+    CHECK(taken == 7);
+    CHECK(strcmp(line, "0123456...") == 0);
+    CHECK(dglabTextWidth(source, line) <= 120);
+    CHECK(taken < strlen("0123456789abcdef"));
+
+    // Narrower than the dots themselves: the line is cut and nothing is added.
+    taken = dglabTextFitLine(source, "0123456789abcdef", 24, line, sizeof(line));
+    CHECK(taken == 2);
+    CHECK(strcmp(line, "01") == 0);
+
+    // No room at all.
+    CHECK(dglabTextFitLine(source, "0123456789", 0, line, sizeof(line)) == 0);
+    CHECK(line[0] == '\0');
+
+    // A buffer that cannot hold the dotted line: a shorter line, never a longer
+    // write than the buffer.
+    {
+        char small[6];
+
+        dglabTextFitLine(source, "0123456789abcdef", 120, small, sizeof(small));
+        CHECK(strlen(small) <= sizeof(small) - 1);
+    }
+
+    // What this exists for: the longest line the sysmodule actually writes (the
+    // 0x20 byte payload dump of a GATT read) used to be cut at 39 characters. It
+    // now reaches the wide band and says itself that it is still too long.
+    taken = dglabTextFitLine(source,
+        "btm transport: raw battery: out 0000000000000000000000000000000000000000000000000000000000000000",
+        DGLAB_PAGE_WIDE_WIDTH, line, sizeof(line));
+    CHECK(taken > 39);
+    CHECK(strlen(line) > 39);
+    CHECK(strlen(line) <= DGLAB_SCREEN_LOG_LINE_LEN);
+    CHECK(dglabTextWidth(source, line) <= DGLAB_PAGE_WIDE_WIDTH);
+    CHECK(strcmp(line + strlen(line) - 3, "...") == 0);
+    CHECK(taken < strlen("btm transport: raw battery: out "
+        "0000000000000000000000000000000000000000000000000000000000000000"));
 }
 
 // The sizes a screen draws with. The host has no system font, so every size is
@@ -1599,6 +1657,9 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
         "sleep watch unavailable rc=0x000108C3",
         "socket server core ready, controller id 8f2a4c1e-9b77",
         "websocket from 172.20.10.2, target '/8f2a4c1e'",
+        // Longer than the wide band can draw: this is the line the page has to
+        // shorten with an ellipsis instead of the ring cutting it at 39 characters.
+        "btm transport: raw battery: out 0000000000000000000000000000000000000000000000000000000000000000",
         "listening on port 9999",
         "app bound",
         "socket server core ready",
@@ -1694,13 +1755,13 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
                 beginPage(&canvas, blue);
                 dglabScreenDraw(&canvas, fonts, &screen);
                 snprintf(name, sizeof(name), "%s log top", frames);
-                checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
+                checkPageStaysInItsRegions(name, blue, PageRegion_Wide);
 
                 screen.log_offset = 400;
                 beginPage(&canvas, blue);
                 dglabScreenDraw(&canvas, fonts, &screen);
                 snprintf(name, sizeof(name), "%s log scrolled", frames);
-                checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
+                checkPageStaysInItsRegions(name, blue, PageRegion_Wide);
             }
         }
 
@@ -1911,7 +1972,8 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             char name[96];
 
             for (int i = 0; i < DGLAB_SCREEN_LOG_LINES; i++)
-                lines[i] = "btm transport: write 20 byte(s) B000000064646464000F1E0F000000";
+                lines[i] = "btm transport: raw battery: out "
+                    "0000000000000000000000000000000000000000000000000000000000000000";
 
             log.title = dglabString(DglabString_BleLogTitle);
             log.lines = lines;
@@ -1922,7 +1984,7 @@ static void checkEveryPage(const char* frames, const DglabFontSet* fonts)
             snprintf(name, sizeof(name), "%s ble log", frames);
             beginPage(&canvas, blue);
             dglabLogPageDraw(&canvas, fonts, &log);
-            checkPageStaysInItsRegions(name, blue, PageRegion_Rows);
+            checkPageStaysInItsRegions(name, blue, PageRegion_Wide);
         }
     }
 }
@@ -2309,6 +2371,7 @@ int main(void)
     testText();
     testScaledCanvas();
     testWrap();
+    testFitLine();
     testBlend();
     testButtonIcons();
     testButtonIconLetterMargins();

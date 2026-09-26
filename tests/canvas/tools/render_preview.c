@@ -135,11 +135,18 @@ int main(int argc, char** argv)
         "app 3c71d0b2-... bound",
         "rx msg: strength-10+10+80+80",
         "tx command 1 channel 0 value 15",
+        // Longer than the wide band: it must end in three dots rather than being
+        // cut at some fixed number of characters.
+        "btm transport: raw battery: out 0000000000000000000000000000000000000000000000000000000000000000",
+        // Longer than any line the sysmodule writes, so the preview shows what the
+        // dots look like: the wide band holds about 107 characters of this font.
+        "btm transport: probe dump 00000000 00001111 00002222 00003333 00004444 00005555 00006666 00007777 00008888 00009999 0000AAAA 0000BBBB",
         "app 3c71d0b2-... has been quiet for 90 s",
     };
-    // The Bluetooth page's own log, as the ring carries it: the lines are the
-    // session's, and the ring cuts them at 39 characters (DGLAB_SCREEN_LOG_LINE_LEN),
-    // so a real one looks like these.
+    // The Bluetooth page's own log, as the ring carries it: the ring keeps a whole
+    // line now (DGLAB_SCREEN_LOG_LINE_LEN is as long as the longest line the
+    // sysmodule can send), and the page shortens what it draws to the width of the
+    // band - so a real one looks like these.
     static const char* ble_log_lines[] = {
         "ble session: btmInitialize rc=0x00000000",
         "ble session: BleConnect(EA:A8:AC:22:2C:18)",
@@ -148,7 +155,8 @@ int main(int argc, char** argv)
         "btm transport: RegisterNotification(0x150B) rc",
         "btm transport: write 7 byte(s) BF64641E0000",
         "ble session: streaming, channel limits A=100",
-        "btm transport: write 20 byte(s) B01F0000646",
+        "btm transport: raw battery: out 0000000000000000000000000000000000000000000000000000000000000000",
+        "btm transport: probe dump 00000000 00001111 00002222 00003333 00004444 00005555 00006666 00007777 00008888 00009999 0000AAAA 0000BBBB",
     };
     DglabFont font;
     DglabScreenState state;

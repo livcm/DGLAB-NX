@@ -279,6 +279,11 @@ static void logPushLine(const char* line)
         memmove(g_log_lines[0], g_log_lines[1],
             sizeof(g_log_lines[0]) * (DGLAB_SCREEN_LOG_LINES - 1));
 
+    // One line is copied whole: DGLAB_SCREEN_LOG_LINE_LEN is as long as the
+    // longest line the sysmodule can hand over, and the screen shortens what it
+    // draws to the width it actually has (dglabTextFitLine()). Cutting here at
+    // some smaller number is what used to lose the tail of a log line while the
+    // page still had room to draw it.
     if (len >= DGLAB_SCREEN_LOG_LINE_LEN)
         len = DGLAB_SCREEN_LOG_LINE_LEN - 1;
 

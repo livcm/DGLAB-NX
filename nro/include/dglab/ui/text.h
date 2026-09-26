@@ -104,6 +104,23 @@ size_t dglabTextWrapLine(DglabGlyphSource* source, const char* text, int max_wid
 /// through the last row of the about screen.
 int dglabTextCountLines(DglabGlyphSource* source, const char* text, int max_width);
 
+/// Copies as much of `text` as fits `max_width` pixels into `out`, dropping a
+/// trailing "..." in when something had to be left out, and returns how many
+/// bytes of `text` that consumed. Nothing is dropped from a line that fits, so a
+/// caller can tell the two cases apart by comparing the return value with the
+/// length of `text`.
+///
+/// This is the one-line counterpart of dglabTextWrapLine: a log line stays one
+/// line on screen and says so when it is longer than the column, instead of
+/// being cut at some fixed number of characters - the screen is the only thing
+/// that knows how wide the line may be in the font it is drawing with.
+///
+/// The ellipsis is three dots, not U+2026: libnx's fallback bitmap font has no
+/// glyph for the real one and would draw a gap instead (screen.c already writes
+/// "..." when it shortens an app id for the same reason).
+size_t dglabTextFitLine(DglabGlyphSource* source, const char* text, int max_width, char* out,
+    size_t out_size);
+
 /// A source over libnx's bitmap font (ASCII only). Used on the host, where there
 /// is no system font to rasterise, and as the fallback when the real font cannot
 /// be loaded on the console.
