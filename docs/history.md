@@ -2443,3 +2443,35 @@ run` 这条 dispatch 路径，而不是普通 push；`VERSION` 必须先在 tag 
 
 README 的「发布」一节这一轮**没动**（用户当时正在改 README，工作区里有未提交改动），
 流程说明写进了 `AGENTS.md` §8.1 与两个 workflow 的头注释。
+
+## 37. 追加（2026-09-27）：日志页各看各的来源（两条环）
+
+用户问"为什么蓝牙日志和 sysmodule 日志的内容是一样的"。查下来根因在前端：sysmodule 那边
+本来就是**两条互不相干的环**——socket 服务端的 `server->log`（`dglabNetServerLog()`，
+内容 `listening on port` / `app … bound` / `rx msg: …`，外加启动那句 `dglab <stamp>`）与
+BLE 侧的 `g_poc.log`（`pocLog()`，202 处调用，内容 `btdrv probe:` / `btm probe:` /
+`ble session:` / `btm transport:`）——而 NRO 只有**一条**屏上滚动缓冲 `g_log_lines[32]`：
+socket 页把 `NET_LOG` 拉进去，蓝牙页把 `POC_LOG` 拉进去，两个日志子页画的都是同一条，
+切页面/开关日志页**都不清空**。于是"哪个页面最后拉过谁，那 32 行就是谁的"：刚跑完 BLE 再去看
+socket 页，看到的就是同一批 `ble session:` 行（反之亦然；服务端没跑时不会有新行把它顶掉）。
+落盘文件也是同一个 `logPushLine()` 写的，所以 `logs/dglab-net.log` 同样混着两边（这条有意保留）。
+
+用户选了"A：两条环"。实现（`nro/source/main.c`）：
+
+- 把那条环连同它的 cursor 与"半行"装配缓冲收进 `DglabLogRing`，两个实例 `g_log_net` /
+  `g_log_ble`：每条环自己一份 32×192 行、自己的 `generation`、自己的 IPC cursor。**半行缓冲
+  必须按环分开**——两个来源往同一个缓冲里拼 chunk 会把行接错（今天两个页面不同时拉，所以还没
+  踩到，但这是同一处设计应力）；
+- `logPoll()` 只填 `g_log_net`，`bleLogPoll()` 只填 `g_log_ble`（后者原来那个 `static u32
+  cursor` 搬进环里）；socket 页读 `g_log_net`（行、数量、重绘判定用的 generation），蓝牙页读
+  `g_log_ble`；
+- NRO 自己写的行归类：`auto sleep:`、`theme:`、体感那几行（`motion device …`、
+  `motion left/right …`、`motion rescan (Y)`）进 **net 环**（它是两者里通用的一条）；
+  `bleLogFailure()` 的"启动被拒"进 **BLE 环**（那句话是给蓝牙页看的）；
+- **SD 镜像仍是同一个文件**：`logPushLine()` 负责写环 + `fprintf(g_log_file, …)`，两来源合写
+  `logs/dglab-net.log`，行内容本身自带前缀（`ble session:` vs `socket server …`），一轮测试一个
+  文件仍然是最方便发回来的形态。
+
+`docs/nro-ui.md` 的日志页与「日志环」两处同步改写。前端那条环是 libnx 侧的胶水（main.c 不进
+主机测试），所以这一轮没有新增主机测试：验证是 `make` 全组件 + `tests/*` 全绿，加上流程上
+"每个来源只被自己那条环的拉取函数写入、每个页面只读自己那条"这件事在 diff 里是 1:1 的。

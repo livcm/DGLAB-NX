@@ -226,15 +226,38 @@ static void appletHookCallback(AppletHookType hook, void* param)
         g_display_mode_dirty = true;
 }
 
-static char g_log_lines[DGLAB_SCREEN_LOG_LINES][DGLAB_SCREEN_LOG_LINE_LEN];
-static const char* g_log_pointers[DGLAB_SCREEN_LOG_LINES];
-static int g_log_filled;
-static u32 g_log_cursor;
-static char g_partial[256];
-static size_t g_partial_len;
-// Bumped for every line the log ring takes in, so the view can tell that the
-// panel changed even when the ring is full and the line count stays the same.
-static u32 g_log_generation;
+// One ring of log lines, plus everything a source needs to fill it.
+//
+// The sysmodule keeps two rings of its own - the socket server's (read with
+// NET_LOG) and the BLE session's (read with POC_LOG) - and the front end used to
+// pour both into a single scrollback: whichever page had drained last owned the
+// 32 lines, so the socket page's log and the Bluetooth page's log (titled
+// differently and fed by different sources) showed the same thing. Each source
+// gets its own ring now, so neither can push the other's lines out.
+//
+// The SD mirror stays one file: the whole run in one place is what gets sent back
+// after a test (README, "排查实机问题").
+typedef struct {
+    char lines[DGLAB_SCREEN_LOG_LINES][DGLAB_SCREEN_LOG_LINE_LEN];
+    const char* pointers[DGLAB_SCREEN_LOG_LINES];
+    /// Bumped for every line the ring takes in, so a view can tell that the panel
+    /// changed even when the ring is full and the line count stays the same.
+    u32 generation;
+    int filled;
+    /// Where the next IPC chunk of this source starts.
+    u32 cursor;
+    /// One line being assembled out of chunks. It has to be per ring: two sources
+    /// assembling into one buffer would splice their lines together.
+    char partial[256];
+    size_t partial_len;
+} DglabLogRing;
+
+// The socket server's lines (what the socket page's log shows) and the BLE
+// session's (what the Bluetooth page's log shows). Lines the front end writes
+// itself - sleep, theme, the motion mode's sensor describes - are about neither
+// transport: they go to the socket ring, the general purpose one of the two.
+static DglabLogRing g_log_net;
+static DglabLogRing g_log_ble;
 // Text and tone for the "last cmd" line. Every command the buttons send answers
 // with a Result, and this end used to throw them away: pressing a test key with
 // no App bound, or with the server stopped, looked exactly like pressing it
@@ -271,13 +294,15 @@ static FILE* g_log_file;
 // Log ring
 // ---------------------------------------------------------------------------
 
-static void logPushLine(const char* line)
+// Takes one line into `ring` and mirrors it to the SD card file. The file is
+// shared by both rings on purpose (see DglabLogRing).
+static void logPushLine(DglabLogRing* ring, const char* line)
 {
     size_t len = strlen(line);
 
     if (DGLAB_SCREEN_LOG_LINES > 1)
-        memmove(g_log_lines[0], g_log_lines[1],
-            sizeof(g_log_lines[0]) * (DGLAB_SCREEN_LOG_LINES - 1));
+        memmove(ring->lines[0], ring->lines[1],
+            sizeof(ring->lines[0]) * (DGLAB_SCREEN_LOG_LINES - 1));
 
     // One line is copied whole: DGLAB_SCREEN_LOG_LINE_LEN is as long as the
     // longest line the sysmodule can hand over, and the screen shortens what it
@@ -287,13 +312,13 @@ static void logPushLine(const char* line)
     if (len >= DGLAB_SCREEN_LOG_LINE_LEN)
         len = DGLAB_SCREEN_LOG_LINE_LEN - 1;
 
-    memcpy(g_log_lines[DGLAB_SCREEN_LOG_LINES - 1], line, len);
-    g_log_lines[DGLAB_SCREEN_LOG_LINES - 1][len] = '\0';
+    memcpy(ring->lines[DGLAB_SCREEN_LOG_LINES - 1], line, len);
+    ring->lines[DGLAB_SCREEN_LOG_LINES - 1][len] = '\0';
 
-    g_log_generation++;
+    ring->generation++;
 
-    if (g_log_filled < DGLAB_SCREEN_LOG_LINES)
-        g_log_filled++;
+    if (ring->filled < DGLAB_SCREEN_LOG_LINES)
+        ring->filled++;
 
     if (g_log_file != NULL) {
         fprintf(g_log_file, "%s\n", line);
@@ -305,8 +330,9 @@ static void logPushLine(const char* line)
 // The console's automatic sleep timer
 // ---------------------------------------------------------------------------
 
-// One line per change of the console's flag, in the same panel the sysmodule's
-// log lines go to. The reason this exists at all is in docs/dglab-socket.md
+// One line per change of the console's flag, into the same ring the socket
+// server's own lines go to (it is the front end's line, not a transport's).
+// The reason this exists at all is in docs/dglab-socket.md
 // ("睡眠与唤醒"): a sleep with the server's sockets open hangs the console, and
 // the sysmodule is never told that one is coming.
 static void appAutoSleepLog(const char* verb, DglabAutoSleepEvent event, Result rc)
@@ -315,20 +341,20 @@ static void appAutoSleepLog(const char* verb, DglabAutoSleepEvent event, Result 
 
     switch (event) {
         case DglabAutoSleepEvent_Suppressed:
-            logPushLine("auto sleep: off while the server runs");
+            logPushLine(&g_log_net, "auto sleep: off while the server runs");
             break;
 
         case DglabAutoSleepEvent_AlreadyOff:
-            logPushLine("auto sleep: already off, left alone");
+            logPushLine(&g_log_net, "auto sleep: already off, left alone");
             break;
 
         case DglabAutoSleepEvent_Restored:
-            logPushLine("auto sleep: restored");
+            logPushLine(&g_log_net, "auto sleep: restored");
             break;
 
         case DglabAutoSleepEvent_Failed:
             snprintf(line, sizeof(line), "auto sleep: %s rc=0x%08X", verb, (unsigned)rc);
-            logPushLine(line);
+            logPushLine(&g_log_net, line);
             break;
 
         default:
@@ -372,26 +398,30 @@ static void logFileOpen(void)
         g_log_file = fopen("sdmc:/dglab-net.log", "w");
 }
 
-static void logAppend(const char* text, size_t size)
+// Assembles the chunks of one source into lines and hands them to its ring. The
+// half-finished line lives in the ring, so two sources reading at the same time
+// cannot splice their chunks into each other's lines.
+static void logAppend(DglabLogRing* ring, const char* text, size_t size)
 {
     for (size_t i = 0; i < size; i++) {
         char c = text[i];
 
         if (c == '\n') {
-            g_partial[g_partial_len] = '\0';
-            logPushLine(g_partial);
-            g_partial_len = 0;
+            ring->partial[ring->partial_len] = '\0';
+            logPushLine(ring, ring->partial);
+            ring->partial_len = 0;
             continue;
         }
 
         if (c == '\r' || c == '\0')
             continue;
 
-        if (g_partial_len + 1 < sizeof(g_partial))
-            g_partial[g_partial_len++] = c;
+        if (ring->partial_len + 1 < sizeof(ring->partial))
+            ring->partial[ring->partial_len++] = c;
     }
 }
 
+// Drains the socket server's log (NET_LOG) into the socket page's ring.
 static void logPoll(Service* dglab)
 {
     for (int i = 0; i < LOG_POLL_ROUNDS; i++) {
@@ -399,7 +429,7 @@ static void logPoll(Service* dglab)
         DglabNetLogChunk chunk;
         Result rc;
 
-        request.cursor = g_log_cursor;
+        request.cursor = g_log_net.cursor;
         memset(&chunk, 0, sizeof(chunk));
 
         rc = serviceDispatchInOut(dglab, DGLAB_IPC_CMD_NET_LOG, request, chunk);
@@ -413,21 +443,21 @@ static void logPoll(Service* dglab)
             if (size > sizeof(chunk.text))
                 size = sizeof(chunk.text);
 
-            logAppend(chunk.text, size);
+            logAppend(&g_log_net, chunk.text, size);
         }
 
-        if (chunk.next_cursor == g_log_cursor || chunk.size == 0)
+        if (chunk.next_cursor == g_log_net.cursor || chunk.size == 0)
             return;
 
-        g_log_cursor = chunk.next_cursor;
+        g_log_net.cursor = chunk.next_cursor;
     }
 }
 
 // The screen takes a plain array of lines, in the order they should be drawn.
-static void buildLogPointers(void)
+static void buildLogPointers(DglabLogRing* ring)
 {
-    for (int i = 0; i < g_log_filled; i++)
-        g_log_pointers[i] = g_log_lines[DGLAB_SCREEN_LOG_LINES - g_log_filled + i];
+    for (int i = 0; i < ring->filled; i++)
+        ring->pointers[i] = ring->lines[DGLAB_SCREEN_LOG_LINES - ring->filled + i];
 }
 
 // ---------------------------------------------------------------------------
@@ -739,7 +769,7 @@ static void snapshotFromState(DglabScreenSnapshot* out, const DglabScreenState* 
     out->last_command_tone = state->last_command_tone;
     out->auto_sleep_suppressed = state->auto_sleep_suppressed;
     out->log_count = state->log_count;
-    out->log_generation = g_log_generation;
+    out->log_generation = g_log_net.generation;
     out->log_open = state->log_open;
     out->log_offset = state->log_offset;
     out->display_generation = g_display_generation;
@@ -864,11 +894,11 @@ static void runSocketView(Service* dglab, PadState* pad)
         // the IPC traffic down without a visible delay.
         if (++frame % LOG_POLL_INTERVAL_FRAMES == 1) {
             logPoll(dglab);
-            buildLogPointers();
+            buildLogPointers(&g_log_net);
         }
 
-        state.log_lines = g_log_pointers;
-        state.log_count = g_log_filled;
+        state.log_lines = g_log_net.pointers;
+        state.log_count = g_log_net.filled;
 
         if (R_SUCCEEDED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_NET_QR, chunk))) {
             url_ok = true;
@@ -904,10 +934,10 @@ static void runSocketView(Service* dglab, PadState* pad)
             log_open = !log_open;
 
             if (log_open)
-                log_offset = logMaxOffset(g_log_filled);
+                log_offset = logMaxOffset(g_log_net.filled);
         } else if (log_open) {
-            log_offset = logScrollFromDirections(log_offset, logMaxOffset(g_log_filled), down, held,
-                armTicksToNs(armGetSystemTick()));
+            log_offset = logScrollFromDirections(log_offset, logMaxOffset(g_log_net.filled), down,
+                held, armTicksToNs(armGetSystemTick()));
         } else {
             if (down & HidNpadButton_A)
                 toggleServer(dglab, server_running);
@@ -1207,7 +1237,7 @@ static void runMotionView(Service* dglab, PadState* pad)
         // they are taken again - this is that, without leaving the page.
         if (down & HidNpadButton_Y) {
             dglabJoyconRescan();
-            logPushLine("motion rescan (Y)");
+            logPushLine(&g_log_net, "motion rescan (Y)");
         }
 
         testChannelButtons(dglab, down);
@@ -1288,7 +1318,7 @@ static void runMotionView(Service* dglab, PadState* pad)
                 "motion device 0x%08X styles 0x%08X attrs 0x%08X handheld %u | %s | %s",
                 (unsigned)pad_device, (unsigned)pad_styles, (unsigned)pad_attributes,
                 pad_handheld ? 1u : 0u, left, right);
-            logPushLine(line);
+            logPushLine(&g_log_net, line);
         }
 
         // A side going away or coming back is worth a line of its own: whether a
@@ -1311,7 +1341,7 @@ static void runMotionView(Service* dglab, PadState* pad)
                     dglabJoyconDescribe(DglabJoycon_Left, detail, sizeof(detail));
                     snprintf(line, sizeof(line), "motion left %s: %s",
                         left_now ? "connected" : "disconnected", detail);
-                    logPushLine(line);
+                    logPushLine(&g_log_net, line);
                 }
 
                 if (right_now != right_connected) {
@@ -1321,7 +1351,7 @@ static void runMotionView(Service* dglab, PadState* pad)
                     dglabJoyconDescribe(DglabJoycon_Right, detail, sizeof(detail));
                     snprintf(line, sizeof(line), "motion right %s: %s",
                         right_now ? "connected" : "disconnected", detail);
-                    logPushLine(line);
+                    logPushLine(&g_log_net, line);
                 }
             }
 
@@ -1428,7 +1458,7 @@ static void touchLogLine(const char* tag)
     if (length + 16 < sizeof(line))
         snprintf(line + length, sizeof(line) - length, " | %s", tag);
 
-    logPushLine(line);
+    logPushLine(&g_log_net, line);
 }
 
 static void runTouchView(Service* dglab, PadState* pad)
@@ -1650,7 +1680,8 @@ static void runTouchView(Service* dglab, PadState* pad)
 
 // A refused start used to leave no trace at all: the page just stayed idle and
 // the screen said nothing about why. Both start steps report their failures into
-// the same log the session lines go to.
+// the ring the session's own lines go to, which is the one the Bluetooth page's
+// log shows (and the SD mirror).
 static void bleLogFailure(const char* what, Result rc)
 {
     char line[80];
@@ -1659,25 +1690,23 @@ static void bleLogFailure(const char* what, Result rc)
         return;
 
     snprintf(line, sizeof(line), "%s failed rc=0x%08X", what, (unsigned)rc);
-    logPushLine(line);
+    logPushLine(&g_log_ble, line);
 }
 
 // The BLE session logs into the sysmodule's PoC ring, and only the front end can
-// drain that ring to the SD card. The BLE PoC console page does it for the probe
-// experiments; this page has to do it for the session, otherwise a failed
-// connect leaves nothing behind to read (the ring is in memory only and the
-// sysmodule has no file of its own for it). Same file the rest of the front end
-// mirrors, so one file carries the whole run.
+// drain that ring to the SD card. This page does it for the session (the PoC
+// console page does it for the probe experiments); otherwise a failed connect
+// leaves nothing behind to read (the ring is in memory only and the sysmodule has
+// no file of its own for it). It lands in the Bluetooth ring, so this page's log
+// shows the session's lines and the socket page's log keeps the server's.
 static void bleLogPoll(Service* dglab)
 {
-    static u32 cursor = 0;
-
     for (int i = 0; i < LOG_POLL_ROUNDS; i++) {
         DglabPocLogRequest request = { 0 };
         DglabPocLogChunk chunk;
         Result rc;
 
-        request.cursor = cursor;
+        request.cursor = g_log_ble.cursor;
         memset(&chunk, 0, sizeof(chunk));
 
         rc = serviceDispatchInOut(dglab, DGLAB_IPC_POC_CMD_LOG, request, chunk);
@@ -1690,13 +1719,13 @@ static void bleLogPoll(Service* dglab)
             if (size > sizeof(chunk.text))
                 size = sizeof(chunk.text);
 
-            logAppend(chunk.text, size);
+            logAppend(&g_log_ble, chunk.text, size);
         }
 
-        if (chunk.next_cursor == cursor)
+        if (chunk.next_cursor == g_log_ble.cursor)
             break;
 
-        cursor = chunk.next_cursor;
+        g_log_ble.cursor = chunk.next_cursor;
 
         if (chunk.size == 0)
             break;
@@ -1784,7 +1813,7 @@ static void runBleView(Service* dglab, PadState* pad)
         // same ring is what Y shows (the sysmodule log page's layout, with this
         // session's title).
         bleLogPoll(dglab);
-        buildLogPointers();
+        buildLogPointers(&g_log_ble);
 
         if (down & HidNpadButton_B) {
             serviceDispatch(dglab, DGLAB_IPC_CMD_BLE_STOP);
@@ -1795,10 +1824,10 @@ static void runBleView(Service* dglab, PadState* pad)
             state.log_open = !state.log_open;
 
             if (state.log_open)
-                state.log_offset = logMaxOffset(g_log_filled);
+                state.log_offset = logMaxOffset(g_log_ble.filled);
         } else if (state.log_open) {
             state.log_offset = logScrollFromDirections(state.log_offset,
-                logMaxOffset(g_log_filled), down, held, armTicksToNs(armGetSystemTick()));
+                logMaxOffset(g_log_ble.filled), down, held, armTicksToNs(armGetSystemTick()));
         } else {
             // The mixer, the same two helpers the socket and motion pages call:
             // up/down dial channel A, left/right channel B, one step per press
@@ -1885,7 +1914,7 @@ static void runBleView(Service* dglab, PadState* pad)
 
         if (have_drawn && memcmp(&drawn, &state, sizeof(state)) == 0 &&
             drawn_generation == g_display_generation &&
-            drawn_log_generation == g_log_generation)
+            drawn_log_generation == g_log_ble.generation)
             continue;
 
         if (dglabFramebufferBegin(&canvas)) {
@@ -1893,8 +1922,8 @@ static void runBleView(Service* dglab, PadState* pad)
                 DglabLogPage log;
 
                 log.title = dglabString(DglabString_BleLogTitle);
-                log.lines = g_log_pointers;
-                log.count = g_log_filled;
+                log.lines = g_log_ble.pointers;
+                log.count = g_log_ble.filled;
                 log.offset = state.log_offset;
                 log.sysmodule_ok = state.sysmodule_ok;
                 dglabLogPageDraw(&canvas, &g_fonts, &log);
@@ -1906,7 +1935,7 @@ static void runBleView(Service* dglab, PadState* pad)
 
             drawn = state;
             drawn_generation = g_display_generation;
-            drawn_log_generation = g_log_generation;
+            drawn_log_generation = g_log_ble.generation;
             have_drawn = true;
         }
     }
@@ -2229,7 +2258,7 @@ int main(int argc, char* argv[])
     // back to the other language and the reason is reported in the log panel
     // of the socket screen instead.
     for (unsigned i = 0; i < lang.notes; i++)
-        logPushLine(lang.note[i]);
+        logPushLine(&g_log_net, lang.note[i]);
 
     // set:sys is what tells us whether the console runs its light or its dark
     // theme. A console that does not offer it (or an applet that may not ask)
@@ -2238,14 +2267,15 @@ int main(int argc, char* argv[])
     g_set_sys_ready = R_SUCCEEDED(setsysInitialize());
 
     if (!g_set_sys_ready)
-        logPushLine("theme: set:sys unavailable, so following the console means dark");
+        logPushLine(&g_log_net, "theme: set:sys unavailable, so following the console means dark");
 
     appSettingsLoad();
     appLanguageApply();
     appThemeApply();
 
     if (g_set_sys_ready && !g_system_theme_ok)
-        logPushLine("theme: the console did not report a colour set, following it means dark");
+        logPushLine(&g_log_net,
+            "theme: the console did not report a colour set, following it means dark");
 
     // Docking and undocking changes the frame the NRO draws into (720p handheld,
     // 1080p docked), so the display is built again when the console says it
