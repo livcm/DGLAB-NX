@@ -1436,6 +1436,49 @@ CCCD 的读应答都没回来。要么设备不回（与"官方 App 能收到 B1
 关机**（卡里是虚拟系统），ring 随之消失，所以"事后拔卡再读"读不到任何东西：要在同一次
 开机里、关主机之前退出 NRO，让它把 ring 抽完。
 
+### 第五十四次实机（2026-09-27）：正式会话上**设备灯闪了**——"输出靠波形"在主机侧坐实
+
+这不是探针轮，是 NRO 的 `bluetooth (direct)` 页跑的一轮（构建 `v0.3.0-104-gb5e28c3-dirty`，
+也就是"会话自带默认波形 + 上限拆成 A/B"那一版）。日志 `logs/dglab-net.log` 345 行，全部来自
+蓝牙页（`btdrv probe:` 146 行是启动第一步的驱动级探针，`ble session:` 40 行 + `btm transport:`
+114 行是会话本体；`motion` / `touch` / `auto sleep` 一行都没有，`dglab-ble-poc.log` 是 0 字节
+——那一轮没碰玩法页，也没开 PoC 控制台）。
+
+判据行（连同前后文）：
+
+    ble session: streaming, channel limits A=100 B=100 (open loop: …)
+    btm transport: write 7 byte(s) BF646400000000 rc=0x00000000                       ← BF：上限 A=B=100
+    btm transport: write 20 byte(s) B01F000064646464646464646464646464646464 rc=0x00000000
+    btm transport: strength seq=1 A mode=3 value=0 B mode=3 value=0                   ← 绝对清零 + 波形在播
+    btm transport: write 20 byte(s) B000000064646464646464646464646464646464 rc=0x00000000   ← 之后一直这样
+    btm transport: strength seq=2 A mode=1 value=1 B mode=0 value=0                   ← 用户按了一下 ↑
+    btm transport: strength seq=3 A mode=2 value=1 B mode=0 value=0                   ← 又按了一下 ↓
+    btm transport: write 7 byte(s) BF000000000000 rc=0x00000000                       ← 收尾：上限回 0
+    btm transport: done, writes=318 notify=0 b1=0
+    ble session: disconnected
+
+两点读法：
+
+1. **波形槽不再是全零**：`B0 1F 0000` 之后两通道各四个槽全是 `64`（频率 100ms、波形强度 100），
+   也就是会话自己的默认波形一直在播——这正是 2026-09-26 那轮缺的东西（那一轮是 `B00000…`，
+   设备按官方规则把整通道数据丢掉，所以什么都看不见）。
+2. **上限这次不是 0**：`BF6464…` = A=100、B=100（参数页默认值），闸门开着。用户只在 0↔1
+   之间拨过（`value=1`），所以这轮验的是"灯"，不是"手感"。
+
+**结果（用户 2026-09-27 确认）：起会话后设备上的灯就闪了。** 于是"强度只是闸门、输出靠波形"
+这条 2026-09-25 得出的结论，在设备侧的对应现象从"手机上看到"变成了"我们自己的会话上看到"；
+`docs/ble-re.md` 的「当前状态」表里"输出状态（灯）"一行据此从"手机实测"升级为"主机侧实机确认"。
+
+顺带两条与 BLE 无关的观察：`dglab-sys.log`（同日 22:04）显示服务端 `listening on port 9999`
+→ `stopped` 正常；`dglab-stall.log` 里同一时刻有 5 条
+`stall: log write end for 3195~3393 ms, thread=ipc, fd=-1, bytes=0, errno=0, clients=0, state=3`
+——那是 sysmodule 的看门狗抓到"往 SD 卡写日志"偶发卡 3 秒多（`docs/dglab-socket.md` 记过同类
+抖动，会自己恢复），那几秒里 socket 侧 IPC 是停的。
+
+**下一轮该做的**：把 A 拨到 20~30 试手感（上限 100、闸门开着）；以及"玩法页驱动 BLE"——
+注意**离开蓝牙页会停会话**（页面设计如此），所以那一步要先决定"会话在离开页面后继续跑"
+还是"把玩法搬进蓝牙页"，见 `docs/ble-re.md` 的「没跑到的两条」。
+
 ### 早期状态：搁置（2026-09-22 收束，已被上面的结果取代）
 
 **结论（完整证据链见 `docs/ble-re.md` 的「当前总览」与「收束结论」）**：
