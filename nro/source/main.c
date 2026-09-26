@@ -486,6 +486,24 @@ static bool appSysmoduleOk(Service* dglab)
     return g_sysmodule_ok;
 }
 
+// Whether a BLE session is running in the sysmodule.
+//
+// The Bluetooth page is the only place that starts one, but it is no longer the
+// only place that has to know: a session outlives the page that started it, so
+// the menu (which shows it) and the two gameplay pages (whose packet goes to the
+// session rather than to the App while it runs) both ask this.
+static bool appBleSessionActive(Service* dglab)
+{
+    DglabBleStatus status;
+
+    memset(&status, 0, sizeof(status));
+
+    if (R_FAILED(serviceDispatchOut(dglab, DGLAB_IPC_CMD_BLE_STATUS, status)))
+        return false;
+
+    return status.state == DglabBleState_Connecting || status.state == DglabBleState_Connected;
+}
+
 // Turns the Result of a command into the single line the screen shows. The
 // failures the buttons can actually cause are named; anything else is shown as a
 // hex code rather than guessed at. Keep the result under 21 characters: that is
@@ -992,6 +1010,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
     DglabMenuState state;
     unsigned drawn_selected = 0;
     bool drawn_liveness = false;
+    bool drawn_ble = false;
     u32 drawn_generation = 0;
     bool have_drawn = false;
 
@@ -1029,11 +1048,16 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
         }
 
         state.sysmodule_ok = appSysmoduleOk(dglab);
+        // A BLE session keeps running while other pages are up (see runBleView),
+        // so the menu has to ask for itself rather than assume the page that
+        // started it is the one being looked at.
+        state.ble_active = appBleSessionActive(dglab);
 
         state.selected = g_menu_selected;
 
         if (have_drawn && state.selected == drawn_selected &&
-            state.sysmodule_ok == drawn_liveness && drawn_generation == g_display_generation)
+            state.sysmodule_ok == drawn_liveness && state.ble_active == drawn_ble &&
+            drawn_generation == g_display_generation)
             continue;
 
         if (dglabFramebufferBegin(&canvas)) {
@@ -1042,6 +1066,7 @@ static DglabMenuResult runMenuView(Service* dglab, PadState* pad)
 
             drawn_selected = state.selected;
             drawn_liveness = state.sysmodule_ok;
+            drawn_ble = state.ble_active;
             drawn_generation = g_display_generation;
             have_drawn = true;
         }
@@ -1211,7 +1236,15 @@ static void runMotionView(Service* dglab, PadState* pad)
             // it has to keep the console's sleep timer in step with it too.
             appAutoSleepFollow(state.server_running);
 
-            if (!status_ok) {
+            // A BLE session drives the device locally (the sysmodule routes
+            // NET_SEND / NET_WAVEFORM to it while it is active), and it outlives
+            // the page that started it: while one runs, this row says so instead
+            // of showing the socket server's state, which is not what the packets
+            // this page sends end up driving.
+            if (appBleSessionActive(dglab)) {
+                state.link = dglabString(DglabString_BleTitle);
+                state.link_tone = DglabCmdTone_Ok;
+            } else if (!status_ok) {
                 state.link = dglabString(DglabString_StateIpcFailed);
                 state.link_tone = DglabCmdTone_Error;
             } else {
@@ -1545,7 +1578,12 @@ static void runTouchView(Service* dglab, PadState* pad)
             state.limit_b = dglabChannelCeiling(status_ok && status.reports_received != 0,
                 status.app_limit_b, config.channel_limit_b);
 
-            if (!status_ok) {
+            // Same as the motion page: while a BLE session runs, that is what the
+            // touch panel's packets drive.
+            if (appBleSessionActive(dglab)) {
+                state.link = dglabString(DglabString_BleTitle);
+                state.link_tone = DglabCmdTone_Ok;
+            } else if (!status_ok) {
                 state.link = dglabString(DglabString_StateIpcFailed);
                 state.link_tone = DglabCmdTone_Error;
             } else {
@@ -1769,14 +1807,51 @@ static bool bleStateIsActive(u32 state)
 // The Bluetooth page. Starting is two steps because the transport needs two:
 // the driver-level probe brings the stack up (it is the only thing that may call
 // InitializeBle/EnableBle, docs/history.md §28), and the session then connects
-// and streams. Leaving the page stops the session: one left running would keep
-// driving the device with nobody watching.
+// and streams.
+//
+// The session **outlives this page** (2026-09-27): the point of it is that the
+// gameplay pages can drive the device without a phone, and those pages only exist
+// while this one is closed. Leaving is therefore `B`, which changes nothing, and
+// `X` is the stop key. What keeps a forgotten session from driving the device
+// forever: the menu shows one under the Bluetooth entry, the gameplay pages show
+// it in place of the App's link state, the sysmodule stops a session on its own
+// after its watchdog, and the front end stops it on the way out (see main()).
 //
 // The D-pad dials the two channel strengths exactly like the socket and motion
 // pages do (they share g_test_strength_a/b and the two helpers). The two channel
 // strength *ceilings* are settings the advanced parameters page owns: they are
 // the ceiling half of the two strength rows (value/ceiling) and go to the session
 // in BLE_START, but nothing on this page changes them.
+//
+// Because a session outlives this page, the page keeps this much state across
+// visits: the ceilings the running session was told to use. That is what the rows
+// show, and what the parameters file is compared against - a ceiling changed while
+// a session runs is pushed into that session with BLE_LIMIT (the command exists
+// for exactly this, and it is what the old ceiling keys did) rather than quietly
+// waiting for the next session, so the rows and the device cannot disagree.
+static bool g_ble_limits_known;
+static u32 g_ble_limit_a;
+static u32 g_ble_limit_b;
+
+// Tells a running session about a new pair of ceilings, if it is a new pair.
+static void blePushLimits(Service* dglab, u32 limit_a, u32 limit_b)
+{
+    if (g_ble_limits_known && g_ble_limit_a == limit_a && g_ble_limit_b == limit_b)
+        return;
+
+    g_ble_limits_known = true;
+    g_ble_limit_a = limit_a;
+    g_ble_limit_b = limit_b;
+
+    {
+        DglabBleLimitRequest request = { 0 };
+
+        request.limit_a = limit_a;
+        request.limit_b = limit_b;
+        serviceDispatchIn(dglab, DGLAB_IPC_CMD_BLE_LIMIT, request);
+    }
+}
+
 static void runBleView(Service* dglab, PadState* pad)
 {
     DglabBlePageState state;
@@ -1790,11 +1865,9 @@ static void runBleView(Service* dglab, PadState* pad)
     memset(&drawn, 0, sizeof(drawn));
 
     // Read once, when the page opens: the ceilings are not adjustable from here
-    // (see above), and a session cannot outlive the page, so a session always
-    // runs with the pair that was on the settings page when it was started.
+    // (see above). A session that is already running keeps the pair it was given,
+    // and the frame loop below decides which of the two the rows show.
     motionSettingsLoad(&config);
-    state.limit_a = config.channel_limit_a;
-    state.limit_b = config.channel_limit_b;
 
     while (appletMainLoop()) {
         DglabCanvas canvas;
@@ -1815,10 +1888,11 @@ static void runBleView(Service* dglab, PadState* pad)
         bleLogPoll(dglab);
         buildLogPointers(&g_log_ble);
 
-        if (down & HidNpadButton_B) {
-            serviceDispatch(dglab, DGLAB_IPC_CMD_BLE_STOP);
+        // B leaves the page and nothing else: the session keeps running, which is
+        // what lets the gameplay pages drive the device (see the header comment).
+        // X, below, is the stop key.
+        if (down & HidNpadButton_B)
             return;
-        }
 
         if (down & HidNpadButton_Y) {
             state.log_open = !state.log_open;
@@ -1901,8 +1975,38 @@ static void runBleView(Service* dglab, PadState* pad)
                 memcpy(state.status.address, address, sizeof(state.status.address));
                 rc = serviceDispatchIn(dglab, DGLAB_IPC_CMD_BLE_START, request);
                 bleLogFailure("ble session start", rc);
+
+                // The session is being told this pair, so that is the pair the
+                // rows show and the frame loop compares against (no need to push
+                // it again the moment the session reports itself as connecting).
+                if (R_SUCCEEDED(rc)) {
+                    g_ble_limits_known = true;
+                    g_ble_limit_a = request.limit_a;
+                    g_ble_limit_b = request.limit_b;
+                }
             }
         }
+
+        // Which ceilings the rows show, and what a ceiling changed in the
+        // parameters page does to a session that is already running: the pair is
+        // pushed into it (BLE_LIMIT), so "the settings page says 30" and "the
+        // device is capped at 30" stay the same statement. With nothing running
+        // the pair is simply the file.
+        if (bleStateIsActive(state.status.state)) {
+            if (!g_ble_limits_known) {
+                g_ble_limits_known = true;
+                g_ble_limit_a = config.channel_limit_a;
+                g_ble_limit_b = config.channel_limit_b;
+            } else if (g_ble_limit_a != config.channel_limit_a ||
+                g_ble_limit_b != config.channel_limit_b) {
+                blePushLimits(dglab, config.channel_limit_a, config.channel_limit_b);
+            }
+        } else {
+            g_ble_limits_known = false;
+        }
+
+        state.limit_a = g_ble_limits_known ? g_ble_limit_a : config.channel_limit_a;
+        state.limit_b = g_ble_limits_known ? g_ble_limit_b : config.channel_limit_b;
 
         // The two rows the D-pad dials come from the same pair the socket and
         // motion pages show, so the number on screen and the number that went out
@@ -2345,6 +2449,12 @@ int main(int argc, char* argv[])
 
     appletUnhook(&display_hook);
     dglabFramebufferClose();
+
+    // A BLE session outlives the page that started it, but not this process:
+    // nothing would be watching the device once the front end is gone, and
+    // waiting for the sysmodule's own watchdog would be an hour of output nobody
+    // asked for. The call is a no-op when no session is running.
+    serviceDispatch(&dglab, DGLAB_IPC_CMD_BLE_STOP);
 
     // Automatic sleep is a console setting the user can change themselves, so
     // leave it the way it was found before the process goes away (and before the

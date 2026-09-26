@@ -143,6 +143,7 @@
     "ble_device": "设备",
     "ble_device_none": "尚未发现",
     "ble_packets": "已发包数",
-    "ble_log_title": "蓝牙日志"
+    "ble_log_title": "蓝牙日志",
+    "menu_ble_running": "蓝牙会话正在跑：进这一页按 X 停"
   }
 }

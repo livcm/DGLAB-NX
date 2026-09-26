@@ -83,6 +83,7 @@ void dglabMenuDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabMe
     DglabListPage page;
     unsigned selected = state ? state->selected : 0;
     bool ok = state ? state->sysmodule_ok : true;
+    bool ble_active = state ? state->ble_active : false;
     int count = 0;
     int view_height = DGLAB_PAGE_CONTENT_BOTTOM - DGLAB_PAGE_CONTENT_TOP;
     int content_height;
@@ -97,6 +98,13 @@ void dglabMenuDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabMe
             .kind = DglabRow_Item,
             .label = dglabMenuItemName(item),
             .value_color = theme->accent,
+            // A running session is worth a line of its own under the entry that
+            // starts it: the page it runs best in is no longer the only one that
+            // can show whether the device is being driven, and this is where the
+            // user comes back to when they wonder about it.
+            .note = (item == DglabMenu_ItemBle && ble_active)
+                ? dglabString(DglabString_MenuBleRunning)
+                : NULL,
         };
 
         if (item == selected)

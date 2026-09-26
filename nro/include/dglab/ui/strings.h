@@ -54,6 +54,10 @@ typedef enum {
     DglabString_BleDeviceNone,
     DglabString_BlePackets,
     DglabString_BleLogTitle,
+    /// The note the menu puts under the Bluetooth entry while a session runs: the
+    /// session outlives the page, so this is where the user finds out (and where
+    /// to stop it).
+    DglabString_MenuBleRunning,
     DglabString_DescSocket,
     DglabString_DescMotion,
     DglabString_DescTouch,

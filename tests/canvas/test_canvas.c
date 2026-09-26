@@ -380,6 +380,38 @@ static void testMenu(void)
         changed = countChangedPixels(screen_pixels, sizeof(screen_pixels), blue);
         CHECK(changed > 1280 * 720 / 2);
     }
+
+    // A running BLE session puts a line under the Bluetooth entry, because that
+    // session outlives the page that started it: the note has to make the menu
+    // taller (it is measured like any other note) and the entry it belongs to has
+    // to be the one it lands under.
+    {
+        static uint8_t with_note[1280 * 720 * 4];
+        static uint8_t without_note[1280 * 720 * 4];
+        int different = 0;
+
+        memset(&menu, 0, sizeof(menu));
+        menu.selected = DglabMenu_ItemBle;
+        menu.sysmodule_ok = true;
+        menu.ble_active = true;
+
+        dglabCanvasInit(&canvas, with_note, 1280, 720, 1280 * 4);
+        dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
+        dglabMenuDraw(&canvas, &fonts, &menu);
+
+        menu.ble_active = false;
+
+        dglabCanvasInit(&canvas, without_note, 1280, 720, 1280 * 4);
+        dglabCanvasFill(&canvas, 0, 0, 1280, 720, blue);
+        dglabMenuDraw(&canvas, &fonts, &menu);
+
+        for (size_t i = 0; i < sizeof(with_note); i++) {
+            if (with_note[i] != without_note[i])
+                different++;
+        }
+
+        CHECK(different > 0);
+    }
 }
 
 // The motion screen: the widest values it can hold still have to fit, and it

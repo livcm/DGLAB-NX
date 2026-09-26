@@ -21,6 +21,7 @@
 //   /tmp/preview /tmp/font.bin /tmp/nowifi.bmp nowifi   (no LAN address yet)
 //   /tmp/preview /tmp/font.bin /tmp/stopped.bmp stopped (server not started)
 //   /tmp/preview /tmp/font.bin /tmp/menu.bmp menu       (the mode menu)
+//   /tmp/preview /tmp/font.bin /tmp/blemenu.bmp blemenu (the menu, session running)
 //   /tmp/preview /tmp/font.bin /tmp/motion.bmp motion   (the Joy-Con mode)
 //   /tmp/preview /tmp/font.bin /tmp/touch.bmp touch     (the touch mode)
 //   /tmp/preview /tmp/font.bin /tmp/touchdock.bmp touchdock  (a docked console)
@@ -167,7 +168,7 @@ int main(int argc, char** argv)
     if (argc < 3) {
         fprintf(stderr, "usage: render_preview <font.bin> <out.bmp> [normal|nowifi|stopped|"
                         "log|menu|motion|touch|touchdock|touchclamp|touchfixed|advanced|"
-                        "advanceddensity|advancedlimit|about|aboutlow|ble|blelog]"
+                        "advanceddensity|advancedlimit|about|aboutlow|ble|blelog|blemenu]"
                         " [dock]\n");
         return 2;
     }
@@ -363,12 +364,17 @@ int main(int argc, char** argv)
         about.offset = strcmp(argv[3], "aboutlow") == 0 ? 100000 : 0;
 
         dglabAboutDraw(&canvas, &g_fonts, &about);
-    } else if (argc >= 4 && strcmp(argv[3], "menu") == 0) {
+    } else if (argc >= 4 && (strcmp(argv[3], "menu") == 0 ||
+                                strcmp(argv[3], "blemenu") == 0)) {
         DglabMenuState menu;
 
         memset(&menu, 0, sizeof(menu));
-        menu.selected = DglabMenu_ItemMotion;
+        // `blemenu` is the same page with a BLE session running, which puts the
+        // note under the Bluetooth entry.
+        menu.selected = strcmp(argv[3], "blemenu") == 0 ? DglabMenu_ItemBle
+                                                        : DglabMenu_ItemMotion;
         menu.sysmodule_ok = true;
+        menu.ble_active = strcmp(argv[3], "blemenu") == 0;
 
         dglabMenuDraw(&canvas, &g_fonts, &menu);
     } else if (argc >= 4 && strcmp(argv[3], "motion") == 0) {

@@ -143,6 +143,7 @@
     "ble_device": "Device",
     "ble_device_none": "Not known yet",
     "ble_packets": "Packets sent",
-    "ble_log_title": "Bluetooth log"
+    "ble_log_title": "Bluetooth log",
+    "menu_ble_running": "A Bluetooth session is running: open this page and press X to stop"
   }
 }

@@ -22,6 +22,10 @@ typedef enum {
 typedef struct {
     unsigned selected;   ///< DglabMenuItem
     bool sysmodule_ok;   ///< the last ping was answered
+    /// A BLE session is running in the sysmodule. It outlives the Bluetooth page
+    /// that started it, so the menu says so under that entry (and where to stop
+    /// it) instead of leaving the user to guess why the device is being driven.
+    bool ble_active;
 } DglabMenuState;
 
 void dglabMenuDraw(DglabCanvas* canvas, const DglabFontSet* fonts, const DglabMenuState* state);

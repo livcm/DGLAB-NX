@@ -2505,3 +2505,38 @@ socket 页，看到的就是同一批 `ble session:` 行（反之亦然；服务
 `stall: log write end for 3195~3393 ms, thread=ipc, …` —— sysmodule 的看门狗抓到"写日志到
 SD 卡"偶发卡 3 秒多（会自己恢复，`docs/dglab-socket.md` 记过同类抖动），那几秒里 socket 侧
 IPC 是停的。
+
+## 39. 追加（2026-09-27）：BLE 会话跨页存活（玩法页驱动 BLE 的前提）
+
+"灯闪了"确认之后，下一步本该是"玩法页驱动 BLE"，但查日志时发现这条路**结构上走不通**：NRO 是
+单页 UI，`runBleView` 在 `B`/离开时直接 `BLE_STOP`（当初的理由写在页注释里：没人看着的会话会
+一直驱动设备），于是体感/触屏页发 `NET_SEND`/`NET_WAVEFORM` 时 BLE 会话已经结束，那些包落到
+Socket 路径上。三个方向摆给用户（会话跨页存活 / 玩法搬进蓝牙页 / 先不动），**用户选了 A**。
+
+实现（`nro/source/main.c`、`ui/menu.*`、`sysmodule/source/transport/ble_poc.c`）：
+
+- 蓝牙页：`B` 只返回、不再 `BLE_STOP`；`X` 是唯一停键；`A` 在会话已跑时本来就不重复启动。
+- 菜单：`DglabMenuState` 加 `ble_active`，`DglabMenuDraw` 在 `bluetooth (direct)` 行下面挂一条
+  note（新 key `menu_ble_running`："蓝牙会话正在跑：进这一页按 X 停"）。**没有动用页头右侧**：
+  那条按 nro/AGENTS.md 是"每页共用一条 sysmodule 状态"，不该被别的状态占用。
+- 玩法页：体感/触屏的「连接」行在会话跑着时显示 `DglabString_BleTitle`（`蓝牙（直连）`）而不是
+  Socket 服务端状态——那两页的包这时是被会话吃掉的，行里显示"未启动"会误导。复用已有 key，
+  不新增文案。
+- 兜底三层：菜单/玩法页的提示；**前端退出时** `main()` 收尾补一次 `BLE_STOP`（会话跨页但不跨
+  进程——不然没人看着设备，而 sysmodule 的看门狗要等一小时）；sysmodule 的
+  `POC_BLE_SESSION_MAX_MS` 从 10 分钟放宽到 **60 分钟**（会话现在是"玩法期间一直跑"的东西，
+  10 分钟会在中途掐断；60 分钟只是"没人停它"的兜底，日志里仍会写 `N minute watchdog reached`）。
+- **上限跟着参数页走**：会话跨页之后，"跑着的时候改了参数页的上限"变成一个真实场景（以前
+  改完只能重开会话，因为页面一走会话就没了）。蓝牙页为此跨页存住"这个会话被交代过的那一对"
+  （参数文件仍是进入页面时读一次，之后每帧对照）：发现不同就补一次 `BLE_LIMIT`（这条命令本来
+  就是干这个的，也是旧版 `↑`/`↓` 改上限的行为），两行强度显示的始终是会话在用的那一对——设置页、
+  屏幕、设备三者不打架。`BLE_START` 成功那一刻也记下来，免得会话刚起来就多推一次（那会多写一次
+  BF 并重置强度记账）。
+- 测试：`tests/canvas` 的菜单用例多两条——渲染带 note 的菜单、并断言"有 note"与"没有 note"
+  两帧不同（note 会被 `dglabListMeasure` 计入行高，这也顺带守住菜单会长高/滚动）。预览工具
+  加了 `blemenu` 变体，出图能看到那行提示。会话跨页这件事本身在 `main.c` 里（libnx 胶水），
+  与前一轮一样只能靠实机验。
+
+**待实机**：会话在玩法页上驱动设备、菜单/玩法页的提示、`X` 停、退出 NRO 自动停。
+README 里"`B` 返回（返回时会话会一起停）"这句**这一轮没改**（README 有用户未提交的改动），
+口径已写进 `AGENTS.md` §15 与 `docs/nro-ui.md`。

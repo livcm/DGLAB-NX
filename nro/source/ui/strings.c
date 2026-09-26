@@ -50,6 +50,7 @@ static const char* const kKeys[DglabString_Count] = {
     [DglabString_BleDeviceNone] = "ble_device_none",
     [DglabString_BlePackets] = "ble_packets",
     [DglabString_BleLogTitle] = "ble_log_title",
+    [DglabString_MenuBleRunning] = "menu_ble_running",
     [DglabString_DescSocket] = "desc_socket",
     [DglabString_DescMotion] = "desc_motion",
     [DglabString_DescTouch] = "desc_touch",

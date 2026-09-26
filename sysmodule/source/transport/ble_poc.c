@@ -469,7 +469,12 @@ static bool g_btm_bond_address_valid;
 // worker applies them between pump steps, so the two threads never touch the
 // session object at the same time.
 #define POC_BLE_STRENGTH_QUEUE 16u
-#define POC_BLE_SESSION_MAX_MS (10u * 60u * 1000u) // watchdog, not a target
+// How long one session may run before the worker stops it by itself. A session
+// now outlives the page that started it (the gameplay pages drive the device
+// through it, docs/ble-re.md), so this is a net for a session nobody stopped -
+// the front end stops its own on the way out, and a console that keeps running
+// with a session still gets the device capped within the hour. Not a target.
+#define POC_BLE_SESSION_MAX_MS (60u * 60u * 1000u)
 
 typedef struct {
     u8 channel; // 1 = A, 2 = B
