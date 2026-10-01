@@ -1,509 +1,91 @@
-# AGENTS.md
+# Agent 工作规则
 
-## 项目简介
+## 项目与组件
 
-本项目是一个 Nintendo Switch Homebrew 项目，目标是在 Nintendo Switch Atmosphère 环境上提供
-DG-LAB BLE 或 DG-LAB WebSocket 协议的实现，并通过统一的后台服务向 DG-LAB 设备或 DG-LAB APP 发送控制信号。
+DGLAB-NX 是 Atmosphère 环境下的 Nintendo Switch Homebrew。Sysmodule 常驻管理
+DG-LAB 连接与协议；NRO、Overlay、Game Mod 通过 IPC 使用它。
 
-项目核心不是某一个特定游戏，而是：
-
-    DG-LAB 设备 / DG-LAB APP
-             ↑ BLE（需 exefs 补丁） / WebSocket（已实现）
-    DG-LAB Sysmodule
-            ↑ IPC
-     ┌──────┼───────────┐
-     │      │           │
-    NRO   Overlay   Game Mods
-     │      │           │
-    Joy-Con/UI       游戏事件
-
-Sysmodule 负责长期运行的 DG-LAB BLE/WebSocket 连接及协议实现；
-NRO、Overlay 和 Game Mod 负责具体的用户交互或游戏事件，并通过 IPC 使用 Sysmodule
-提供的功能。
-
-传输分两种模式：**WebSocket 模式**（主力，装上就能用）与 **BLE 模式**（sysmodule 直连设备，
-能用但要装补丁、且只能开环）：
-
-| 模式 | 连接方式 | 状态 |
+| 目录 | 职责 | 局部规则 |
 | --- | --- | --- |
-| BLE | sysmodule 直接连接 DG-LAB 设备（Coyote 协议） | **扫描 + 连接 + GATT 表已实机跑通，但仅在安装了 exefs 补丁的机器上可用**（补丁跳过固件对"客户端控制器层激活"的检查，内容与安装方式见 `docs/ble-re.md`）。传输层已接上 Coyote 协议层（BF/B0 写入 `rc=0`），2026-09-25 的反应测试**实机确认设备真的输出了**（写入到达设备、波形字节一致）；2026-09-26 起有**正式入口**（NRO 的 `bluetooth (direct)` 页 + IPC 的 `BLE_*`，见 `docs/ipc.md`）：实机连上设备并流式写（`writes=172` 全 `rc=0`），玩法页不改一行就能走 BLE。**两个前提**：装补丁；**BF 的两个通道强度上限是输出闸门，某一通道是 0 就是那一通道不输出**（上限与强度是两组不同的变量，各一对 A/B）。**输出本身靠波形**：会话一直播一段默认波形，所以强度、上限都是 0 时设备的灯也会闪（2026-09-26 手机 App 给出的判据，**2026-09-27 主机侧实机确认**：蓝牙页起会话后设备灯就闪，当时强度还是 0）；不播波形时设备会丢掉整个通道的数据。**但设备侧一条回包都没有**（通知与读应答全哑、B1 未验证，原因已查清：连接归 btm、服务层不暴露它的事件），所以协议要求的"确认后再改强度"还做不了，BLE 按**开环**设计。实现须知见 `sysmodule/AGENTS.md` |
-| WebSocket | sysmodule 与手机 DG-LAB App 建立 WebSocket 会话：Switch 当服务端，App 扫码连入（Switch 不主动外连）；手机负责与设备之间的 BLE，并把波形数据转发给设备 | **已实现**（Socket V3），见 `docs/dglab-socket.md` |
+| `sysmodule/` | BLE/WebSocket、协议、设备生命周期、IPC 服务 | [AGENTS](sysmodule/AGENTS.md) |
+| `nro/` | 用户界面、Joy-Con/触屏玩法、调试 | [AGENTS](nro/AGENTS.md) |
+| `overlay/` | 游戏期间的快速查看与控制 | [AGENTS](overlay/AGENTS.md) |
+| `mods/` | 游戏事件检测与 IPC 映射 | [AGENTS](mods/AGENTS.md) |
+| `common/` | 公共 IPC 与类型 | [AGENTS](common/AGENTS.md) |
 
-两种模式下的设备侧连接都只能由 sysmodule 建立并持有，其它组件一律走 IPC（见 §3）。
-
----
-
-## 1. 项目结构
-
-推荐使用以下结构：
-
-    DGLAB-NX/
-    ├── AGENTS.md
-    ├── README.md
-    ├── Makefile
-    │
-    ├── common/
-    │   ├── ipc/
-    │   └── types/
-    │
-    ├── sysmodule/
-    │   ├── source/
-    │   ├── include/
-    │   └── Makefile
-    │
-    ├── nro/
-    │   ├── source/
-    │   ├── include/
-    │   └── Makefile
-    │
-    ├── overlay/
-    │   ├── source/
-    │   └── Makefile
-    │
-    ├── mods/
-    │   ├── <game-a>/
-    │   └── <game-b>/
-    │
-    ├── docs/
-    │   ├── architecture.md
-    │   ├── ipc.md
-    │   ├── dglab-protocol.md
-    │   └── development.md
-    │
-    └── config/
-
-目录可以随着项目发展调整，但组件职责必须保持清晰。
-
----
-
-## 2. 组件职责
-
-- `sysmodule/`：DG-LAB BLE/WebSocket 连接、协议实现与设备生命周期；见 `sysmodule/AGENTS.md`
-- `nro/`：Switch Homebrew 前端、用户交互与调试；见 `nro/AGENTS.md`
-- `overlay/`：Tesla / Ultrahand 环境下的快速查看与控制；见 `overlay/AGENTS.md`
-- `mods/`：特定游戏的联动与事件检测；见 `mods/AGENTS.md`
-- `common/`：组件间共享的 IPC 定义和公共类型；见 `common/AGENTS.md`
-
----
+当前状态、构建、发布和测试入口见 [开发文档](docs/development.md)。
 
 ## 3. 核心架构原则
 
 ### 单一 DG-LAB 连接所有者
 
-DG-LAB 设备侧连接（BLE 或 WebSocket）只能由 Sysmodule 建立并持有；其它组件只能通过 IPC
-与 Sysmodule 通信，不得自己建立或持有这类连接。
-
-不要出现：
-
-    NRO → BLE/WebSocket
-    Overlay → BLE/WebSocket
-    Game Mod → BLE/WebSocket
-
-正确结构：
-
-    NRO ──────┐
-    Overlay ──┼── IPC → Sysmodule → BLE/WebSocket → DG-LAB 设备/APP
-    Game Mod ─┘
-
-否则会出现多个客户端争抢连接、连接状态不同步、重复实现协议、Game Mod 与前端耦合，
-以及"新增一个客户端就要改传输层"。
-
----
+设备侧 BLE/WebSocket 连接只能由 sysmodule 建立并持有；其它组件一律通过 IPC。
+WebSocket 模式下 Switch 是服务端、App 扫码连入，设备 BLE 由手机持有；BLE 模式下
+sysmodule 直连设备。保持协议层与 UI、Game Mod 与核心服务解耦，不为新增客户端重复实现传输。
 
 ### IPC 是内部公共 API
 
-Sysmodule 与其他组件之间的 IPC 必须视为正式 API。
+修改 IPC 必须同步公共类型、所有受影响客户端和 [IPC 文档](docs/ipc.md)，必要时增加
+接口版本，并构建、验证所有受影响组件。已发布命令号不得重排，新命令用新号；避免破坏兼容。
 
-修改 IPC 时：
+## 开发流程
 
-1. 修改公共类型；
-2. 更新客户端；
-3. 更新文档；
-4. 必要时增加协议版本；
-5. 构建并验证所有受影响组件。
+1. 修改前阅读相关目录的 AGENTS 与实现，确认组件归属、已有 API 和最小修改范围。
+2. 优先修改现有代码；发现架构冲突先说明，不能为局部功能破坏连接所有权或 IPC 边界。
+3. 修改后构建受影响组件、运行已有相关测试、检查 diff，并报告实际执行的验证。
+   无自动化测试时至少编译、静态检查，实机启动由用户验证。
+4. 源码、headers、IPC、Makefile、linker 或组件配置变化都必须重新构建相关组件。
+5. 改 sysmodule 后，实机验证前必须 `make -C sysmodule package`、覆盖 SD 卡上的
+   `atmosphere/contents/<TITLE_ID>/`、重启；仅更新 NRO 不会更新常驻服务。先核对日志构建标识。
+6. 写完 SD 卡必须 `diskutil eject /dev/diskN` 弹出整块磁盘并确认设备已消失再拔卡。
+   `unmount` 和 `unmountDisk` 不等于弹出。
 
-不要为了一个简单功能随意破坏已有 IPC 接口。
+## API、协议与版本
 
----
-
-## 4. Nintendo Switch / libnx 开发原则
-
-本项目使用：
-
-- devkitPro；
-- devkitA64；
-- libnx；
-- Nintendo Switch Homebrew 环境。
-
-libnx 是本项目主要的 Switch 系统服务/硬件访问接口。
-
-例如 Joy-Con 输入和六轴传感器应优先使用 libnx 提供的 HID API，而不是自行实现
-HOS HID 协议。libnx 和官方的 `switch-examples` 都可以作为 API 和用法的参考。
-
-### 禁止猜测 API
-
-尤其禁止凭记忆或猜测编写：
-
-- libnx API；
-- HOS service 名称；
-- IPC command；
-- HID API；
-- Bluetooth API；
-- Sysmodule API；
-- Nintendo 系统接口；
-- Switch 内部结构。
-
-如果 API 是否存在、参数、返回值或行为不确定：
-
-1. 搜索当前安装的 libnx headers；
-2. 搜索 libnx 源码；
-3. 搜索 switch-examples；
-4. 必要时查看相关项目源码；
-5. 确认后再实现。
-
-不要因为“API 名字看起来合理”就直接使用。
-
----
-
-## 6. DG-LAB 官方协议参考仓库
-
-DG-LAB 蓝牙协议（**BLE 模式**：sysmodule 直连设备，未实现）官方参考仓库为：
-
-    https://github.com/dungeonlab-open/dglab-bluetooth-protocol
-
-DG-LAB WebSocket 协议（**WebSocket 模式**：sysmodule 与手机 DG-LAB App 会话，已实现）
-官方参考仓库为：
-
-    https://github.com/dungeonlab-open/dglab-websocket-server
-
-两条协议线的名字不要混：
-**Socket 协议的版本号是 V3 / V4**（Wi-Fi + WebSocket，见`docs/dglab-socket.md`），
-**Coyote 是蓝牙协议的代号**（V2 / V3，见`docs/dglab-protocol.md`）。
-
-协议实现规则、验证要求和版本区分要求见 `sysmodule/AGENTS.md`。
-任何涉及 DG-LAB 官方协议的任务，必须先阅读该文件，再开始编码。
-
-## 7. 开发流程
-
-修改之前：阅读相关目录与现有实现 → 确定属于哪个组件 → 检查已有 API、代码模式与相关
-headers/examples → 明确修改范围 → 采用最小必要修改。
-
-修改之后：构建受影响的组件 → 运行已有测试 → 必要时实机验证 → 检查 `git diff` 确认没有
-无关修改 → 在最终报告里说明实际执行过的验证。
-
-实机验证的规矩：
-
-- **改了 sysmodule 就先 `make -C sysmodule package`、覆盖 SD 卡上的 `<TITLE_ID>/`、
-  再重启主机**，否则后台跑的还是旧二进制，验证到的是旧代码（症状与代码 bug 一样，见
-  `sysmodule/AGENTS.md` 的"改完必须重装"）。
-- **往 SD 卡拷完东西就 `diskutil eject /dev/diskN` 弹出整块磁盘再拔卡**，并确认 `/dev/diskN`
-  已经消失。三个命令都不一样：`diskutil unmount <某个卷>` 只卸那一个分区，`unmountDisk`
-  只卸该盘所有卷——磁盘设备仍然挂在系统里（FAT 卷还会被 DiskArbitration 自动挂回来），
-  **`eject` 才会把介质弹出去**。边写边拔会让文件停在半写状态，表面上看着像代码 bug。
-
-不要声称“已测试”而实际上没有运行测试。
-
----
-
-## 8. Build / Test
-
-每个组件都应尽量提供明确的构建方式。
-
-例如：
-
-    make
-
-或：
-
-    make -C sysmodule
-    make -C nro
-
-如果新增组件，应同时提供最基本的构建说明。
-
-修改以下内容后必须重新构建相关组件：
-
-- C/C++ 源代码；
-- headers；
-- IPC 定义；
-- Makefile；
-- linker 配置；
-- sysmodule 配置；
-- NRO 配置。
+- 使用 devkitPro、devkitA64、libnx；HID 等系统访问优先用 libnx。
+- 禁止猜 libnx API、HOS 服务名/命令、HID/Bluetooth/Sysmodule 接口或内部结构。
+  不确定时依次查已安装 headers、libnx 源码、官方 switch-examples，必要时查相关项目源码。
+- 涉及 DG-LAB 官方协议时先读 [sysmodule 规则](sysmodule/AGENTS.md)，按设备和版本核对
+  官方资料。蓝牙协议是 Coyote V2/V3，Socket 协议是 V3/V4，二者版本不对应。
+- BLE 实现或研究前先读 [固件研究](docs/ble-re.md) 的当前状态、连接所有权和诊断补丁，
+  遵守一个开机周期一条 BLE 路径、btm 会话不碰 btdrv、不冒用 ARUID、不留悬置连接的约束。
+- 版本敏感代码必须写明 HOS/游戏版本、Title ID、Build ID、Hook 和内存结构的适用范围，
+  不隐藏兼容限制。
+- 新依赖先确认现有能力不足、Switch/devkitA64 支持、许可证和构建方式；优先复用
+  devkitPro/libnx，避免为小功能引入大型库。
 
 ## 8.1 发布产物布局
 
-所有编译产物统一生成到仓库根目录的 `build/`，用根目录的 `make` 一次构建：
-
-    build/
-    ├── <TITLE_ID>/        Atmosphère sysmodule 目录
-    │   ├── exefs.nsp
-    │   ├── toolbox.json
-    │   └── flags/boot2.flag
-    ├── DGLAB-NX/         前端（整份拷到 SD:/switch/DGLAB-NX/）
-    │   ├── DGLAB-NX.nro
-    │   └── lang/          NRO 运行期读取的界面文案（每个语言一个 .json）
-    └── DGLAB-NX-Ovl.ovl   Overlay
-
-规则：
-
-- 根目录 `make` 构建全部组件并生成上述布局；`make clean` 清除这些产物；
-- 各组件用 `make -C <component> package` 只生成自己那一部分；
-- `build/DGLAB-NX/` 的内容与 SD 卡上的目录一一对应：`lang/` 的源头是仓库根目录的
-  `lang/`，随 `nro` 一起发布，必须和 `DGLAB-NX.nro` 一起安装，否则 NRO 启动时会报错
-  退出（见 `nro/AGENTS.md`）；
-- `<TITLE_ID>` 目录名必须由 `sysmodule/DGLAB-NX-Core.json` 推导，禁止在 Makefile、
-  脚本或文档里另写一份；
-- 发布由 GitHub Actions 的 tag 触发：tag 必须等于仓库根 `VERSION`（形如 `v<VERSION>`），
-  不一致时 CI 在编译前失败；CI 的组装脚本同样从 `build/` 推导 `<TITLE_ID>`，不得另写一份。
-  流程与产物见 `.github/workflows/release.yml` 与 `README.md` 的「发布」；
-- 发版有三条入口，但**只有一条规则**（tag == `VERSION`，annotated）：
-  `.github/workflows/tag-release.yml`（`workflow_dispatch` 带版本号）负责写 `VERSION`、
-  打 tag、推 tag，再触发 `.github/workflows/release.yml`——后者仍然只认 tag，本地手工
-  `git tag -a` 推上去完全等效；`.github/workflows/dev.yml` 是**开发包**：每次 push `main`
-  自动打包并更新一个滚动 pre-release（固定资产名，tag 是**轻量** `dev`——`git describe
-  --always --dirty` 只看 annotated tag，所以它移动不会污染任何构建的 build stamp）。dev 包
-  **不决定版本号、不创建正式 Release**，正式版仍然是"人决定版本号"的那一步；
-- `build/` 属于构建产物，不提交到 Git。
-
-如果当前没有自动化测试，应至少进行：
-
-- 编译检查；
-- 静态检查；
-- 实机启动验证（由用户进行测试）。
-
----
-
-## 9. 版本敏感内容
-
-Switch Homebrew 的以下内容可能高度依赖版本：
-
-- HOS 版本；
-- 游戏版本；
-- Title ID；
-- Build ID；
-- Hook 地址；
-- 内存结构；
-- Sysmodule 行为；
-- Bluetooth 行为。
-
-任何版本敏感代码都必须明确记录适用版本。
-
-不要为了让代码“看起来通用”而隐藏版本限制。
-
----
-
-## 10. 依赖管理
-
-添加第三方依赖之前：
-
-1. 确认现有依赖无法满足需求；
-2. 确认依赖支持 Nintendo Switch / devkitA64；
-3. 确认许可证；
-4. 确认构建方式；
-5. 尽量避免为了很小的功能引入大型依赖。
-
-优先复用 devkitPro / libnx 已有能力。
-
----
-
-## 11. 文档
-
-根 AGENTS.md 只描述项目规则和架构。
-
-详细技术资料放 `docs/`（现有清单见 `README.md` 的"文档"表）；迭代过程与历史原文放
-`docs/history.md`；文档该放哪一层的约定与审计清单见 `docs/docs-audit.md`。
-
-如果某个组件变得复杂，可以在该目录增加自己的：
-
-    <component>/AGENTS.md
-
-更深层的 AGENTS.md 可以补充或覆盖本文件中与该组件有关的规则。
-
----
-
-## 12. Git
-
-Commit 应该：
-
-- 小而明确；
-- 一个 commit 尽量只做一类事情；
-- 不提交构建产物；
-- 不提交密钥；
-- 不提交个人机器路径；
-- 不提交临时调试文件。
-
-推荐：
-
-    feat: add DG-LAB IPC service
-    feat: add Joy-Con motion input
-    fix: handle BLE disconnect
-    refactor: separate protocol layer
-    docs: document IPC protocol
-
----
-
-## 13. 安全与隐私
-
-禁止将以下内容提交到 Git：
-
-- API key；
-- Bluetooth 配对密钥；
-- 私人配置；
-- 私人设备信息；
-- 个人路径；
-- 调试日志中的敏感信息。
-
-测试所需的配置应通过：
-
-- 本地配置文件；
-- 环境变量；
-- 示例配置文件；
-
-提供。
-
----
-
-## 14. Agent 工作原则
-
-Agent 应优先修改现有代码，而不是重复实现已有功能。
-
-遵循：
-
-    Inspect
-      ↓
-    Understand
-      ↓
-    Plan
-      ↓
-    Minimal Change
-      ↓
-    Build
-      ↓
-    Test
-      ↓
-    Review Diff
-
-如果遇到不确定的 Nintendo / libnx / Bluetooth API，
-
-不要猜，先查资料、headers、源码和 examples。
-
-如果发现当前架构与任务要求冲突，应先说明冲突，再决定是否修改架构。
-
-不要为了完成一个局部任务而破坏：
-
-- Sysmodule 的单一 BLE 所有权；
-- IPC 边界；
-- 协议层与 UI 解耦；
-- Game Mod 与核心服务解耦。
-
-## 知识沉淀与 AGENTS.md 更新
-
-Agent 在研究外部资料、阅读源码或实际开发过程中，可能发现新的项目知识。
-
-不要因为发现新信息就自动修改 AGENTS.md。
-
-只有当某条信息满足以下条件时，才考虑更新 AGENTS.md：
-
-1. 对后续多个任务都有持续影响；
-2. 属于项目开发规则、架构约束、工作流程或重要约定；
-3. 不属于普通 API 文档或实现细节；
-4. 已通过可靠来源或实际测试验证；
-5. 如果不写入 AGENTS.md，未来 Agent 很可能重复犯同样的错误。
-
-例如应该写入的是"设备侧连接只能由 Sysmodule 持有""不允许猜测 libnx API""修改 IPC 必须
-同步更新客户端""Game Mod 必须记录游戏版本""协议必须先查官方仓库"这类规则；不应该写入的
-是 BLE characteristic UUID、某条指令的 payload、某游戏版本的 hook 地址、某个 API 的完整
-参数说明这类可以通过代码、头文件或官方文档查到的事实。
-- 一般性的第三方库使用方法。
-
-上述技术知识应分别记录到：
-
-- docs/dglab-protocol.md
-- docs/architecture.md
-- docs/ipc.md
-- docs/game-mods.md
-- 或对应组件的文档
-
-### 更新原则
-
-如果 Agent 发现某个现有规则不正确：
-
-1. 先确认事实；
-2. 判断这是规则错误还是普通技术知识；
-3. 如果属于持久性项目规则，可以修改 AGENTS.md；
-4. 修改 AGENTS.md 时保持最小 diff；
-5. 不要因为一次偶然情况添加过度具体的规则。
-
-如果只是普通技术知识，应更新对应的 docs，而不是 AGENTS.md。
-
----
-
-## 15. 当前项目优先级
-
-### 已完成
-
-1. 建立可编译的 Switch 项目骨架；
-2. 建立 Sysmodule；
-3. 建立 IPC；
-4. 实现可离线测试的 Socket V3 协议层（编解码、强度状态机、会话层）并在电脑上测试；
-5. 实现 WebSocket 模式传输；
-6. 把 V3 波形/强度数据接到 Socket 协议（复用协议层已有的波形编码）；
-7. 实现最小 NRO Client 的完整交互；
-8. 实现 Joy-Con 传感器输入（实机已确认能驱动输出，剩调参）；
-9. 实现基础 UI；
-10. NRO 元信息与版本管理；
-11. 浅色模式；
-12. NRO 侧抑制自动休眠；
-13. 波形密度的共用开关；
-14. 触屏玩法。
-
-### 未完成
-
-1. BLE 模式（sysmodule 直连设备）：**正式入口已实机跑通**（NRO 的 `bluetooth (direct)` 页 +
-   IPC 的 `BLE_START` / `BLE_STOP` / `BLE_STATUS` / `BLE_LIMIT`）：扫描、连接、GATT 表、流式
-   写入全通（2026-09-26 实机 `writes=172` 全 `rc=0`），玩法页的强度与波形原样走 BLE
-   （sysmodule 在会话激活时把 `NET_SEND` / `NET_WAVEFORM` 路由到本地协议层）。**两个前提**：
-   装 exefs 补丁（固件把"客户端在控制器层的激活"留给系统自身流程，第三方会被 `result=0x1A`
-   挡下）；**两个通道强度上限是设备侧的输出闸门，某一通道是 0 就等于那一通道不会有任何输出**
-   ——`BLE_START` 带上限对，运行中改走 `BLE_LIMIT`。**上限与强度是两组不同的变量**（上限是
-   设备强制的天花板、强度是页面上拨的数，各一对 A/B）。**"在输出"靠波形成立**：会话自己一直
-   播一段默认波形，所以强度与上限都是 0 时设备上的灯也会闪（2026-09-26 手机 App 的判据、
-   2026-09-27 主机侧实机确认）；不播波形时设备会丢掉整个通道的数据，那就真的什么都看不见
-   （漏掉这一点或上限为 0 的表现都是"连上了、有包、就是没感觉"）。**回包方向已查到底**：
-   设备一条通知/读应答都没回，B1 未验证，原因是连接归 btm、服务层不暴露其事件（静态分析结论见
-   `docs/ble-re.md` 的「连接所有权在服务层是封的」），所以 BLE 按**开环**设计：不做基于设备
-   当前值的相对加减，UI 不显示真实强度/电量。实现或继续研究前先读 `docs/ble-re.md` 的
-   「当前状态（2026-09-26）」「连接所有权在服务层是封的」与「诊断补丁」三节，并遵守那里的
-   安全规则（一个开机周期只走一条 BLE 路径、btm 会话不碰 btdrv、不要冒用 applet ARUID、
-   不要给 btm 留无法完成的连接）。**会话跨页存活**（2026-09-27，用户选定）：离开 `bluetooth
-   (direct)` 页不停会话，`X` 是唯一停键；菜单在那一行下加提示、体感/触屏页「连接」行显示
-   `蓝牙（直连）`、前端退出时补一次 `BLE_STOP`、sysmodule 看门狗放宽到 60 分钟——所以"玩法页
-   驱动 BLE"现在成立（代码已就位，实机待验）。下一步待做：**有感觉的那一档**（把强度拨到
-   20~30 以上，并在玩法页上跑一轮）；把补丁纳入发布产物。
-2. Game Mod / Overlay：由于游戏与 NRO 前端不能同时运行，因此需要由 Overlay 来监控和管理 Sysmodule 和 Game Mod 的运行状态，两者同时开发；
-3. 文档、测试和错误处理（持续）：随每条改动同步，不单独排期。
-
-### 已搁置
-
-#### Socket V4 协议
-
-由于 DG-LAB V4 App 向下兼容 Socket V3 协议，本条先不做。
-
-V4 的消息外壳（`hello` / `message` / `heartbeat` / `ping` /
-`pong` / `error` / `client_disconnected`）、`?tid=` 绑定与 V4 二维码。前置是官方
-beta 稳定与 App 版本确认；在此之前不写半成品代码，只保留 `docs/dglab-socket.md`
-里已核对的 V4 事实。验收：`tests/net` 增加 V4 外壳用例与回环端到端，再实机。
-
-#### 迁移到 deko3d UI 后端（路线 A）
-
-迁移收益较低，暂搁置。
-
-技术路线：把呈现层从 libnx framebuffer 换成 deko3d，绘制层
-（`canvas.c` 与三屏布局）零改动。做法：device/queue/swapchain + PitchLinear 图像，
-CPU 照旧写像素（`dkMemBlockGetCpuAddr` + `dkMemBlockFlushCpuCache`），再用
-`dkCmdBufCopyBufferToImage` / `dkCmdBufBlitImage` 上屏，不写着色器；`nro/Makefile`
-链接 `-ldeko3d`。开工前先确认 swapchain 是否接受 PitchLinear，不接受就退化成
-“CPU 写纹理 + blit”。评估与核对过的事实见 `docs/nro-ui.md` 的
-“framebuffer → deko3d 迁移评估”。路线 A 用 `deko3d.h` 的 C API 就够，不需要
-C++17，也不需要安装 portlibs。
-验收：三屏 × 720p/1080p 的实机截图与改造前一致，`tests/canvas` 不受影响。
+根 `make` 构建全部组件，组件 `make -C <component> package` 只组装自己的部分；
+产物统一在根 `build/`，不提交。`make clean` 清除产物。新增组件必须提供基本构建说明。
+
+```text
+build/
+├── <TITLE_ID>/{exefs.nsp,toolbox.json,flags/boot2.flag}
+├── DGLAB-NX/{DGLAB-NX.nro,lang/*.json}
+└── DGLAB-NX-Ovl.ovl
+```
+
+- Title ID 唯一来源是 `sysmodule/DGLAB-NX-Core.json`；Makefile、脚本和文档不得另写一份。
+- `lang/` 源头在仓库根目录，随 NRO 发布、一起安装；不能只复制 `.nro`。
+- 发行版本唯一来源是根 `VERSION`。正式 tag 必须是相应的 `v<VERSION>`，且为 annotated；
+  不一致时 CI 必须在编译前失败，发布脚本从 `build/` 推导 Title ID。
+- 手工 tag 与 `tag-release.yml` 遵循同一规则；`dev.yml` 的滚动 pre-release 不决定发行版本，
+  固定 `dev` tag 必须是 lightweight，避免污染 `git describe --always --dirty`。
+  具体入口见 [发布](docs/development.md#发布)。
+
+## 文档与知识沉淀
+
+- [README](README.md) 面向用户；`docs/*.md` 放技术依据、设计原因、实机结论与限制；
+  AGENTS 只放持久的开发规则。归属与删改标准见 [文档约定](docs/docs-audit.md)。
+- 不重复抄录代码和测试能说明的细节；临时过程交给 Git 历史。构建与开发流程放
+  `docs/development.md`，组件约束放对应 AGENTS。
+- 不因发现新知识自动改 AGENTS。只有信息持续影响多个任务、属于规则/架构/流程、
+  有可靠验证且不记录容易重犯时，才做最小更新。普通 API、UUID、payload、Hook 地址和
+  第三方库用法放技术文档；发现规则错误先核实再修正。
+
+## Git 与隐私
+
+Commit 小而明确，一次尽量一类改动，可用 `feat:`、`fix:`、`refactor:`、`docs:`。
+禁止提交构建产物、密钥、配对密钥、私人配置/设备信息、个人机器路径或临时调试文件；
+日志中的敏感信息也不得提交。测试配置用本地文件、环境变量或示例文件提供。

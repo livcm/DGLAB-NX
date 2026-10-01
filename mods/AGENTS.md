@@ -1,48 +1,8 @@
-# Game Mods AGENTS.md
+# Game Mod 工作规则
 
-## 职责
+`mods/<game>/` 负责事件检测、Hook、读取游戏状态，并将事件映射到 sysmodule IPC。
+不自行连接 DG-LAB 或实现底层协议；遵循 [根规则](../AGENTS.md)。
 
-`mods/` 存放特定游戏的联动代码。
-
-Game Mod 负责：
-
-- 游戏事件检测；
-- Hook；
-- 游戏内状态读取；
-- 根据游戏事件调用 Sysmodule IPC。
-
-## 交互模型
-
-    玩家受到伤害
-        ↓
-    Game Mod 检测事件
-        ↓
-    IPC: SendEffect(...)
-        ↓
-    Sysmodule
-        ↓
-    DG-LAB
-
-## 边界
-
-- Game Mod 不应该重新实现 DG-LAB Bluetooth Protocol。
-- Game Mod 不得自己建立或持有 DG-LAB 设备侧连接（BLE/WebSocket），只能通过 Sysmodule IPC
-  使用 DG-LAB 能力（见根 `AGENTS.md` 的"单一 DG-LAB 连接所有者"）。
-- Game Mod 只负责游戏事件到 Sysmodule IPC 的映射。
-
-## 版本信息
-
-每个游戏 Mod 必须明确记录：
-
-- Title ID；
-- 游戏版本；
-- Build ID（如果适用）；
-- Hook 地址或函数；
-- 相关内存结构；
-- 已验证的游戏版本；
-- 不兼容的游戏版本。
-
-绝不能假设不同游戏版本之间的地址、函数签名或内存布局保持不变。
-
-版本敏感内容应优先记录在对应 `mods/<game>/` 目录，或 `docs/game-mods.md`
-中，并在代码中明确适用版本。
+每个 Mod 必须在对应目录文档（或 `docs/game-mods.md`）记录 Title ID、游戏版本、
+适用的 Build ID、Hook 地址/函数、相关内存结构、已验证及不兼容版本；代码也要注明适用版本。
+禁止假设不同游戏版本的地址、函数签名和内存布局相同。
